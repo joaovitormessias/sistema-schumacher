@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(tree:*)",
+      "Bash(ls -la \"C:\\\\Users\\\\Geinfo\\\\schumacher-tur\\\\apps\\\\app\"\" 2>/dev/null || echo \"Directory listing failed \")",
+      "Bash(find:*)",
+      "Bash(findstr:*)",
+      "Bash(python3:*)",
+      "Bash(unzip:*)",
+      "Bash(ls:*)",
+      "Bash(test:*)",
+      "Bash(go build:*)"
+    ]
+  }
+}

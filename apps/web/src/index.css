@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+    font-family: 'Inter', sans-serif;
+  }
+
+  body {
+    @apply bg-white text-dark-800 antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: 'Outfit', sans-serif;
+    @apply font-bold text-dark-900;
+  }
+}
+
+@layer components {
+  .section-padding {
+    @apply py-20 px-4 sm:px-6 lg:px-8;
+  }
+
+  .container-max {
+    @apply max-w-7xl mx-auto;
+  }
+
+  .text-gradient-gold {
+    @apply bg-gradient-to-r from-gold-500 via-gold-400 to-gold-500 bg-clip-text text-transparent;
+  }
+
+  .btn-gold {
+    @apply bg-gradient-to-r from-gold-500 to-gold-400 text-white font-semibold px-8 py-4 rounded-xl shadow-gold hover:shadow-gold-lg transition-all duration-300 hover:scale-105;
+  }
+
+  .btn-outline-gold {
+    @apply border-2 border-gold-400 text-gold-600 font-semibold px-8 py-4 rounded-xl hover:bg-gold-50 transition-all duration-300;
+  }
+
+  .card-premium {
+    @apply bg-white rounded-2xl shadow-soft p-6 border border-light-300 hover:shadow-soft-lg transition-all duration-300;
+  }
+
+  .card-gold-border {
+    @apply bg-white rounded-2xl shadow-soft p-6 border-2 border-gold-200 hover:border-gold-400 transition-all duration-300;
+  }
+
+  .section-title {
+    @apply text-4xl sm:text-5xl font-bold text-dark-900 mb-4;
+  }
+
+  .section-subtitle {
+    @apply text-lg text-dark-500 max-w-2xl mx-auto;
+  }
+
+  .gold-accent {
+    @apply text-gold-500 font-semibold;
+  }
+}
+
+@layer utilities {
+  .animate-fade-in-up {
+    animation: fadeInUp 0.6s ease-out forwards;
+  }
+
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+}
