@@ -44,11 +44,7 @@ export default function TableActionButtons({
           <button
             className="icon-button"
             type="button"
-            onClick={() => {
-              if (window.confirm("Deseja desativar este item?")) {
-                onDeactivate();
-              }
-            }}
+            onClick={onDeactivate}
             aria-label={deactivateLabel}
             title={deactivateLabel}
           >
@@ -59,11 +55,7 @@ export default function TableActionButtons({
         <button
           className="icon-button"
           type="button"
-          onClick={() => {
-            if (window.confirm("Deseja reativar este item?")) {
-              onRestore();
-            }
-          }}
+          onClick={onRestore}
           aria-label={restoreLabel}
           title={restoreLabel}
         >

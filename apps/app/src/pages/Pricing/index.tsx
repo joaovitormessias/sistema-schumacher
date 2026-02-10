@@ -1,7 +1,7 @@
 ﻿import { useEffect, useMemo, useState, type FormEvent } from "react";
 import EmptyState from "../../components/EmptyState";
 import InlineAlert from "../../components/InlineAlert";
-import LoadingState from "../../components/LoadingState";
+import { Skeleton } from "../../components/feedback/SkeletonLoader";
 import PageHeader from "../../components/PageHeader";
 import SearchToolbar from "../../components/input/SearchToolbar";
 import useToast from "../../hooks/useToast";
@@ -239,7 +239,15 @@ export default function Pricing() {
         />
 
         {loading ? (
-          <LoadingState label="Carregando regras..." />
+          <div className="card-grid">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Skeleton.Card key={index}>
+                <Skeleton.Text lines={2} />
+                <Skeleton.Text lines={3} className="section-spacing" />
+                <Skeleton.Button width={110} className="section-spacing" />
+              </Skeleton.Card>
+            ))}
+          </div>
         ) : filtered.length === 0 ? (
           <EmptyState
             title="Nenhuma regra encontrada"

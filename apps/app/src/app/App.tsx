@@ -1,42 +1,51 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import LoadingState from "../components/LoadingState";
 import Layout from "./Layout";
-import Dashboard from "../pages/Dashboard";
-import Trips from "../pages/Trips";
-import RoutesPage from "../pages/Routes";
-import Buses from "../pages/Buses";
-import Drivers from "../pages/Drivers";
-import Bookings from "../pages/Bookings";
-import Payments from "../pages/Payments";
-import Reports from "../pages/Reports";
-import Pricing from "../pages/Pricing";
-import TripAdvances from "../pages/TripAdvances";
-import TripExpenses from "../pages/TripExpenses";
-import TripSettlements from "../pages/TripSettlements";
-import DriverCards from "../pages/DriverCards";
-import TripValidations from "../pages/TripValidations";
-import FiscalDocuments from "../pages/FiscalDocuments";
+
+const Dashboard = lazy(() => import("../pages/Dashboard"));
+const Trips = lazy(() => import("../pages/Trips"));
+const RoutesPage = lazy(() => import("../pages/Routes"));
+const Buses = lazy(() => import("../pages/Buses"));
+const Drivers = lazy(() => import("../pages/Drivers"));
+const Bookings = lazy(() => import("../pages/Bookings"));
+const Payments = lazy(() => import("../pages/Payments"));
+const Reports = lazy(() => import("../pages/Reports"));
+const Pricing = lazy(() => import("../pages/Pricing"));
+const Financial = lazy(() => import("../pages/Financial"));
+const Warehouse = lazy(() => import("../pages/Warehouse"));
 
 export default function App() {
   return (
     <Layout>
-      <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/trips" element={<Trips />} />
-        <Route path="/routes" element={<RoutesPage />} />
-        <Route path="/buses" element={<Buses />} />
-        <Route path="/drivers" element={<Drivers />} />
-        <Route path="/bookings" element={<Bookings />} />
-        <Route path="/payments" element={<Payments />} />
-        <Route path="/reports" element={<Reports />} />
-        <Route path="/pricing" element={<Pricing />} />
-        <Route path="/trip-advances" element={<TripAdvances />} />
-        <Route path="/trip-expenses" element={<TripExpenses />} />
-        <Route path="/trip-settlements" element={<TripSettlements />} />
-        <Route path="/driver-cards" element={<DriverCards />} />
-        <Route path="/trip-validations" element={<TripValidations />} />
-        <Route path="/fiscal-documents" element={<FiscalDocuments />} />
-      </Routes>
+      <Suspense
+        fallback={
+          <section className="page">
+            <LoadingState label="Carregando modulo..." />
+          </section>
+        }
+      >
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/trips" element={<Trips />} />
+          <Route path="/routes" element={<RoutesPage />} />
+          <Route path="/buses" element={<Buses />} />
+          <Route path="/drivers" element={<Drivers />} />
+          <Route path="/bookings" element={<Bookings />} />
+          <Route path="/payments" element={<Payments />} />
+          <Route path="/reports" element={<Reports />} />
+          <Route path="/pricing" element={<Pricing />} />
+          <Route path="/financial" element={<Financial />} />
+          <Route path="/warehouse" element={<Warehouse />} />
+          <Route path="/trip-advances" element={<Navigate to="/financial?tab=advances" replace />} />
+          <Route path="/trip-expenses" element={<Navigate to="/financial?tab=expenses" replace />} />
+          <Route path="/trip-settlements" element={<Navigate to="/financial?tab=settlements" replace />} />
+          <Route path="/driver-cards" element={<Navigate to="/financial?tab=cards" replace />} />
+          <Route path="/trip-validations" element={<Navigate to="/financial?tab=validations" replace />} />
+          <Route path="/fiscal-documents" element={<Navigate to="/financial?tab=documents" replace />} />
+        </Routes>
+      </Suspense>
     </Layout>
   );
 }

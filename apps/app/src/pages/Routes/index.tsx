@@ -84,9 +84,10 @@ export default function RoutesPage() {
         destination_city: item.destination_city,
       })}
       getId={(item) => item.id}
-      fetchItems={async ({ page, pageSize }) =>
-        apiGet<RouteItem[]>(`/routes?limit=${pageSize}&offset=${page * pageSize}`)
-      }
+      fetchItems={async ({ page, pageSize, search }) => {
+        const searchParam = search ? `&search=${encodeURIComponent(search)}` : "";
+        return apiGet<RouteItem[]>(`/routes?limit=${pageSize}&offset=${page * pageSize}${searchParam}`);
+      }}
       createItem={(form) => apiPost("/routes", form)}
       updateItem={(id, form) => apiPatch(`/routes/${id}`, form)}
       softDeleteItem={(item) => apiPatch(`/routes/${item.id}`, { is_active: false })}
@@ -100,6 +101,8 @@ export default function RoutesPage() {
       visibilityOptions={visibilityOptions}
       visibilityDefault="active"
       layout="split"
+      queryKey={["routes"]}
+      serverSideSearch
     />
   );
 }

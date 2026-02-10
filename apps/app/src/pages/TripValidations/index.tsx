@@ -18,7 +18,11 @@ type TripItem = { id: string; route_id: string; departure_at: string };
 
 type RouteItem = { id: string; origin_city: string; destination_city: string };
 
-export default function TripValidations() {
+type TripValidationsProps = {
+  embedded?: boolean;
+};
+
+export default function TripValidations({ embedded = false }: TripValidationsProps) {
   const [trips, setTrips] = useState<TripItem[]>([]);
   const [routes, setRoutes] = useState<RouteItem[]>([]);
 
@@ -114,6 +118,7 @@ export default function TripValidations() {
 
   return (
     <CRUDListPage<TripValidation, TripValidationForm>
+      hidePageHeader={embedded}
       title="Validações de Viagem"
       subtitle="Conferência de km e passageiros."
       formTitle="Nova validação"

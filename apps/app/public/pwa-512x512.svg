@@ -1,0 +1,11 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Schumacher Turismo">
+  <rect width="512" height="512" rx="72" fill="#0f766e"/>
+  <path d="M88 299h336c0 66-54 120-120 120H208c-66 0-120-54-120-120z" fill="#ffffff" opacity="0.96"/>
+  <path d="M80 276c0-74 60-134 134-134h84c74 0 134 60 134 134v23H80v-23z" fill="#dff8f5"/>
+  <circle cx="168" cy="335" r="30" fill="#0b5f59"/>
+  <circle cx="344" cy="335" r="30" fill="#0b5f59"/>
+  <rect x="125" y="175" width="262" height="70" rx="16" fill="#ffffff"/>
+  <rect x="145" y="193" width="58" height="34" rx="7" fill="#9ad8d2"/>
+  <rect x="227" y="193" width="58" height="34" rx="7" fill="#9ad8d2"/>
+  <rect x="309" y="193" width="58" height="34" rx="7" fill="#9ad8d2"/>
+</svg>

@@ -1,12 +1,16 @@
-﻿import { useEffect, useMemo, useState, type CSSProperties } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import EmptyState from "../../components/EmptyState";
 import FormField from "../../components/FormField";
 import InlineAlert from "../../components/InlineAlert";
-import LoadingState from "../../components/LoadingState";
 import PageHeader from "../../components/PageHeader";
 import StatusBadge, { type StatusTone } from "../../components/StatusBadge";
-import { formatCurrency, formatDateTime } from "../../utils/format";
+import { Skeleton } from "../../components/feedback/SkeletonLoader";
+import DataTable, { type DataTableColumn } from "../../components/table/DataTable";
+import VirtualDataTable from "../../components/data-display/VirtualDataTable";
+import useMediaQuery from "../../hooks/useMediaQuery";
+import { useTrips } from "../../hooks/useTrips";
 import { apiBaseUrl, apiGet } from "../../services/api";
+import { formatCurrency, formatDateTime } from "../../utils/format";
 
 type TripItem = { id: string; departure_at: string };
 
@@ -27,31 +31,44 @@ type ReportRow = {
 };
 
 export default function Reports() {
-  const [trips, setTrips] = useState<TripItem[]>([]);
+  const tripsQuery = useTrips(200, 0);
+  const trips = (tripsQuery.data as TripItem[] | undefined) ?? [];
+  const isMobile = useMediaQuery("(max-width: 900px)");
   const [rows, setRows] = useState<ReportRow[]>([]);
   const [tripId, setTripId] = useState("");
+  const [autoSelectLatest, setAutoSelectLatest] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const tripsLoadError = (tripsQuery.error as Error | undefined)?.message || null;
 
   useEffect(() => {
-    apiGet<TripItem[]>("/trips?limit=200&offset=0")
-      .then(setTrips)
-      .catch((err) => setError(err.message || "Erro ao carregar viagens"));
-  }, []);
+    if (tripId || trips.length === 0 || !autoSelectLatest) return;
+    const latest = [...trips].sort(
+      (a, b) => new Date(b.departure_at).getTime() - new Date(a.departure_at).getTime()
+    )[0];
+    if (latest?.id) {
+      setTripId(latest.id);
+    }
+  }, [autoSelectLatest, tripId, trips]);
 
-  const loadReport = async () => {
-    if (!tripId) return;
+  const loadReport = async (targetTripId: string) => {
+    if (!targetTripId) return;
     try {
       setLoading(true);
-      setError(null);
-      const data = await apiGet<ReportRow[]>(`/reports/passengers?trip_id=${tripId}`);
+      setReportError(null);
+      const data = await apiGet<ReportRow[]>(`/reports/passengers?trip_id=${targetTripId}`);
       setRows(data);
     } catch (err: any) {
-      setError(err.message || "Erro ao gerar relatório");
+      setReportError(err.message || "Erro ao gerar relatorio");
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!tripId) return;
+    void loadReport(tripId);
+  }, [tripId]);
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -72,10 +89,29 @@ export default function Reports() {
     return "neutral";
   };
 
+  const columns: DataTableColumn<ReportRow>[] = [
+    { label: "Poltrona", accessor: (row) => row.seat_number, width: "90px" },
+    { label: "Passageiro", accessor: (row) => row.name },
+    {
+      label: "Status pagamento",
+      render: (row) => (
+        <StatusBadge tone={statusTone(row.payment_stage)}>{row.payment_stage}</StatusBadge>
+      ),
+    },
+    {
+      label: "Pago",
+      accessor: (row) => formatCurrency(row.amount_paid),
+      align: "right",
+      width: "130px",
+    },
+  ];
+
+  const shouldVirtualize = !isMobile && rows.length > 100;
+
   return (
     <section className="page">
       <PageHeader
-        title="Relatórios"
+        title="Relatorios"
         subtitle="Manifesto de passageiros e status financeiro."
         meta={<span className="badge">MVP</span>}
       />
@@ -89,19 +125,35 @@ export default function Reports() {
             <select
               className="input"
               value={tripId}
-              onChange={(e) => setTripId(e.target.value)}
+              onChange={(e) => {
+                setAutoSelectLatest(true);
+                setTripId(e.target.value);
+              }}
             >
               <option value="">Selecione a viagem</option>
               {trips.map((trip) => (
                 <option key={trip.id} value={trip.id}>
-                  {formatDateTime(trip.departure_at)} • {trip.id.slice(0, 8)}
+                  {formatDateTime(trip.departure_at)} - {trip.id.slice(0, 8)}
                 </option>
               ))}
             </select>
           </FormField>
           <div className="form-actions full-span">
-            <button className="button" type="button" onClick={loadReport} disabled={!tripId}>
-              Gerar relatório
+            <button className="button" type="button" onClick={() => loadReport(tripId)} disabled={!tripId}>
+              Atualizar relatorio
+            </button>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => {
+                setAutoSelectLatest(false);
+                setTripId("");
+                setRows([]);
+                setReportError(null);
+              }}
+              disabled={!tripId && rows.length === 0}
+            >
+              Limpar selecao
             </button>
             {tripId ? (
               <a
@@ -117,13 +169,14 @@ export default function Reports() {
         </div>
       </div>
 
-      {error ? <InlineAlert tone="error">{error}</InlineAlert> : null}
+      {tripsLoadError ? <InlineAlert tone="error">{tripsLoadError}</InlineAlert> : null}
+      {reportError ? <InlineAlert tone="error">{reportError}</InlineAlert> : null}
 
       {loading ? (
-        <LoadingState label="Gerando relatório..." />
+        <Skeleton.Table rows={8} columns={4} />
       ) : rows.length === 0 ? (
         <EmptyState
-          title="Nenhum relatório gerado"
+          title="Nenhum relatorio gerado"
           description="Selecione uma viagem para visualizar o manifesto."
         />
       ) : (
@@ -146,27 +199,31 @@ export default function Reports() {
             </div>
           </div>
 
-          <div
-            className="table"
-            style={{ "--table-columns": "repeat(4, minmax(0, 1fr))" } as CSSProperties}
-          >
-            <div className="table-row table-head">
-              <div className="table-cell">Poltrona</div>
-              <div className="table-cell">Passageiro</div>
-              <div className="table-cell">Status pagamento</div>
-              <div className="table-cell">Pago</div>
-            </div>
-            {rows.map((row) => (
-              <div className="table-row" key={row.passenger_id}>
-                <div className="table-cell" data-label="Poltrona">{row.seat_number}</div>
-                <div className="table-cell" data-label="Passageiro">{row.name}</div>
-                <div className="table-cell" data-label="Status">
-                  <StatusBadge tone={statusTone(row.payment_stage)}>{row.payment_stage}</StatusBadge>
-                </div>
-                <div className="table-cell" data-label="Pago">{formatCurrency(row.amount_paid)}</div>
-              </div>
-            ))}
-          </div>
+          {shouldVirtualize ? (
+            <VirtualDataTable
+              columns={columns}
+              rows={rows}
+              rowKey={(row) => row.passenger_id}
+              emptyState={
+                <EmptyState
+                  title="Nenhum passageiro encontrado"
+                  description="A viagem selecionada ainda nao possui registros."
+                />
+              }
+            />
+          ) : (
+            <DataTable
+              columns={columns}
+              rows={rows}
+              rowKey={(row) => row.passenger_id}
+              emptyState={
+                <EmptyState
+                  title="Nenhum passageiro encontrado"
+                  description="A viagem selecionada ainda nao possui registros."
+                />
+              }
+            />
+          )}
         </div>
       )}
     </section>

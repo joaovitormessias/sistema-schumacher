@@ -22,7 +22,11 @@ type TripItem = { id: string; route_id: string; departure_at: string };
 
 type RouteItem = { id: string; origin_city: string; destination_city: string };
 
-export default function FiscalDocuments() {
+type FiscalDocumentsProps = {
+  embedded?: boolean;
+};
+
+export default function FiscalDocuments({ embedded = false }: FiscalDocumentsProps) {
   const [trips, setTrips] = useState<TripItem[]>([]);
   const [routes, setRoutes] = useState<RouteItem[]>([]);
 
@@ -122,6 +126,7 @@ export default function FiscalDocuments() {
 
   return (
     <CRUDListPage<FiscalDocument, FiscalDocumentForm>
+      hidePageHeader={embedded}
       title="Documentos Fiscais"
       subtitle="Registro básico de NFS-e, CT-e e outros documentos."
       formTitle="Novo documento"

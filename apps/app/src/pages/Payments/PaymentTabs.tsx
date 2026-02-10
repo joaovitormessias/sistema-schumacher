@@ -1,4 +1,4 @@
-type TabKey = "AUTOMATIC" | "MANUAL";
+﻿type TabKey = "AUTOMATIC" | "MANUAL";
 
 type PaymentTabsProps = {
   activeTab: TabKey;
@@ -15,7 +15,7 @@ export default function PaymentTabs({ activeTab, onChange }: PaymentTabsProps) {
         role="tab"
         aria-selected={activeTab === "AUTOMATIC"}
       >
-        Automático (PIX/CARTÃO)
+        Automatico (PIX/CARTAO)
       </button>
       <button
         type="button"

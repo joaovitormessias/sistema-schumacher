@@ -10,7 +10,8 @@
       "Bash(unzip:*)",
       "Bash(ls:*)",
       "Bash(test:*)",
-      "Bash(go build:*)"
+      "Bash(go build:*)",
+      "Bash(python -c:*)"
     ]
   }
 }

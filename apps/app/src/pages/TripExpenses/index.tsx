@@ -5,7 +5,10 @@ import CRUDListPage, {
   type VisibilityOption,
 } from "../../components/layout/CRUDListPage";
 import StatusBadge from "../../components/StatusBadge";
+import FileUpload from "../../components/form/FileUpload";
 import useToast from "../../hooks/useToast";
+import useMediaQuery from "../../hooks/useMediaQuery";
+import { useFinancialFiltersOptional } from "../Financial/FinancialContext";
 import { apiGet, apiPatch, apiPost } from "../../services/api";
 import type { DriverCard, TripExpense } from "../../types/financial";
 import {
@@ -25,6 +28,7 @@ type TripExpenseForm = {
   payment_method: string;
   driver_card_id: string;
   receipt_number: string;
+  receipt_photo: File | null;
   notes: string;
 };
 
@@ -34,8 +38,15 @@ type RouteItem = { id: string; origin_city: string; destination_city: string };
 
 type DriverItem = { id: string; name: string };
 
-export default function TripExpenses() {
+type TripExpensesProps = {
+  embedded?: boolean;
+};
+
+export default function TripExpenses({ embedded = false }: TripExpensesProps) {
   const toast = useToast();
+  const isMobile = useMediaQuery("(max-width: 900px)");
+  const financialFilters = useFinancialFiltersOptional();
+  const tripFilter = embedded ? financialFilters?.tripFilter ?? "" : "";
   const [trips, setTrips] = useState<TripItem[]>([]);
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [drivers, setDrivers] = useState<DriverItem[]>([]);
@@ -64,9 +75,9 @@ export default function TripExpenses() {
     if (!trip) return formatShortId(tripId);
     const route = routeMap.get(trip.route_id);
     const routeLabel = route
-      ? `${route.origin_city} → ${route.destination_city}`
+      ? `${route.origin_city} -> ${route.destination_city}`
       : formatShortId(trip.route_id);
-    return `${routeLabel} • ${formatDateTime(trip.departure_at)}`;
+    return `${routeLabel} - ${formatDateTime(trip.departure_at)}`;
   };
 
   const formFields: FormFieldConfig<TripExpenseForm>[] = useMemo(
@@ -104,11 +115,11 @@ export default function TripExpenses() {
         required: true,
         options: [
           { label: "Selecione o tipo", value: "" },
-          { label: "Combustível", value: "FUEL" },
-          { label: "Alimentação", value: "FOOD" },
+          { label: "Combustivel", value: "FUEL" },
+          { label: "Alimentacao", value: "FOOD" },
           { label: "Hospedagem", value: "LODGING" },
-          { label: "Pedágio", value: "TOLL" },
-          { label: "Manutenção", value: "MAINTENANCE" },
+          { label: "Pedagio", value: "TOLL" },
+          { label: "Manutencao", value: "MAINTENANCE" },
           { label: "Outros", value: "OTHER" },
         ],
       },
@@ -127,19 +138,19 @@ export default function TripExpenses() {
         options: [
           { label: "Selecione a forma", value: "" },
           { label: "Adiantamento", value: "ADVANCE" },
-          { label: "Cartão", value: "CARD" },
+          { label: "Cartao", value: "CARD" },
           { label: "Pessoal", value: "PERSONAL" },
           { label: "Empresa", value: "COMPANY" },
         ],
       },
       {
         key: "driver_card_id",
-        label: "Cartão do motorista",
+        label: "Cartao do motorista",
         type: "select",
         options: [
-          { label: "Selecionar cartão (se aplicável)", value: "" },
+          { label: "Selecionar cartao (se aplicavel)", value: "" },
           ...cards.map((card) => ({
-            label: `${card.card_number} • ${card.card_type}`,
+            label: `${card.card_number} - ${card.card_type}`,
             value: card.id,
           })),
         ],
@@ -152,19 +163,35 @@ export default function TripExpenses() {
       },
       {
         key: "description",
-        label: "Descrição",
+        label: "Descricao",
         type: "textarea",
         required: true,
         colSpan: "full",
       },
       {
         key: "receipt_number",
-        label: "Número do comprovante",
+        label: "Numero do comprovante",
         type: "text",
       },
       {
+        key: "receipt_photo",
+        label: "Foto do comprovante",
+        colSpan: "full",
+        hint: "No celular, voce pode abrir a camera para registrar a nota.",
+        customRender: ({ value, onChange }) => (
+          <FileUpload
+            value={(value as File | null) ?? null}
+            onChange={onChange as (file: File | null) => void}
+            accept="image/*"
+            capture="environment"
+            hint="Arraste a imagem ou abra a camera do dispositivo."
+          />
+        ),
+        showWhen: "create",
+      },
+      {
         key: "notes",
-        label: "Observações",
+        label: "Observacoes",
         type: "textarea",
         colSpan: "full",
       },
@@ -173,7 +200,7 @@ export default function TripExpenses() {
   );
 
   const columns: ColumnConfig<TripExpense>[] = [
-    { label: "Viagem", accessor: (item) => tripLabel(item.trip_id) },
+    { label: "Viagem", accessor: (item) => tripLabel(item.trip_id), hideOnMobile: true },
     {
       label: "Motorista",
       accessor: (item) => driverMap.get(item.driver_id) ?? formatShortId(item.driver_id),
@@ -186,16 +213,17 @@ export default function TripExpenses() {
     {
       label: "Pagamento",
       accessor: (item) => paymentMethodLabel[item.payment_method] ?? item.payment_method,
+      hideOnMobile: true,
     },
     {
-      label: "Aprovação",
+      label: "Aprovacao",
       render: (item) => (
         <StatusBadge tone={item.is_approved ? "success" : "warning"}>
           {item.is_approved ? "Aprovada" : "Pendente"}
         </StatusBadge>
       ),
     },
-    { label: "Data", accessor: (item) => formatDateTime(item.expense_date) },
+    { label: "Data", accessor: (item) => formatDateTime(item.expense_date), hideOnMobile: true },
   ];
 
   const visibilityOptions: VisibilityOption<TripExpense>[] = [
@@ -205,7 +233,7 @@ export default function TripExpenses() {
   ];
 
   const handleApprove = async (item: TripExpense) => {
-    if (!window.confirm("Confirmar aprovação da despesa?")) return;
+    if (!window.confirm("Confirmar aprovacao da despesa?")) return;
     try {
       await apiPost(`/trip-expenses/${item.id}/approve`, {});
       toast.success("Despesa aprovada.");
@@ -217,7 +245,8 @@ export default function TripExpenses() {
 
   return (
     <CRUDListPage<TripExpense, TripExpenseForm>
-      key={reloadKey}
+      key={`${reloadKey}-${tripFilter}`}
+      hidePageHeader={embedded}
       title="Despesas de Viagem"
       subtitle="Controle de despesas registradas durante a viagem."
       formTitle="Nova despesa"
@@ -226,7 +255,7 @@ export default function TripExpenses() {
       updateLabel="Salvar despesa"
       emptyState={{
         title: "Nenhuma despesa encontrada",
-        description: "Cadastre uma despesa para começar.",
+        description: "Cadastre uma despesa para comecar.",
       }}
       formFields={formFields}
       columns={columns}
@@ -240,6 +269,7 @@ export default function TripExpenses() {
         payment_method: "ADVANCE",
         driver_card_id: "",
         receipt_number: "",
+        receipt_photo: null,
         notes: "",
       }}
       mapItemToForm={(item) => ({
@@ -252,12 +282,14 @@ export default function TripExpenses() {
         payment_method: item.payment_method,
         driver_card_id: item.driver_card_id ?? "",
         receipt_number: item.receipt_number ?? "",
+        receipt_photo: null,
         notes: item.notes ?? "",
       })}
       getId={(item) => item.id}
       fetchItems={async ({ page, pageSize }) => {
+        const tripFilterQuery = tripFilter ? `&trip_id=${encodeURIComponent(tripFilter)}` : "";
         const data = await apiGet<TripExpense[]>(
-          `/trip-expenses?limit=${pageSize}&offset=${page * pageSize}`
+          `/trip-expenses?limit=${pageSize}&offset=${page * pageSize}${tripFilterQuery}`
         );
         const [tripsData, routesData, driversData, cardsData] = await Promise.all([
           apiGet<TripItem[]>("/trips?limit=500&offset=0"),
@@ -309,6 +341,7 @@ export default function TripExpenses() {
       }}
       visibilityOptions={visibilityOptions}
       visibilityDefault="pending"
+      layout={isMobile ? "stacked" : "split"}
       rowActions={(item) =>
         !item.is_approved ? (
           <button

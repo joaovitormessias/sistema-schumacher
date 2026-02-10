@@ -1,187 +1,208 @@
 package main
 
 import (
-  "context"
-  "fmt"
-  "log"
-  "net/http"
-  "strings"
-  "time"
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
 
-  "github.com/go-chi/chi/v5"
-  "github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 
-  "schumacher-tur/api/internal/auth"
-  "schumacher-tur/api/internal/advance_returns"
-  "schumacher-tur/api/internal/bookings"
-  "schumacher-tur/api/internal/buses"
-  "schumacher-tur/api/internal/driver_cards"
-  "schumacher-tur/api/internal/drivers"
-  "schumacher-tur/api/internal/fiscal_documents"
-  "schumacher-tur/api/internal/payments"
-  "schumacher-tur/api/internal/pricing"
-  "schumacher-tur/api/internal/reports"
-  "schumacher-tur/api/internal/routes"
-  "schumacher-tur/api/internal/shared/config"
-  "schumacher-tur/api/internal/shared/db"
-  httpx "schumacher-tur/api/internal/shared/http"
-  "schumacher-tur/api/internal/trip_advances"
-  "schumacher-tur/api/internal/trip_expenses"
-  "schumacher-tur/api/internal/trip_settlements"
-  "schumacher-tur/api/internal/trips"
-  "schumacher-tur/api/internal/trip_validations"
-  "schumacher-tur/api/internal/users"
+	"schumacher-tur/api/internal/advance_returns"
+	"schumacher-tur/api/internal/auth"
+	"schumacher-tur/api/internal/bookings"
+	"schumacher-tur/api/internal/buses"
+	"schumacher-tur/api/internal/driver_cards"
+	"schumacher-tur/api/internal/drivers"
+	"schumacher-tur/api/internal/fiscal_documents"
+	"schumacher-tur/api/internal/invoices"
+	"schumacher-tur/api/internal/payments"
+	"schumacher-tur/api/internal/pricing"
+	"schumacher-tur/api/internal/products"
+	"schumacher-tur/api/internal/purchase_orders"
+	"schumacher-tur/api/internal/reports"
+	"schumacher-tur/api/internal/routes"
+	"schumacher-tur/api/internal/service_orders"
+	"schumacher-tur/api/internal/shared/config"
+	"schumacher-tur/api/internal/shared/db"
+	httpx "schumacher-tur/api/internal/shared/http"
+	"schumacher-tur/api/internal/suppliers"
+	"schumacher-tur/api/internal/trip_advances"
+	"schumacher-tur/api/internal/trip_expenses"
+	"schumacher-tur/api/internal/trip_settlements"
+	"schumacher-tur/api/internal/trip_validations"
+	"schumacher-tur/api/internal/trips"
+	"schumacher-tur/api/internal/users"
 )
 
 func main() {
-  cfg, err := config.Load()
-  if err != nil {
-    log.Fatalf("config error: %v", err)
-  }
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("config error: %v", err)
+	}
 
-  ctx := context.Background()
-  pool, err := db.NewPool(ctx, cfg.DatabaseURL)
-  if err != nil {
-    log.Fatalf("db error: %v", err)
-  }
-  defer pool.Close()
+	ctx := context.Background()
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("db error: %v", err)
+	}
+	defer pool.Close()
 
-  authMiddleware, err := auth.NewAuthenticator(cfg.SupabaseJWKSURL, cfg.SupabaseIssuer, cfg.SupabaseAudience, cfg.AuthDisabled)
-  if err != nil {
-    log.Fatalf("auth error: %v", err)
-  }
+	authMiddleware, err := auth.NewAuthenticator(cfg.SupabaseJWKSURL, cfg.SupabaseIssuer, cfg.SupabaseAudience, cfg.AuthDisabled)
+	if err != nil {
+		log.Fatalf("auth error: %v", err)
+	}
 
-  r := chi.NewRouter()
-  r.Use(middleware.RequestID)
-  r.Use(middleware.RealIP)
-  r.Use(middleware.Logger)
-  r.Use(middleware.Recoverer)
-  r.Use(corsMiddleware(cfg))
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(corsMiddleware(cfg))
 
-  r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
-    httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-  })
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
 
-  r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
-    if err := pool.Ping(ctx); err != nil {
-      httpx.WriteError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "database not ready", err.Error())
-      return
-    }
-    httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-  })
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if err := pool.Ping(ctx); err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE", "database not ready", err.Error())
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
 
-  paymentsSvc := payments.NewService(payments.NewRepository(pool), cfg)
-  paymentsHandler := payments.NewHandler(paymentsSvc, cfg.AbacatePayPublicKey, cfg.AbacatePayWebhookSecret)
-  paymentsHandler.RegisterWebhooks(r)
+	paymentsSvc := payments.NewService(payments.NewRepository(pool), cfg)
+	paymentsHandler := payments.NewHandler(paymentsSvc, cfg.AbacatePayPublicKey, cfg.AbacatePayWebhookSecret)
+	paymentsHandler.RegisterWebhooks(r)
 
-  r.Group(func(pr chi.Router) {
-    pr.Use(authMiddleware.Middleware)
+	r.Group(func(pr chi.Router) {
+		pr.Use(authMiddleware.Middleware)
 
-    routesHandler := routes.NewHandler(routes.NewService(routes.NewRepository(pool)))
-    busesHandler := buses.NewHandler(buses.NewService(buses.NewRepository(pool)))
-    driversHandler := drivers.NewHandler(drivers.NewService(drivers.NewRepository(pool)))
-    tripsHandler := trips.NewHandler(trips.NewService(trips.NewRepository(pool)))
-    pricingSvc := pricing.NewService(pricing.NewRepository(pool))
-    bookingsHandler := bookings.NewHandler(bookings.NewService(bookings.NewRepository(pool), pricingSvc))
-    reportsHandler := reports.NewHandler(reports.NewService(reports.NewRepository(pool)))
-    pricingHandler := pricing.NewHandler(pricingSvc)
+		routesHandler := routes.NewHandler(routes.NewService(routes.NewRepository(pool)))
+		busesHandler := buses.NewHandler(buses.NewService(buses.NewRepository(pool)))
+		driversHandler := drivers.NewHandler(drivers.NewService(drivers.NewRepository(pool)))
+		tripsHandler := trips.NewHandler(trips.NewService(trips.NewRepository(pool)))
+		pricingSvc := pricing.NewService(pricing.NewRepository(pool))
+		bookingsHandler := bookings.NewHandler(bookings.NewService(bookings.NewRepository(pool), pricingSvc, paymentsSvc))
+		reportsHandler := reports.NewHandler(reports.NewService(reports.NewRepository(pool)))
+		pricingHandler := pricing.NewHandler(pricingSvc)
 
-    routesHandler.RegisterRoutes(pr)
-    busesHandler.RegisterRoutes(pr)
-    driversHandler.RegisterRoutes(pr)
-    tripsHandler.RegisterRoutes(pr)
-    bookingsHandler.RegisterRoutes(pr)
-    paymentsHandler.RegisterRoutes(pr)
-    reportsHandler.RegisterRoutes(pr)
-    pricingHandler.RegisterRoutes(pr)
+		routesHandler.RegisterRoutes(pr)
+		busesHandler.RegisterRoutes(pr)
+		driversHandler.RegisterRoutes(pr)
+		tripsHandler.RegisterRoutes(pr)
+		bookingsHandler.RegisterRoutes(pr)
+		paymentsHandler.RegisterRoutes(pr)
+		reportsHandler.RegisterRoutes(pr)
+		pricingHandler.RegisterRoutes(pr)
 
-    advancesRepo := trip_advances.NewRepository(pool)
-    advancesHandler := trip_advances.NewHandler(trip_advances.NewService(advancesRepo))
-    advancesHandler.RegisterRoutes(pr)
+		advancesRepo := trip_advances.NewRepository(pool)
+		advancesHandler := trip_advances.NewHandler(trip_advances.NewService(advancesRepo))
+		advancesHandler.RegisterRoutes(pr)
 
-    expensesRepo := trip_expenses.NewRepository(pool)
-    expensesHandler := trip_expenses.NewHandler(trip_expenses.NewService(expensesRepo))
-    expensesHandler.RegisterRoutes(pr)
+		expensesRepo := trip_expenses.NewRepository(pool)
+		expensesHandler := trip_expenses.NewHandler(trip_expenses.NewService(expensesRepo))
+		expensesHandler.RegisterRoutes(pr)
 
-    settlementsRepo := trip_settlements.NewRepository(pool)
-    settlementsHandler := trip_settlements.NewHandler(trip_settlements.NewService(settlementsRepo, advancesRepo, expensesRepo))
-    settlementsHandler.RegisterRoutes(pr)
+		settlementsRepo := trip_settlements.NewRepository(pool)
+		settlementsHandler := trip_settlements.NewHandler(trip_settlements.NewService(settlementsRepo, advancesRepo, expensesRepo))
+		settlementsHandler.RegisterRoutes(pr)
 
-    cardsHandler := driver_cards.NewHandler(driver_cards.NewService(driver_cards.NewRepository(pool)))
-    cardsHandler.RegisterRoutes(pr)
+		cardsHandler := driver_cards.NewHandler(driver_cards.NewService(driver_cards.NewRepository(pool)))
+		cardsHandler.RegisterRoutes(pr)
 
-    validationsHandler := trip_validations.NewHandler(trip_validations.NewService(trip_validations.NewRepository(pool)))
-    validationsHandler.RegisterRoutes(pr)
+		validationsHandler := trip_validations.NewHandler(trip_validations.NewService(trip_validations.NewRepository(pool)))
+		validationsHandler.RegisterRoutes(pr)
 
-    returnsHandler := advance_returns.NewHandler(advance_returns.NewService(advance_returns.NewRepository(pool)))
-    returnsHandler.RegisterRoutes(pr)
+		returnsHandler := advance_returns.NewHandler(advance_returns.NewService(advance_returns.NewRepository(pool)))
+		returnsHandler.RegisterRoutes(pr)
 
-    fiscalHandler := fiscal_documents.NewHandler(fiscal_documents.NewService(fiscal_documents.NewRepository(pool)))
-    fiscalHandler.RegisterRoutes(pr)
+		fiscalHandler := fiscal_documents.NewHandler(fiscal_documents.NewService(fiscal_documents.NewRepository(pool)))
+		fiscalHandler.RegisterRoutes(pr)
 
-    users.NewHandler().RegisterRoutes(pr)
-  })
+		// Almoxarifado e Compras
+		suppliersHandler := suppliers.NewHandler(suppliers.NewService(suppliers.NewRepository(pool)))
+		suppliersHandler.RegisterRoutes(pr)
 
-  addr := fmt.Sprintf(":%s", cfg.Port)
-  server := &http.Server{
-    Addr:         addr,
-    Handler:      r,
-    ReadTimeout:  15 * time.Second,
-    WriteTimeout: 30 * time.Second,
-    IdleTimeout:  60 * time.Second,
-  }
-  log.Printf("api listening on %s", addr)
-  if err := server.ListenAndServe(); err != nil {
-    log.Fatal(err)
-  }
+		productsHandler := products.NewHandler(products.NewService(products.NewRepository(pool)))
+		productsHandler.RegisterRoutes(pr)
+
+		serviceOrdersHandler := service_orders.NewHandler(service_orders.NewService(service_orders.NewRepository(pool)))
+		serviceOrdersHandler.RegisterRoutes(pr)
+
+		purchaseOrdersHandler := purchase_orders.NewHandler(purchase_orders.NewService(purchase_orders.NewRepository(pool)))
+		purchaseOrdersHandler.RegisterRoutes(pr)
+
+		invoicesHandler := invoices.NewHandler(invoices.NewService(invoices.NewRepository(pool)))
+		invoicesHandler.RegisterRoutes(pr)
+
+		users.NewHandler().RegisterRoutes(pr)
+	})
+
+	addr := fmt.Sprintf(":%s", cfg.Port)
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+	log.Printf("api listening on %s", addr)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func corsMiddleware(cfg config.Config) func(http.Handler) http.Handler {
-  allowAll := false
-  origins := []string{}
-  if cfg.CORSOrigins != "" {
-    for _, o := range strings.Split(cfg.CORSOrigins, ",") {
-      trimmed := strings.TrimSpace(o)
-      if trimmed == "" {
-        continue
-      }
-      if trimmed == "*" {
-        allowAll = true
-      } else {
-        origins = append(origins, trimmed)
-      }
-    }
-  }
-  if cfg.CORSOrigins == "" && cfg.AppEnv != "production" {
-    allowAll = true
-  }
+	allowAll := false
+	origins := []string{}
+	if cfg.CORSOrigins != "" {
+		for _, o := range strings.Split(cfg.CORSOrigins, ",") {
+			trimmed := strings.TrimSpace(o)
+			if trimmed == "" {
+				continue
+			}
+			if trimmed == "*" {
+				allowAll = true
+			} else {
+				origins = append(origins, trimmed)
+			}
+		}
+	}
+	if cfg.CORSOrigins == "" && cfg.AppEnv != "production" {
+		allowAll = true
+	}
 
-  return func(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-      origin := r.Header.Get("Origin")
-      if origin != "" {
-        if allowAll || originAllowed(origin, origins) {
-          w.Header().Set("Access-Control-Allow-Origin", origin)
-          w.Header().Set("Vary", "Origin")
-          w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-          w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-          w.Header().Set("Access-Control-Allow-Credentials", "true")
-        }
-      }
-      if r.Method == http.MethodOptions {
-        w.WriteHeader(http.StatusNoContent)
-        return
-      }
-      next.ServeHTTP(w, r)
-    })
-  }
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if origin != "" {
+				if allowAll || originAllowed(origin, origins) {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Vary", "Origin")
+					w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+				}
+			}
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func originAllowed(origin string, allowed []string) bool {
-  for _, item := range allowed {
-    if item == origin {
-      return true
-    }
-  }
-  return false
+	for _, item := range allowed {
+		if item == origin {
+			return true
+		}
+	}
+	return false
 }

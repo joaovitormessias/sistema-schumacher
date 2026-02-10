@@ -1,98 +1,275 @@
 package bookings
 
 import (
-  "context"
-  "errors"
-  "math"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"math"
+	"strings"
 
-  "schumacher-tur/api/internal/pricing"
+	"schumacher-tur/api/internal/payments"
+	"schumacher-tur/api/internal/pricing"
 )
 
 var (
-  ErrInvalidAmounts  = errors.New("deposit + remainder must equal total_amount")
-  ErrNegativeAmounts = errors.New("amounts cannot be negative")
-  ErrMissingStops    = errors.New("board_stop_id and alight_stop_id are required")
-  ErrMissingFields   = errors.New("trip_id, seat_id and passenger.name are required")
+	ErrInvalidAmounts             = errors.New("deposit + remainder must equal total_amount")
+	ErrNegativeAmounts            = errors.New("amounts cannot be negative")
+	ErrMissingStops               = errors.New("board_stop_id and alight_stop_id are required")
+	ErrMissingFields              = errors.New("trip_id, seat_id and passenger.name are required")
+	ErrInitialPaymentRequired     = errors.New("initial_payment is required")
+	ErrInvalidInitialPayment      = errors.New("initial payment method or amount is invalid")
+	ErrInitialPaymentBelowMinimum = errors.New("initial_payment.amount must be at least 30% of total_amount")
 )
 
 type Service struct {
-  repo *Repository
-  pricing *pricing.Service
+	repo     *Repository
+	pricing  *pricing.Service
+	payments *payments.Service
 }
 
-func NewService(repo *Repository, pricingSvc *pricing.Service) *Service {
-  return &Service{repo: repo, pricing: pricingSvc}
+func NewService(repo *Repository, pricingSvc *pricing.Service, paymentsSvc *payments.Service) *Service {
+	return &Service{repo: repo, pricing: pricingSvc, payments: paymentsSvc}
 }
 
 func (s *Service) List(ctx context.Context, filter ListFilter) ([]BookingListItem, error) {
-  return s.repo.List(ctx, filter)
+	return s.repo.List(ctx, filter)
 }
 
 func (s *Service) Create(ctx context.Context, input CreateBookingInput) (BookingDetails, error) {
-  if input.TripID == "" || input.SeatID == "" || input.Passenger.Name == "" {
-    return BookingDetails{}, ErrMissingFields
-  }
-  if input.BoardStopID == "" || input.AlightStopID == "" {
-    return BookingDetails{}, ErrMissingStops
-  }
-  if input.TotalAmount < 0 || input.DepositAmount < 0 || input.RemainderAmount < 0 {
-    return BookingDetails{}, ErrNegativeAmounts
-  }
+	if input.TripID == "" || input.SeatID == "" || input.Passenger.Name == "" {
+		return BookingDetails{}, ErrMissingFields
+	}
+	if input.BoardStopID == "" || input.AlightStopID == "" {
+		return BookingDetails{}, ErrMissingStops
+	}
+	if input.TotalAmount < 0 || input.DepositAmount < 0 || input.RemainderAmount < 0 {
+		return BookingDetails{}, ErrNegativeAmounts
+	}
 
-  fareMode := "AUTO"
-  if input.FareMode != nil && *input.FareMode != "" {
-    fareMode = *input.FareMode
-  }
+	fareMode := "AUTO"
+	if input.FareMode != nil && *input.FareMode != "" {
+		fareMode = *input.FareMode
+	}
 
-  quote, err := s.pricing.Quote(ctx, pricing.QuoteInput{
-    TripID:          input.TripID,
-    BoardStopID:     input.BoardStopID,
-    AlightStopID:    input.AlightStopID,
-    FareMode:        fareMode,
-    FareAmountFinal: input.FareAmountFinal,
-  })
-  if err != nil {
-    return BookingDetails{}, err
-  }
+	quote, err := s.pricing.Quote(ctx, pricing.QuoteInput{
+		TripID:          input.TripID,
+		BoardStopID:     input.BoardStopID,
+		AlightStopID:    input.AlightStopID,
+		FareMode:        fareMode,
+		FareAmountFinal: input.FareAmountFinal,
+	})
+	if err != nil {
+		return BookingDetails{}, err
+	}
 
-  total := quote.FinalAmount
-  deposit := input.DepositAmount
-  remainder := input.RemainderAmount
-  if deposit == 0 && remainder == 0 {
-    remainder = total
-  }
-  if total > 0 {
-    sum := deposit + remainder
-    if math.Abs(sum-total) > 0.01 {
-      return BookingDetails{}, ErrInvalidAmounts
-    }
-  }
+	total := quote.FinalAmount
+	deposit := input.DepositAmount
+	remainder := input.RemainderAmount
+	if deposit == 0 && remainder == 0 {
+		remainder = total
+	}
+	if total > 0 {
+		sum := deposit + remainder
+		if math.Abs(sum-total) > 0.01 {
+			return BookingDetails{}, ErrInvalidAmounts
+		}
+	}
 
-  data := CreateBookingData{
-    TripID:          input.TripID,
-    SeatID:          input.SeatID,
-    BoardStopID:     input.BoardStopID,
-    AlightStopID:    input.AlightStopID,
-    BoardStopOrder:  quote.BoardStopOrder,
-    AlightStopOrder: quote.AlightStopOrder,
-    FareMode:        quote.FareMode,
-    FareAmountCalc:  quote.CalcAmount,
-    FareAmountFinal: quote.FinalAmount,
-    FareSnapshot:    quote.Snapshot,
-    Passenger:       input.Passenger,
-    Source:          input.Source,
-    TotalAmount:     total,
-    DepositAmount:   deposit,
-    RemainderAmount: remainder,
-  }
+	data := CreateBookingData{
+		TripID:          input.TripID,
+		SeatID:          input.SeatID,
+		BoardStopID:     input.BoardStopID,
+		AlightStopID:    input.AlightStopID,
+		BoardStopOrder:  quote.BoardStopOrder,
+		AlightStopOrder: quote.AlightStopOrder,
+		FareMode:        quote.FareMode,
+		FareAmountCalc:  quote.CalcAmount,
+		FareAmountFinal: quote.FinalAmount,
+		FareSnapshot:    quote.Snapshot,
+		Passenger:       input.Passenger,
+		Source:          input.Source,
+		TotalAmount:     total,
+		DepositAmount:   deposit,
+		RemainderAmount: remainder,
+	}
 
-  return s.repo.Create(ctx, data)
+	return s.repo.Create(ctx, data)
 }
 
 func (s *Service) Get(ctx context.Context, id string) (BookingDetails, error) {
-  return s.repo.Get(ctx, id)
+	return s.repo.Get(ctx, id)
 }
 
 func (s *Service) UpdateStatus(ctx context.Context, id string, status string) (BookingDetails, error) {
-  return s.repo.UpdateStatus(ctx, id, status)
+	return s.repo.UpdateStatus(ctx, id, status)
+}
+
+func (s *Service) Checkout(ctx context.Context, input CheckoutBookingInput) (CheckoutResponse, error) {
+	if s.payments == nil {
+		return CheckoutResponse{}, fmt.Errorf("payments service not configured")
+	}
+	log.Printf("event=checkout_started trip_id=%s seat_id=%s method=%s amount=%.2f", input.TripID, input.SeatID, strings.ToUpper(strings.TrimSpace(input.InitialPayment.Method)), input.InitialPayment.Amount)
+	if strings.TrimSpace(input.InitialPayment.Method) == "" || input.InitialPayment.Amount <= 0 {
+		return CheckoutResponse{}, ErrInvalidInitialPayment
+	}
+	if !isCheckoutPaymentMethod(input.InitialPayment.Method) {
+		return CheckoutResponse{}, ErrInvalidInitialPayment
+	}
+
+	minRequired := roundTo2(math.Max(input.TotalAmount*0.30, 0.01))
+	if roundTo2(input.InitialPayment.Amount) < minRequired {
+		return CheckoutResponse{}, ErrInitialPaymentBelowMinimum
+	}
+
+	remainder := roundTo2(math.Max(input.TotalAmount-input.InitialPayment.Amount, 0))
+	booking, err := s.Create(ctx, CreateBookingInput{
+		TripID:          input.TripID,
+		SeatID:          input.SeatID,
+		BoardStopID:     input.BoardStopID,
+		AlightStopID:    input.AlightStopID,
+		FareMode:        input.FareMode,
+		FareAmountFinal: input.FareAmountFinal,
+		Passenger:       input.Passenger,
+		Source:          input.Source,
+		TotalAmount:     input.TotalAmount,
+		DepositAmount:   roundTo2(input.InitialPayment.Amount),
+		RemainderAmount: remainder,
+	})
+	if err != nil {
+		return CheckoutResponse{}, err
+	}
+	log.Printf("event=booking_created booking_id=%s status=%s", booking.Booking.ID, booking.Booking.Status)
+
+	var created payments.Payment
+	var providerRaw []byte
+	method := strings.ToUpper(strings.TrimSpace(input.InitialPayment.Method))
+	if isAutomaticCheckoutMethod(method) {
+		created, providerRaw, err = s.payments.Create(ctx, payments.CreatePaymentInput{
+			BookingID:   booking.Booking.ID,
+			Amount:      roundTo2(input.InitialPayment.Amount),
+			Method:      method,
+			Description: input.InitialPayment.Description,
+			Customer:    mapCustomer(input.InitialPayment.Customer),
+		})
+	} else {
+		created, err = s.payments.CreateManual(ctx, payments.ManualPaymentInput{
+			BookingID: booking.Booking.ID,
+			Amount:    roundTo2(input.InitialPayment.Amount),
+			Method:    method,
+			Notes:     input.InitialPayment.Notes,
+		})
+	}
+
+	if err != nil {
+		_, _ = s.UpdateStatus(ctx, booking.Booking.ID, "CANCELLED")
+		return CheckoutResponse{}, err
+	}
+	log.Printf("event=payment_created payment_id=%s booking_id=%s status=%s method=%s", created.ID, created.BookingID, created.Status, created.Method)
+
+	providerParsed, checkoutURL, pixCode := parseProviderData(providerRaw)
+
+	return CheckoutResponse{
+		Booking:     booking,
+		Payment:     mapPayment(created),
+		ProviderRaw: providerParsed,
+		CheckoutURL: checkoutURL,
+		PixCode:     pixCode,
+	}, nil
+}
+
+func mapCustomer(input *CheckoutCustomerInput) *payments.CustomerInput {
+	if input == nil {
+		return nil
+	}
+	return &payments.CustomerInput{
+		Name:     input.Name,
+		Email:    input.Email,
+		Phone:    input.Phone,
+		Document: input.Document,
+	}
+}
+
+func mapPayment(payment payments.Payment) CheckoutPayment {
+	return CheckoutPayment{
+		ID:          payment.ID,
+		BookingID:   payment.BookingID,
+		Amount:      payment.Amount,
+		Method:      payment.Method,
+		Status:      payment.Status,
+		Provider:    payment.Provider,
+		ProviderRef: payment.ProviderRef,
+		PaidAt:      payment.PaidAt,
+		Metadata:    payment.Metadata,
+		CreatedAt:   payment.CreatedAt,
+	}
+}
+
+func parseProviderData(raw []byte) (interface{}, *string, *string) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+	var parsed interface{}
+	_ = json.Unmarshal(raw, &parsed)
+
+	obj, ok := parsed.(map[string]interface{})
+	if !ok {
+		return parsed, nil, nil
+	}
+
+	checkout := readStringFromMap(obj, "url")
+	if checkout == nil {
+		if dataObj, ok := obj["data"].(map[string]interface{}); ok {
+			checkout = readStringFromMap(dataObj, "url")
+		}
+	}
+
+	var pixCode *string
+	if dataObj, ok := obj["data"].(map[string]interface{}); ok {
+		pixCode = readStringFromMap(dataObj, "pixQrCode")
+	}
+	if pixCode == nil {
+		pixCode = readStringFromMap(obj, "pixQrCode")
+	}
+
+	return parsed, checkout, pixCode
+}
+
+func readStringFromMap(obj map[string]interface{}, key string) *string {
+	raw, ok := obj[key]
+	if !ok {
+		return nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return nil
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func isAutomaticCheckoutMethod(method string) bool {
+	switch method {
+	case "PIX", "CARD":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCheckoutPaymentMethod(method string) bool {
+	switch strings.ToUpper(strings.TrimSpace(method)) {
+	case "PIX", "CARD", "CASH", "TRANSFER", "OTHER":
+		return true
+	default:
+		return false
+	}
+}
+
+func roundTo2(value float64) float64 {
+	return math.Round(value*100) / 100
 }

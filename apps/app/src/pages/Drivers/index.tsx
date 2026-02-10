@@ -95,9 +95,10 @@ export default function Drivers() {
         phone: item.phone || "",
       })}
       getId={(item) => item.id}
-      fetchItems={async ({ page, pageSize }) =>
-        apiGet<DriverItem[]>(`/drivers?limit=${pageSize}&offset=${page * pageSize}`)
-      }
+      fetchItems={async ({ page, pageSize, search }) => {
+        const searchParam = search ? `&search=${encodeURIComponent(search)}` : "";
+        return apiGet<DriverItem[]>(`/drivers?limit=${pageSize}&offset=${page * pageSize}${searchParam}`);
+      }}
       createItem={(form) => apiPost("/drivers", form)}
       updateItem={(id, form) => apiPatch(`/drivers/${id}`, form)}
       softDeleteItem={(item) => apiPatch(`/drivers/${item.id}`, { is_active: false })}
@@ -111,6 +112,8 @@ export default function Drivers() {
       visibilityOptions={visibilityOptions}
       visibilityDefault="active"
       layout="split"
+      queryKey={["drivers"]}
+      serverSideSearch
     />
   );
 }

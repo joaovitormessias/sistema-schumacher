@@ -1,7 +1,12 @@
 ﻿import { useMemo, useState } from "react";
-import CRUDListPage, { type ColumnConfig, type FormFieldConfig } from "../../components/layout/CRUDListPage";
+import CRUDListPage, {
+  type ColumnConfig,
+  type FormFieldConfig,
+} from "../../components/layout/CRUDListPage";
 import StatusBadge from "../../components/StatusBadge";
+import Timeline from "../../components/data-display/Timeline";
 import useToast from "../../hooks/useToast";
+import { useFinancialFiltersOptional } from "../Financial/FinancialContext";
 import { apiGet, apiPost } from "../../services/api";
 import type { TripSettlement } from "../../types/financial";
 import { formatCurrency, settlementStatusLabel } from "../../utils/financialLabels";
@@ -13,11 +18,16 @@ type SettlementForm = {
 };
 
 type TripItem = { id: string; route_id: string; departure_at: string };
-
 type RouteItem = { id: string; origin_city: string; destination_city: string };
 
-export default function TripSettlements() {
+type TripSettlementsProps = {
+  embedded?: boolean;
+};
+
+export default function TripSettlements({ embedded = false }: TripSettlementsProps) {
   const toast = useToast();
+  const financialFilters = useFinancialFiltersOptional();
+  const tripFilter = embedded ? financialFilters?.tripFilter ?? "" : "";
   const [trips, setTrips] = useState<TripItem[]>([]);
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
@@ -36,9 +46,9 @@ export default function TripSettlements() {
     if (!trip) return formatShortId(tripId);
     const route = routeMap.get(trip.route_id);
     const routeLabel = route
-      ? `${route.origin_city} → ${route.destination_city}`
+      ? `${route.origin_city} -> ${route.destination_city}`
       : formatShortId(trip.route_id);
-    return `${routeLabel} • ${formatDateTime(trip.departure_at)}`;
+    return `${routeLabel} - ${formatDateTime(trip.departure_at)}`;
   };
 
   const formFields: FormFieldConfig<SettlementForm>[] = [
@@ -57,7 +67,7 @@ export default function TripSettlements() {
     },
     {
       key: "notes",
-      label: "Observações",
+      label: "Observacoes",
       type: "textarea",
       colSpan: "full",
     },
@@ -85,6 +95,21 @@ export default function TripSettlements() {
         </StatusBadge>
       ),
     },
+    {
+      label: "Timeline",
+      hideOnMobile: true,
+      render: (item) => (
+        <Timeline
+          compact
+          items={buildSettlementTimeline(item).map((event) => ({
+            id: event.label,
+            title: event.label,
+            timestamp: event.date ? formatDateTime(event.date) : "aguardando",
+            tone: event.tone,
+          }))}
+        />
+      ),
+    },
   ];
 
   const runAction = async (id: string, action: string, successMessage: string) => {
@@ -99,9 +124,10 @@ export default function TripSettlements() {
 
   return (
     <CRUDListPage<TripSettlement, SettlementForm>
-      key={reloadKey}
+      key={`${reloadKey}-${tripFilter}`}
+      hidePageHeader={embedded}
       title="Acertos de Viagem"
-      subtitle="Reconciliação financeira pós-viagem."
+      subtitle="Reconciliacao financeira pos-viagem."
       formTitle="Novo acerto"
       listTitle="Acertos registrados"
       createLabel="Criar acerto"
@@ -116,8 +142,9 @@ export default function TripSettlements() {
       mapItemToForm={(item) => ({ trip_id: item.trip_id, notes: item.notes ?? "" })}
       getId={(item) => item.id}
       fetchItems={async ({ page, pageSize }) => {
+        const tripFilterQuery = tripFilter ? `&trip_id=${encodeURIComponent(tripFilter)}` : "";
         const data = await apiGet<TripSettlement[]>(
-          `/trip-settlements?limit=${pageSize}&offset=${page * pageSize}`
+          `/trip-settlements?limit=${pageSize}&offset=${page * pageSize}${tripFilterQuery}`
         );
         const [tripsData, routesData] = await Promise.all([
           apiGet<TripItem[]>("/trips?limit=500&offset=0"),
@@ -145,9 +172,9 @@ export default function TripSettlements() {
               <button
                 className="button ghost sm"
                 type="button"
-                onClick={() => runAction(item.id, "review", "Acerto enviado para revisão.")}
+                onClick={() => runAction(item.id, "review", "Acerto enviado para revisao.")}
               >
-                Enviar revisão
+                Enviar revisao
               </button>
             );
           case "UNDER_REVIEW":
@@ -174,7 +201,7 @@ export default function TripSettlements() {
               <button
                 className="button success sm"
                 type="button"
-                onClick={() => runAction(item.id, "complete", "Acerto concluído.")}
+                onClick={() => runAction(item.id, "complete", "Acerto concluido.")}
               >
                 Concluir
               </button>
@@ -202,4 +229,13 @@ function getSettlementStatusTone(status: string) {
     default:
       return "neutral";
   }
+}
+
+function buildSettlementTimeline(item: TripSettlement) {
+  return [
+    { label: "Criado", date: item.created_at, tone: "neutral" },
+    { label: "Revisado", date: item.reviewed_at, tone: "info" },
+    { label: "Aprovado", date: item.approved_at, tone: "success" },
+    { label: "Concluido", date: item.completed_at, tone: "success" },
+  ] as const;
 }

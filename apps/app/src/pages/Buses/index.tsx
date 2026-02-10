@@ -105,9 +105,10 @@ export default function Buses() {
         create_seats: true,
       })}
       getId={(item) => item.id}
-      fetchItems={async ({ page, pageSize }) =>
-        apiGet<BusItem[]>(`/buses?limit=${pageSize}&offset=${page * pageSize}`)
-      }
+      fetchItems={async ({ page, pageSize, search }) => {
+        const searchParam = search ? `&search=${encodeURIComponent(search)}` : "";
+        return apiGet<BusItem[]>(`/buses?limit=${pageSize}&offset=${page * pageSize}${searchParam}`);
+      }}
       createItem={(form) =>
         apiPost("/buses", {
           name: form.name,
@@ -136,6 +137,8 @@ export default function Buses() {
       visibilityOptions={visibilityOptions}
       visibilityDefault="active"
       layout="split"
+      queryKey={["buses"]}
+      serverSideSearch
     />
   );
 }

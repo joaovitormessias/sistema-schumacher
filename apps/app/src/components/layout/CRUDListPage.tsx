@@ -1,22 +1,27 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import EmptyState from "../EmptyState";
 import FormField from "../FormField";
 import InlineAlert from "../InlineAlert";
-import LoadingState from "../LoadingState";
 import PageHeader from "../PageHeader";
 import StatusBadge from "../StatusBadge";
+import { Skeleton } from "../feedback/SkeletonLoader";
 import PaginationControls from "../input/PaginationControls";
 import SearchToolbar from "../input/SearchToolbar";
 import useToast from "../../hooks/useToast";
+import useDebouncedValue from "../../hooks/useDebouncedValue";
+import useMediaQuery from "../../hooks/useMediaQuery";
+import ConfirmDialog from "../overlay/ConfirmDialog";
 import TableActionButtons from "./TableActionButtons";
 import DataTable, { type DataTableColumn } from "../table/DataTable";
+import VirtualDataTable from "../data-display/VirtualDataTable";
 
 type SelectOption = { label: string; value: string };
 
 export type FormFieldConfig<F> = {
   key: keyof F;
   label: string;
-  type?: "text" | "number" | "select" | "checkbox" | "datetime" | "textarea";
+  type?: "text" | "number" | "select" | "checkbox" | "datetime" | "textarea" | "file";
   required?: boolean;
   hint?: string;
   placeholder?: string;
@@ -25,6 +30,12 @@ export type FormFieldConfig<F> = {
   disabled?: boolean;
   inputProps?: Record<string, string | number | boolean>;
   showWhen?: "create" | "edit" | "always";
+  customRender?: (args: {
+    value: unknown;
+    onChange: (nextValue: unknown) => void;
+    form: F;
+    isEditing: boolean;
+  }) => ReactNode;
 };
 
 export type ColumnConfig<T> = DataTableColumn<T>;
@@ -57,7 +68,12 @@ type CRUDListPageProps<T, F> = {
   initialForm: F;
   mapItemToForm: (item: T) => F;
   getId: (item: T) => string;
-  fetchItems: (params: { page: number; pageSize: number }) => Promise<T[]>;
+  fetchItems: (params: {
+    page: number;
+    pageSize: number;
+    search: string;
+    visibility: string;
+  }) => Promise<T[]>;
   createItem: (form: F) => Promise<void>;
   updateItem?: (id: string, form: F) => Promise<void>;
   softDeleteItem?: (item: T) => Promise<void>;
@@ -70,6 +86,10 @@ type CRUDListPageProps<T, F> = {
   rowActions?: (item: T) => ReactNode;
   pageSize?: number;
   layout?: "stacked" | "split";
+  hidePageHeader?: boolean;
+  queryKey?: readonly unknown[];
+  serverSideSearch?: boolean;
+  searchDebounceMs?: number;
 };
 
 export default function CRUDListPage<T, F>({
@@ -102,11 +122,14 @@ export default function CRUDListPage<T, F>({
   rowActions,
   pageSize = 50,
   layout = "split",
+  hidePageHeader = false,
+  queryKey,
+  serverSideSearch = false,
+  searchDebounceMs = 500,
 }: CRUDListPageProps<T, F>) {
   const toast = useToast();
-  const [items, setItems] = useState<T[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const [actionError, setActionError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [query, setQuery] = useState("");
   const [form, setForm] = useState<F>(initialForm);
@@ -115,47 +138,77 @@ export default function CRUDListPage<T, F>({
   const [visibility, setVisibility] = useState(
     visibilityDefault ?? visibilityOptions?.[0]?.value ?? ""
   );
+  const [confirmState, setConfirmState] = useState<{
+    mode: "deactivate" | "restore";
+    item: T;
+  } | null>(null);
+  const isMobile = useMediaQuery("(max-width: 900px)");
 
   const canEdit = Boolean(updateItem);
   const isEditing = canEdit && Boolean(editingId);
+  const hasActionColumn =
+    canEdit || Boolean(softDeleteItem) || Boolean(restoreItem) || Boolean(rowActions);
 
-  const load = async () => {
-    try {
-      setLoading(true);
-      const data = await fetchItems({ page, pageSize });
-      setItems(data);
-    } catch (err: any) {
-      setError(err.message || "Erro ao carregar dados");
-    } finally {
-      setLoading(false);
-    }
-  };
+  const baseQueryKey = useMemo<readonly unknown[]>(
+    () => (queryKey && queryKey.length > 0 ? queryKey : ["crud-list", title]),
+    [queryKey, title]
+  );
+
+  const debouncedQuery = useDebouncedValue(query, searchDebounceMs);
+  const effectiveSearch = (serverSideSearch ? debouncedQuery : query).trim().toLowerCase();
 
   useEffect(() => {
-    load();
-  }, [page]);
+    setPage(0);
+  }, [effectiveSearch, visibility]);
+
+  const itemsQuery = useQuery({
+    queryKey: [...baseQueryKey, page, pageSize, visibility, effectiveSearch],
+    queryFn: () =>
+      fetchItems({
+        page,
+        pageSize,
+        search: effectiveSearch,
+        visibility,
+      }),
+  });
+
+  const items = itemsQuery.data ?? [];
 
   const filteredItems = useMemo(() => {
-    const term = query.trim().toLowerCase();
     let next = items;
+
     if (visibilityOptions && visibility) {
       const option = visibilityOptions.find((opt) => opt.value === visibility);
       if (option) {
         next = next.filter(option.predicate);
       }
     }
-    if (!term) return next;
-    return next.filter((item) => searchFilter(item, term));
-  }, [items, query, visibility, visibilityOptions, searchFilter]);
+
+    if (serverSideSearch || !effectiveSearch) {
+      return next;
+    }
+
+    return next.filter((item) => searchFilter(item, effectiveSearch));
+  }, [
+    items,
+    visibilityOptions,
+    visibility,
+    serverSideSearch,
+    effectiveSearch,
+    searchFilter,
+  ]);
+
+  const errorMessage = actionError || (itemsQuery.error as Error | undefined)?.message || null;
+  const loading = itemsQuery.isPending;
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    setError(null);
+    setActionError(null);
     setSubmitting(true);
     try {
       if (isEditing && updateItem) {
         await updateItem(editingId as string, form);
-        toast.success("Alterações salvas com sucesso.");
+        toast.success("Alteracoes salvas com sucesso.");
       } else {
         await createItem(form);
         toast.success("Cadastro criado com sucesso.");
@@ -163,9 +216,9 @@ export default function CRUDListPage<T, F>({
       setEditingId(null);
       setForm(initialForm);
       setPage(0);
-      await load();
+      await queryClient.invalidateQueries({ queryKey: baseQueryKey });
     } catch (err: any) {
-      setError(err.message || "Erro ao salvar");
+      setActionError(err.message || "Erro ao salvar");
     } finally {
       setSubmitting(false);
     }
@@ -184,25 +237,25 @@ export default function CRUDListPage<T, F>({
 
   const handleDeactivate = async (item: T) => {
     if (!softDeleteItem) return;
-    setError(null);
+    setActionError(null);
     try {
       await softDeleteItem(item);
       toast.success("Item desativado.");
-      await load();
+      await queryClient.invalidateQueries({ queryKey: baseQueryKey });
     } catch (err: any) {
-      setError(err.message || "Erro ao desativar");
+      setActionError(err.message || "Erro ao desativar");
     }
   };
 
   const handleRestore = async (item: T) => {
     if (!restoreItem) return;
-    setError(null);
+    setActionError(null);
     try {
       await restoreItem(item);
       toast.success("Item reativado.");
-      await load();
+      await queryClient.invalidateQueries({ queryKey: baseQueryKey });
     } catch (err: any) {
-      setError(err.message || "Erro ao reativar");
+      setActionError(err.message || "Erro ao reativar");
     }
   };
 
@@ -238,7 +291,16 @@ export default function CRUDListPage<T, F>({
         hint={field.hint}
         required={field.required}
       >
-        {type === "select" ? (
+        {field.customRender ? (
+          field.customRender({
+            value,
+            onChange: (nextValue) =>
+              setForm((prev) => ({ ...prev, [field.key]: nextValue } as F)),
+            form,
+            isEditing,
+          })
+        ) : null}
+        {!field.customRender && type === "select" ? (
           <select
             className="input"
             value={String(value ?? "")}
@@ -255,7 +317,8 @@ export default function CRUDListPage<T, F>({
               </option>
             ))}
           </select>
-        ) : type === "textarea" ? (
+        ) : null}
+        {!field.customRender && type === "textarea" ? (
           <textarea
             className="input"
             value={String(value ?? "")}
@@ -267,7 +330,21 @@ export default function CRUDListPage<T, F>({
             disabled={field.disabled}
             {...inputProps}
           />
-        ) : (
+        ) : null}
+        {!field.customRender && type === "file" ? (
+          <input
+            className="input"
+            type="file"
+            onChange={(e) => {
+              const file = e.target.files?.[0] ?? null;
+              setForm((prev) => ({ ...prev, [field.key]: file } as F));
+            }}
+            required={field.required}
+            disabled={field.disabled}
+            {...inputProps}
+          />
+        ) : null}
+        {!field.customRender && !["select", "textarea", "file"].includes(type) ? (
           <input
             className="input"
             type={type === "datetime" ? "datetime-local" : type}
@@ -286,7 +363,7 @@ export default function CRUDListPage<T, F>({
             disabled={field.disabled}
             {...inputProps}
           />
-        )}
+        ) : null}
       </FormField>
     );
   };
@@ -305,17 +382,20 @@ export default function CRUDListPage<T, F>({
       ))}
     </select>
   ) : null;
+  const shouldVirtualize = !isMobile && filteredItems.length > 100;
 
   return (
     <section className="page">
-      <PageHeader
-        title={title}
-        subtitle={subtitle}
-        eyebrow={eyebrow}
-        meta={meta}
-        primaryAction={primaryAction}
-        secondaryActions={secondaryActions}
-      />
+      {!hidePageHeader ? (
+        <PageHeader
+          title={title}
+          subtitle={subtitle}
+          eyebrow={eyebrow}
+          meta={meta}
+          primaryAction={primaryAction}
+          secondaryActions={secondaryActions}
+        />
+      ) : null}
 
       <div className={`crud-layout ${layout === "split" ? "split-layout" : "stacked-layout"}`}>
         <div className="crud-form section" id="crud-form">
@@ -375,10 +455,43 @@ export default function CRUDListPage<T, F>({
             disabled={loading}
           />
 
-          {error ? <InlineAlert tone="error">{error}</InlineAlert> : null}
+          {errorMessage ? <InlineAlert tone="error">{errorMessage}</InlineAlert> : null}
 
           {loading ? (
-            <LoadingState label="Carregando..." />
+            <Skeleton.Table
+              rows={6}
+              columns={Math.max(columns.length + (hasActionColumn ? 1 : 0), 2)}
+            />
+          ) : shouldVirtualize ? (
+            <VirtualDataTable
+              columns={columns}
+              rows={filteredItems}
+              rowKey={getId}
+              actions={(item) => {
+                const isActive = getIsActive ? getIsActive(item) : true;
+                return (
+                  <>
+                    <TableActionButtons
+                      isActive={isActive}
+                      onEdit={canEdit ? () => startEdit(item) : undefined}
+                      onDeactivate={
+                        softDeleteItem
+                          ? () => setConfirmState({ mode: "deactivate", item })
+                          : undefined
+                      }
+                      onRestore={
+                        restoreItem ? () => setConfirmState({ mode: "restore", item }) : undefined
+                      }
+                      disableEdit={submitting}
+                    />
+                    {rowActions ? rowActions(item) : null}
+                  </>
+                );
+              }}
+              emptyState={
+                <EmptyState title={emptyState.title} description={emptyState.description} />
+              }
+            />
           ) : (
             <DataTable
               columns={columns}
@@ -391,8 +504,14 @@ export default function CRUDListPage<T, F>({
                     <TableActionButtons
                       isActive={isActive}
                       onEdit={canEdit ? () => startEdit(item) : undefined}
-                      onDeactivate={softDeleteItem ? () => handleDeactivate(item) : undefined}
-                      onRestore={restoreItem ? () => handleRestore(item) : undefined}
+                      onDeactivate={
+                        softDeleteItem
+                          ? () => setConfirmState({ mode: "deactivate", item })
+                          : undefined
+                      }
+                      onRestore={
+                        restoreItem ? () => setConfirmState({ mode: "restore", item }) : undefined
+                      }
                       disableEdit={submitting}
                     />
                     {rowActions ? rowActions(item) : null}
@@ -406,6 +525,27 @@ export default function CRUDListPage<T, F>({
           )}
         </div>
       </div>
+      <ConfirmDialog
+        open={Boolean(confirmState)}
+        title={confirmState?.mode === "restore" ? "Reativar item" : "Desativar item"}
+        description={
+          confirmState?.mode === "restore"
+            ? "Deseja reativar este registro?"
+            : "Deseja desativar este registro?"
+        }
+        confirmLabel={confirmState?.mode === "restore" ? "Reativar" : "Desativar"}
+        tone={confirmState?.mode === "restore" ? "default" : "danger"}
+        onCancel={() => setConfirmState(null)}
+        onConfirm={async () => {
+          if (!confirmState) return;
+          if (confirmState.mode === "restore") {
+            await handleRestore(confirmState.item);
+          } else {
+            await handleDeactivate(confirmState.item);
+          }
+          setConfirmState(null);
+        }}
+      />
     </section>
   );
 }

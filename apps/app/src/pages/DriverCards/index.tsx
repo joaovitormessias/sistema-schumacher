@@ -1,7 +1,8 @@
-﻿import { useMemo, useState } from "react";
+﻿import { useMemo, useState, type CSSProperties, type FormEvent } from "react";
+import FormField from "../../components/FormField";
+import InlineAlert from "../../components/InlineAlert";
 import CRUDListPage, { type ColumnConfig, type FormFieldConfig } from "../../components/layout/CRUDListPage";
 import StatusBadge from "../../components/StatusBadge";
-import InlineAlert from "../../components/InlineAlert";
 import useToast from "../../hooks/useToast";
 import { apiGet, apiPatch, apiPost } from "../../services/api";
 import type { DriverCard, DriverCardTransaction } from "../../types/financial";
@@ -20,7 +21,23 @@ type DriverCardForm = {
 
 type DriverItem = { id: string; name: string };
 
-export default function DriverCards() {
+type AdjustmentFormState = {
+  transaction_type: "CREDIT" | "DEBIT" | "ADJUSTMENT" | "REFUND";
+  amount: string;
+  description: string;
+};
+
+const defaultAdjustmentState: AdjustmentFormState = {
+  transaction_type: "CREDIT",
+  amount: "",
+  description: "Ajuste manual",
+};
+
+type DriverCardsProps = {
+  embedded?: boolean;
+};
+
+export default function DriverCards({ embedded = false }: DriverCardsProps) {
   const toast = useToast();
   const [drivers, setDrivers] = useState<DriverItem[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
@@ -28,11 +45,13 @@ export default function DriverCards() {
   const [transactions, setTransactions] = useState<DriverCardTransaction[]>([]);
   const [transactionsLoading, setTransactionsLoading] = useState(false);
   const [transactionsError, setTransactionsError] = useState<string | null>(null);
+  const [confirmCard, setConfirmCard] = useState<DriverCard | null>(null);
+  const [confirmLoading, setConfirmLoading] = useState(false);
+  const [adjustCard, setAdjustCard] = useState<DriverCard | null>(null);
+  const [adjustLoading, setAdjustLoading] = useState(false);
+  const [adjustForm, setAdjustForm] = useState<AdjustmentFormState>(defaultAdjustmentState);
 
-  const driverMap = useMemo(
-    () => new Map(drivers.map((driver) => [driver.id, driver.name])),
-    [drivers]
-  );
+  const driverMap = useMemo(() => new Map(drivers.map((driver) => [driver.id, driver.name])), [drivers]);
 
   const formFields: FormFieldConfig<DriverCardForm>[] = [
     {
@@ -47,7 +66,7 @@ export default function DriverCards() {
     },
     {
       key: "card_number",
-      label: "Número do cartão",
+      label: "Numero do cartao",
       required: true,
     },
     {
@@ -57,9 +76,9 @@ export default function DriverCards() {
       required: true,
       options: [
         { label: "Selecione o tipo", value: "" },
-        { label: "Combustível", value: "FUEL" },
-        { label: "Múltiplo propósito", value: "MULTIPURPOSE" },
-        { label: "Alimentação", value: "FOOD" },
+        { label: "Combustivel", value: "FUEL" },
+        { label: "Multiplo proposito", value: "MULTIPURPOSE" },
+        { label: "Alimentacao", value: "FOOD" },
       ],
     },
     {
@@ -82,11 +101,11 @@ export default function DriverCards() {
       key: "is_active",
       label: "Status",
       type: "checkbox",
-      hint: "Cartão ativo",
+      hint: "Cartao ativo",
     },
     {
       key: "notes",
-      label: "Observações",
+      label: "Observacoes",
       type: "textarea",
       colSpan: "full",
     },
@@ -97,7 +116,7 @@ export default function DriverCards() {
       label: "Motorista",
       accessor: (item) => driverMap.get(item.driver_id) ?? formatShortId(item.driver_id),
     },
-    { label: "Cartão", accessor: (item) => item.card_number },
+    { label: "Cartao", accessor: (item) => item.card_number },
     {
       label: "Tipo",
       accessor: (item) => cardTypeLabel[item.card_type] ?? item.card_type,
@@ -117,61 +136,68 @@ export default function DriverCards() {
     setTransactionsLoading(true);
     setTransactionsError(null);
     try {
-      const data = await apiGet<DriverCardTransaction[]>(
-        `/driver-cards/${card.id}/transactions?limit=50&offset=0`
-      );
+      const data = await apiGet<DriverCardTransaction[]>(`/driver-cards/${card.id}/transactions?limit=50&offset=0`);
       setTransactions(data);
       setSelectedCard(card);
     } catch (err: any) {
-      setTransactionsError(err.message || "Erro ao carregar transações");
+      setTransactionsError(err.message || "Erro ao carregar transacoes");
     } finally {
       setTransactionsLoading(false);
     }
   };
 
-  const handleBlockToggle = async (item: DriverCard) => {
-    const action = item.is_blocked ? "unblock" : "block";
-    const confirmText = item.is_blocked
-      ? "Deseja desbloquear este cartão?"
-      : "Deseja bloquear este cartão?";
-    if (!window.confirm(confirmText)) return;
+  const openBlockToggle = (item: DriverCard) => {
+    setConfirmCard(item);
+  };
+
+  const handleBlockToggle = async () => {
+    if (!confirmCard) return;
+    const action = confirmCard.is_blocked ? "unblock" : "block";
     try {
-      await apiPost(`/driver-cards/${item.id}/${action}`, {});
-      toast.success(item.is_blocked ? "Cartão desbloqueado." : "Cartão bloqueado.");
+      setConfirmLoading(true);
+      await apiPost(`/driver-cards/${confirmCard.id}/${action}`, {});
+      toast.success(confirmCard.is_blocked ? "Cartao desbloqueado." : "Cartao bloqueado.");
       setReloadKey((value) => value + 1);
+      setConfirmCard(null);
     } catch (err: any) {
-      toast.error(err.message || "Erro ao atualizar cartão");
+      toast.error(err.message || "Erro ao atualizar cartao");
+    } finally {
+      setConfirmLoading(false);
     }
   };
 
-  const handleAdjustBalance = async (item: DriverCard) => {
-    const type = window
-      .prompt("Tipo (CREDIT, DEBIT, ADJUSTMENT, REFUND)", "CREDIT")
-      ?.trim()
-      .toUpperCase();
-    if (!type) return;
-    const amountInput = window.prompt("Valor", "0");
-    if (!amountInput) return;
-    const amount = Number(amountInput);
+  const openAdjustBalance = (item: DriverCard) => {
+    setAdjustCard(item);
+    setAdjustForm(defaultAdjustmentState);
+  };
+
+  const handleAdjustBalance = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!adjustCard) return;
+    const amount = Number(adjustForm.amount);
     if (!Number.isFinite(amount) || amount <= 0) {
-      toast.error("Informe um valor válido.");
+      toast.error("Informe um valor valido.");
       return;
     }
-    const description = window.prompt("Descrição (opcional)", "Ajuste manual") ?? "";
 
     try {
-      await apiPost(`/driver-cards/${item.id}/transactions`, {
-        transaction_type: type,
+      setAdjustLoading(true);
+      await apiPost(`/driver-cards/${adjustCard.id}/transactions`, {
+        transaction_type: adjustForm.transaction_type,
         amount,
-        description: description || undefined,
+        description: adjustForm.description || undefined,
       });
       toast.success("Saldo ajustado com sucesso.");
       setReloadKey((value) => value + 1);
-      if (selectedCard?.id === item.id) {
-        refreshTransactions(item);
+      if (selectedCard?.id === adjustCard.id) {
+        await refreshTransactions(adjustCard);
       }
+      setAdjustCard(null);
+      setAdjustForm(defaultAdjustmentState);
     } catch (err: any) {
       toast.error(err.message || "Erro ao ajustar saldo");
+    } finally {
+      setAdjustLoading(false);
     }
   };
 
@@ -179,15 +205,16 @@ export default function DriverCards() {
     <>
       <CRUDListPage<DriverCard, DriverCardForm>
         key={reloadKey}
-        title="Cartões de Motorista"
-        subtitle="Controle de cartões e saldos para despesas."
-        formTitle="Novo cartão"
-        listTitle="Cartões cadastrados"
-        createLabel="Criar cartão"
-        updateLabel="Salvar cartão"
+        hidePageHeader={embedded}
+        title="Cartoes de Motorista"
+        subtitle="Controle de cartoes e saldos para despesas."
+        formTitle="Novo cartao"
+        listTitle="Cartoes cadastrados"
+        createLabel="Criar cartao"
+        updateLabel="Salvar cartao"
         emptyState={{
-          title: "Nenhum cartão encontrado",
-          description: "Cadastre um cartão para começar.",
+          title: "Nenhum cartao encontrado",
+          description: "Cadastre um cartao para comecar.",
         }}
         formFields={formFields}
         columns={columns}
@@ -211,9 +238,7 @@ export default function DriverCards() {
         })}
         getId={(item) => item.id}
         fetchItems={async ({ page, pageSize }) => {
-          const data = await apiGet<DriverCard[]>(
-            `/driver-cards?limit=${pageSize}&offset=${page * pageSize}`
-          );
+          const data = await apiGet<DriverCard[]>(`/driver-cards?limit=${pageSize}&offset=${page * pageSize}`);
           const driversData = await apiGet<DriverItem[]>("/drivers?limit=500&offset=0");
           setDrivers(driversData);
           return data;
@@ -248,58 +273,125 @@ export default function DriverCards() {
             <button
               className={item.is_blocked ? "button success sm" : "button ghost sm"}
               type="button"
-              onClick={() => handleBlockToggle(item)}
+              onClick={() => openBlockToggle(item)}
             >
               {item.is_blocked ? "Desbloquear" : "Bloquear"}
             </button>
-            <button
-              className="button secondary sm"
-              type="button"
-              onClick={() => handleAdjustBalance(item)}
-            >
+            <button className="button secondary sm" type="button" onClick={() => openAdjustBalance(item)}>
               Ajustar saldo
             </button>
-            <button
-              className="button ghost sm"
-              type="button"
-              onClick={() => refreshTransactions(item)}
-            >
-              Transações
+            <button className="button ghost sm" type="button" onClick={() => refreshTransactions(item)}>
+              Transacoes
             </button>
           </>
         )}
       />
 
-      {selectedCard ? (
+      {confirmCard ? (
         <section className="page" style={{ marginTop: "24px" }}>
           <div className="section">
             <div className="section-header">
               <div className="section-title">
-                Transações de {selectedCard.card_number}
+                {confirmCard.is_blocked ? "Confirmar desbloqueio" : "Confirmar bloqueio"}
               </div>
-              <button
-                className="button secondary sm"
-                type="button"
-                onClick={() => setSelectedCard(null)}
-              >
+            </div>
+            <InlineAlert tone="warning">
+              {confirmCard.is_blocked
+                ? `Desbloquear cartao ${confirmCard.card_number}?`
+                : `Bloquear cartao ${confirmCard.card_number}?`}
+            </InlineAlert>
+            <div className="form-actions">
+              <button className="button secondary" type="button" onClick={() => setConfirmCard(null)}>
+                Cancelar
+              </button>
+              <button className="button" type="button" onClick={handleBlockToggle} disabled={confirmLoading}>
+                {confirmLoading ? "Salvando..." : "Confirmar"}
+              </button>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      {adjustCard ? (
+        <section className="page" style={{ marginTop: "24px" }}>
+          <div className="section">
+            <div className="section-header">
+              <div className="section-title">Ajustar saldo do cartao {adjustCard.card_number}</div>
+            </div>
+            <form className="form-grid" onSubmit={handleAdjustBalance}>
+              <FormField label="Tipo" required>
+                <select
+                  className="input"
+                  value={adjustForm.transaction_type}
+                  onChange={(e) =>
+                    setAdjustForm((prev) => ({
+                      ...prev,
+                      transaction_type: e.target.value as AdjustmentFormState["transaction_type"],
+                    }))
+                  }
+                  required
+                >
+                  <option value="CREDIT">Credito</option>
+                  <option value="DEBIT">Debito</option>
+                  <option value="ADJUSTMENT">Ajuste</option>
+                  <option value="REFUND">Estorno</option>
+                </select>
+              </FormField>
+              <FormField label="Valor" required>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={adjustForm.amount}
+                  onChange={(e) => setAdjustForm((prev) => ({ ...prev, amount: e.target.value }))}
+                  required
+                />
+              </FormField>
+              <FormField label="Descricao" hint="Opcional">
+                <input
+                  className="input"
+                  value={adjustForm.description}
+                  onChange={(e) => setAdjustForm((prev) => ({ ...prev, description: e.target.value }))}
+                />
+              </FormField>
+              <div className="form-actions full-span">
+                <button className="button secondary" type="button" onClick={() => setAdjustCard(null)}>
+                  Cancelar
+                </button>
+                <button className="button" type="submit" disabled={adjustLoading}>
+                  {adjustLoading ? "Salvando..." : "Salvar ajuste"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+      ) : null}
+
+      {selectedCard ? (
+        <section className="page" style={{ marginTop: "24px" }}>
+          <div className="section">
+            <div className="section-header">
+              <div className="section-title">Transacoes de {selectedCard.card_number}</div>
+              <button className="button secondary sm" type="button" onClick={() => setSelectedCard(null)}>
                 Fechar
               </button>
             </div>
             {transactionsError ? <InlineAlert tone="error">{transactionsError}</InlineAlert> : null}
             {transactionsLoading ? (
-              <div className="text-muted">Carregando transações...</div>
+              <div className="text-muted">Carregando transacoes...</div>
             ) : transactions.length === 0 ? (
-              <div className="text-muted">Nenhuma transação registrada.</div>
+              <div className="text-muted">Nenhuma transacao registrada.</div>
             ) : (
               <div
                 className="table"
-                style={{ "--table-columns": "repeat(5, minmax(0, 1fr))" } as any}
+                style={{ "--table-columns": "repeat(5, minmax(0, 1fr))" } as CSSProperties}
               >
                 <div className="table-row table-head">
                   <div className="table-cell">Tipo</div>
                   <div className="table-cell">Valor</div>
                   <div className="table-cell">Saldo</div>
-                  <div className="table-cell">Descrição</div>
+                  <div className="table-cell">Descricao</div>
                   <div className="table-cell">Data</div>
                 </div>
                 {transactions.map((tx) => (
@@ -313,7 +405,7 @@ export default function DriverCards() {
                     <div className="table-cell" data-label="Saldo">
                       {formatCurrency(tx.balance_after)}
                     </div>
-                    <div className="table-cell" data-label="Descrição">
+                    <div className="table-cell" data-label="Descricao">
                       {tx.description || "-"}
                     </div>
                     <div className="table-cell" data-label="Data">

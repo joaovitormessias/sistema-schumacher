@@ -5,6 +5,7 @@ import CRUDListPage, {
 } from "../../components/layout/CRUDListPage";
 import StatusBadge from "../../components/StatusBadge";
 import useToast from "../../hooks/useToast";
+import { useFinancialFiltersOptional } from "../Financial/FinancialContext";
 import { apiGet, apiPatch, apiPost } from "../../services/api";
 import type { TripAdvance } from "../../types/financial";
 import { advanceStatusLabel, formatCurrency } from "../../utils/financialLabels";
@@ -24,8 +25,14 @@ type RouteItem = { id: string; origin_city: string; destination_city: string };
 
 type DriverItem = { id: string; name: string };
 
-export default function TripAdvances() {
+type TripAdvancesProps = {
+  embedded?: boolean;
+};
+
+export default function TripAdvances({ embedded = false }: TripAdvancesProps) {
   const toast = useToast();
+  const financialFilters = useFinancialFiltersOptional();
+  const tripFilter = embedded ? financialFilters?.tripFilter ?? "" : "";
   const [trips, setTrips] = useState<TripItem[]>([]);
   const [routes, setRoutes] = useState<RouteItem[]>([]);
   const [drivers, setDrivers] = useState<DriverItem[]>([]);
@@ -138,7 +145,8 @@ export default function TripAdvances() {
 
   return (
     <CRUDListPage<TripAdvance, TripAdvanceForm>
-      key={reloadKey}
+      key={`${reloadKey}-${tripFilter}`}
+      hidePageHeader={embedded}
       title="Adiantamentos de Viagem"
       subtitle="Gestão de adiantamentos para motoristas."
       formTitle="Novo adiantamento"
@@ -161,8 +169,9 @@ export default function TripAdvances() {
       })}
       getId={(item) => item.id}
       fetchItems={async ({ page, pageSize }) => {
+        const tripFilterQuery = tripFilter ? `&trip_id=${encodeURIComponent(tripFilter)}` : "";
         const data = await apiGet<TripAdvance[]>(
-          `/trip-advances?limit=${pageSize}&offset=${page * pageSize}`
+          `/trip-advances?limit=${pageSize}&offset=${page * pageSize}${tripFilterQuery}`
         );
         const [tripsData, routesData, driversData] = await Promise.all([
           apiGet<TripItem[]>("/trips?limit=500&offset=0"),

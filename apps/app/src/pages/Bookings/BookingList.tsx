@@ -1,9 +1,11 @@
 import EmptyState from "../../components/EmptyState";
-import LoadingState from "../../components/LoadingState";
+import { Skeleton } from "../../components/feedback/SkeletonLoader";
 import SearchToolbar from "../../components/input/SearchToolbar";
 import PaginationControls from "../../components/input/PaginationControls";
 import StatusBadge, { type StatusTone } from "../../components/StatusBadge";
 import DataTable, { type DataTableColumn } from "../../components/table/DataTable";
+import VirtualDataTable from "../../components/data-display/VirtualDataTable";
+import useMediaQuery from "../../hooks/useMediaQuery";
 import { formatCurrency } from "../../utils/format";
 
 type BookingItem = {
@@ -44,6 +46,7 @@ export default function BookingList({
   onPageChange,
   tripLabel,
 }: BookingListProps) {
+  const isMobile = useMediaQuery("(max-width: 900px)");
   const columns: DataTableColumn<BookingItem>[] = [
     { label: "Passageiro", accessor: (booking) => booking.passenger_name },
     {
@@ -66,6 +69,32 @@ export default function BookingList({
       width: "120px",
     },
   ];
+  const shouldVirtualize = !isMobile && bookings.length > 100;
+  const tableElement = shouldVirtualize ? (
+    <VirtualDataTable
+      columns={columns}
+      rows={bookings}
+      rowKey={(booking) => booking.id}
+      emptyState={
+        <EmptyState
+          title="Nenhuma reserva encontrada"
+          description="Tente ajustar a busca ou crie uma nova reserva."
+        />
+      }
+    />
+  ) : (
+    <DataTable
+      columns={columns}
+      rows={bookings}
+      rowKey={(booking) => booking.id}
+      emptyState={
+        <EmptyState
+          title="Nenhuma reserva encontrada"
+          description="Tente ajustar a busca ou crie uma nova reserva."
+        />
+      }
+    />
+  );
 
   return (
     <div className="section">
@@ -88,21 +117,7 @@ export default function BookingList({
         disabled={loading}
       />
 
-      {loading ? (
-        <LoadingState label="Carregando reservas..." />
-      ) : (
-        <DataTable
-          columns={columns}
-          rows={bookings}
-          rowKey={(booking) => booking.id}
-          emptyState={
-            <EmptyState
-              title="Nenhuma reserva encontrada"
-              description="Tente ajustar a busca ou crie uma nova reserva."
-            />
-          }
-        />
-      )}
+      {loading ? <Skeleton.Table rows={6} columns={columns.length} /> : tableElement}
     </div>
   );
 }

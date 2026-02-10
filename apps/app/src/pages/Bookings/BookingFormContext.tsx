@@ -13,9 +13,12 @@ export type BookingFormState = {
   total_amount: number;
   deposit_amount: number;
   remainder_amount: number;
+  payment_method: string;
+  payment_description: string;
+  payment_notes: string;
 };
 
-export type BookingStep = "trip" | "passenger" | "payment";
+export type BookingStep = "trip_passenger" | "payment";
 
 type BookingFormContextValue = {
   form: BookingFormState;

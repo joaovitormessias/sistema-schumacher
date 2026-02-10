@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+﻿import { useMemo, useState } from "react";
 import CRUDListPage, {
   type ColumnConfig,
   type FormFieldConfig,
@@ -6,6 +6,9 @@ import CRUDListPage, {
 } from "../../components/layout/CRUDListPage";
 import StatusBadge, { type StatusTone } from "../../components/StatusBadge";
 import { apiGet, apiPatch, apiPost } from "../../services/api";
+import { useBuses } from "../../hooks/useBuses";
+import { useDrivers } from "../../hooks/useDrivers";
+import { useRoutes } from "../../hooks/useRoutes";
 import { formatDateTime, formatShortId } from "../../utils/format";
 import { tripStatusLabel } from "../../utils/labels";
 
@@ -39,40 +42,14 @@ const statusTone = (status: string): StatusTone => {
 };
 
 export default function Trips() {
-  const [routes, setRoutes] = useState<RouteItem[]>([]);
-  const [buses, setBuses] = useState<BusItem[]>([]);
-  const [drivers, setDrivers] = useState<DriverItem[]>([]);
   const [statusFilter, setStatusFilter] = useState("ALL");
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const [r, b, d] = await Promise.all([
-          apiGet<RouteItem[]>("/routes?limit=200&offset=0"),
-          apiGet<BusItem[]>("/buses?limit=200&offset=0"),
-          apiGet<DriverItem[]>("/drivers?limit=200&offset=0"),
-        ]);
-        if (cancelled) return;
-        setRoutes(r);
-        setBuses(b);
-        setDrivers(d);
-      } catch {
-        if (cancelled) return;
-        setRoutes([]);
-        setBuses([]);
-        setDrivers([]);
-      }
-    };
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const routes = (useRoutes(200, 0).data as RouteItem[] | undefined) ?? [];
+  const buses = (useBuses(200, 0).data as BusItem[] | undefined) ?? [];
+  const drivers = (useDrivers(200, 0).data as DriverItem[] | undefined) ?? [];
 
   const routeLabel = (id: string) => {
     const route = routes.find((item) => item.id === id);
-    return route ? `${route.origin_city} → ${route.destination_city}` : formatShortId(id);
+    return route ? `${route.origin_city} -> ${route.destination_city}` : formatShortId(id);
   };
 
   const busLabel = (id: string) => {
@@ -94,18 +71,18 @@ export default function Trips() {
       options: [
         { label: "Selecione a rota", value: "" },
         ...routes.map((route) => ({
-          label: `${route.origin_city} → ${route.destination_city}`,
+          label: `${route.origin_city} -> ${route.destination_city}`,
           value: route.id,
         })),
       ],
     },
     {
       key: "bus_id",
-      label: "Ônibus",
+      label: "Onibus",
       type: "select",
       required: true,
       options: [
-        { label: "Selecione o ônibus", value: "" },
+        { label: "Selecione o onibus", value: "" },
         ...buses.map((bus) => ({
           label: bus.name,
           value: bus.id,
@@ -120,7 +97,7 @@ export default function Trips() {
     },
     {
       key: "departure_at",
-      label: "Data e hora de saída",
+      label: "Data e hora de saida",
       type: "datetime",
       required: true,
     },
@@ -128,8 +105,8 @@ export default function Trips() {
 
   const columns: ColumnConfig<TripItem>[] = [
     { label: "Rota", accessor: (item) => routeLabel(item.route_id) },
-    { label: "Ônibus", accessor: (item) => busLabel(item.bus_id) },
-    { label: "Saída", accessor: (item) => formatDateTime(item.departure_at) },
+    { label: "Onibus", accessor: (item) => busLabel(item.bus_id) },
+    { label: "Saida", accessor: (item) => formatDateTime(item.departure_at) },
     {
       label: "Status",
       render: (item) => (
@@ -149,7 +126,7 @@ export default function Trips() {
   return (
     <CRUDListPage<TripItem, TripForm>
       title="Viagens"
-      subtitle="Cadastro de viagens, datas e vínculo com rotas e ônibus."
+      subtitle="Cadastro de viagens, datas e vinculo com rotas e onibus."
       meta={<span className="badge">MVP</span>}
       formTitle="Nova viagem"
       listTitle="Viagens cadastradas"
@@ -169,9 +146,19 @@ export default function Trips() {
         departure_at: item.departure_at ? item.departure_at.slice(0, 16) : "",
       })}
       getId={(item) => item.id}
-      fetchItems={async ({ page, pageSize }) =>
-        apiGet<TripItem[]>(`/trips?limit=${pageSize}&offset=${page * pageSize}`)
-      }
+      fetchItems={async ({ page, pageSize, search }) => {
+        const params = new URLSearchParams({
+          limit: String(pageSize),
+          offset: String(page * pageSize),
+        });
+        if (statusFilter !== "ALL") {
+          params.set("status", statusFilter);
+        }
+        if (search) {
+          params.set("search", search);
+        }
+        return apiGet<TripItem[]>(`/trips?${params.toString()}`);
+      }}
       createItem={(form) =>
         apiPost("/trips", {
           route_id: form.route_id,
@@ -202,6 +189,8 @@ export default function Trips() {
       visibilityOptions={visibilityOptions}
       visibilityDefault="active"
       layout="split"
+      queryKey={["trips", statusFilter]}
+      serverSideSearch
       extraFilters={
         <select
           className="input"
@@ -212,7 +201,7 @@ export default function Trips() {
           <option value="ALL">Todos os status</option>
           <option value="SCHEDULED">Programada</option>
           <option value="IN_PROGRESS">Em andamento</option>
-          <option value="COMPLETED">Concluída</option>
+          <option value="COMPLETED">Concluida</option>
           <option value="CANCELLED">Cancelada</option>
         </select>
       }
