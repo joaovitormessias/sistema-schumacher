@@ -11,7 +11,8 @@
       "Bash(ls:*)",
       "Bash(test:*)",
       "Bash(go build:*)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "Bash(npm run build:*)"
     ]
   }
 }

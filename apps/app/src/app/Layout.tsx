@@ -61,8 +61,15 @@ const warehouseItems = [
 const THEME_STORAGE_KEY = "app-theme";
 type AppTheme = "light" | "dark";
 
+const SIDEBAR_STORAGE_KEY = "sidebar-collapsed";
+
 export default function Layout({ children }: { children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const saved = window.localStorage.getItem(SIDEBAR_STORAGE_KEY);
+    return saved === "true";
+  });
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [signOutOpen, setSignOutOpen] = useState(false);
   const [theme, setTheme] = useState<AppTheme>(() => {
@@ -115,6 +122,10 @@ export default function Layout({ children }: { children: ReactNode }) {
   }, [theme]);
 
   useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
     if (location.pathname === "/financial") {
       setOpenSections((prev) => (prev.financial ? prev : { ...prev, financial: true }));
     }
@@ -137,64 +148,53 @@ export default function Layout({ children }: { children: ReactNode }) {
     setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
+  const toggleSidebar = () => {
+    setSidebarCollapsed((prev) => !prev);
+  };
+
   return (
     <ToastProvider>
       <a href="#main-content" className="skip-link">
         Pular para o conteudo principal
       </a>
-      <div className="app-shell">
-        <header className="topbar">
-          <div className="topbar-left">
-            <button
-              className="menu-button"
-              type="button"
-              onClick={() => setMenuOpen(true)}
-              aria-label="Abrir menu"
-              aria-controls="app-sidebar"
-              aria-expanded={menuOpen}
-            >
-              <span />
-              <span />
-              <span />
-            </button>
-            <div className="topbar-title">
-              <span className="topbar-eyebrow">Operacao</span>
-              <span className="topbar-module">{currentItem?.label ?? "Painel"}</span>
-            </div>
-          </div>
-          <div className="topbar-actions">
-            {quickAction ? (
-              <Link className="button sm" to={quickAction.to}>
-                {quickAction.label}
-              </Link>
-            ) : null}
-            <button
-              className="icon-button"
-              type="button"
-              aria-label={theme === "dark" ? "Ativar tema claro" : "Ativar tema escuro"}
-              onClick={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
-            >
-              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-            </button>
-            <button
-              className="button secondary sm"
-              type="button"
-              onClick={() => setShortcutsOpen(true)}
-              aria-label="Abrir atalhos rapidos"
-            >
-              Atalhos
-            </button>
-          </div>
-        </header>
+      <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         <div
           className={`sidebar-overlay ${menuOpen ? "open" : ""}`}
           onClick={() => setMenuOpen(false)}
           aria-hidden={!menuOpen}
         />
         <aside id="app-sidebar" className={`sidebar ${menuOpen ? "open" : ""}`} aria-label="Menu principal">
-          <div>
-            <div className="brand">Schumacher Turismo</div>
-            <div className="page-subtitle">Sistema Interno</div>
+          <div className="sidebar-header">
+            <div className="sidebar-brand">
+              <div className="brand">Schumacher Turismo</div>
+              <div className="page-subtitle">Sistema Interno</div>
+            </div>
+            <div className="sidebar-actions">
+              <button
+                className="icon-button"
+                type="button"
+                aria-label={theme === "dark" ? "Ativar tema claro" : "Ativar tema escuro"}
+                onClick={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
+                title={theme === "dark" ? "Ativar tema claro" : "Ativar tema escuro"}
+              >
+                {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+              </button>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={toggleSidebar}
+                aria-label={sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
+                title={sidebarCollapsed ? "Expandir menu" : "Recolher menu"}
+              >
+                <ChevronDown
+                  size={18}
+                  style={{
+                    transform: sidebarCollapsed ? "rotate(-90deg)" : "rotate(90deg)",
+                    transition: "transform 0.2s ease"
+                  }}
+                />
+              </button>
+            </div>
           </div>
           <nav className="nav">
             {navItems.map((item) => (
@@ -280,6 +280,14 @@ export default function Layout({ children }: { children: ReactNode }) {
         <main id="main-content" className="main" tabIndex={-1}>
           {children}
         </main>
+        <button
+          className="menu-button-mobile"
+          type="button"
+          onClick={() => setMenuOpen(true)}
+          aria-label="Abrir menu"
+        >
+          <LayoutDashboard size={24} />
+        </button>
       </div>
       <Drawer
         open={shortcutsOpen}

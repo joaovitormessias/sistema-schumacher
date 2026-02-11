@@ -2,12 +2,15 @@ package routes
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	httpx "schumacher-tur/api/internal/shared/http"
 
 	"github.com/go-chi/chi/v5"
-	httpx "schumacher-tur/api/internal/shared/http"
 )
 
 type Handler struct {
@@ -22,9 +25,12 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Post("/", h.create)
 		r.Patch("/{routeId}", h.update)
 		r.Get("/{routeId}", h.get)
+		r.Post("/{routeId}/publish", h.publish)
+		r.Post("/{routeId}/duplicate", h.duplicate)
 		r.Get("/{routeId}/stops", h.listStops)
 		r.Post("/{routeId}/stops", h.createStop)
 		r.Patch("/{routeId}/stops/{stopId}", h.updateStop)
+		r.Delete("/{routeId}/stops/{stopId}", h.deleteStop)
 	})
 }
 
@@ -36,6 +42,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := h.svc.List(r.Context(), filter)
 	if err != nil {
+		log.Printf("Routes list error: %v", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "ROUTES_LIST_ERROR", "could not list routes", err.Error())
 		return
 	}
@@ -46,6 +53,11 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 	filter := ListFilter{}
 	q := r.URL.Query()
 	filter.Search = strings.TrimSpace(q.Get("search"))
+	status := strings.ToLower(strings.TrimSpace(q.Get("status")))
+	if status != "" && status != "active" && status != "inactive" && status != "all" {
+		return filter, errors.New("invalid status")
+	}
+	filter.Status = status
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -97,6 +109,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_CREATE_ERROR", "could not create route", err.Error())
 		return
 	}
+	logRouteDraftCreated(item, "create")
 	httpx.WriteJSON(w, http.StatusCreated, item)
 }
 
@@ -113,8 +126,25 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	isPublishAttempt := input.IsActive != nil && *input.IsActive
+	if isPublishAttempt {
+		logRoutePublishAttempt(id.String(), "update")
+	}
+
 	item, err := h.svc.Update(r.Context(), id, input)
 	if err != nil {
+		var publishErr RoutePublishBlockedError
+		if errors.As(err, &publishErr) {
+			if isPublishAttempt {
+				logRoutePublishBlocked(id.String(), "update", publishErr.MissingRequirements)
+			}
+			httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"code":                 "ROUTE_PUBLISH_BLOCKED",
+				"message":              "route does not meet publish requirements",
+				"requirements_missing": publishErr.MissingRequirements,
+			})
+			return
+		}
 		if IsNotFound(err) {
 			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
 			return
@@ -122,7 +152,62 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_UPDATE_ERROR", "could not update route", err.Error())
 		return
 	}
+	if isPublishAttempt && item.IsActive {
+		logRoutePublished(item, "update")
+	}
 	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
+	id, err := httpx.ParseUUIDParam(r, "routeId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
+		return
+	}
+
+	logRoutePublishAttempt(id.String(), "publish")
+
+	item, err := h.svc.Publish(r.Context(), id)
+	if err != nil {
+		var publishErr RoutePublishBlockedError
+		if errors.As(err, &publishErr) {
+			logRoutePublishBlocked(id.String(), "publish", publishErr.MissingRequirements)
+			httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"code":                 "ROUTE_PUBLISH_BLOCKED",
+				"message":              "route does not meet publish requirements",
+				"requirements_missing": publishErr.MissingRequirements,
+			})
+			return
+		}
+		if IsNotFound(err) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
+			return
+		}
+		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_PUBLISH_ERROR", "could not publish route", err.Error())
+		return
+	}
+	logRoutePublished(item, "publish")
+	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) duplicate(w http.ResponseWriter, r *http.Request) {
+	id, err := httpx.ParseUUIDParam(r, "routeId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
+		return
+	}
+
+	item, err := h.svc.Duplicate(r.Context(), id)
+	if err != nil {
+		if IsNotFound(err) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
+			return
+		}
+		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_DUPLICATE_ERROR", "could not duplicate route", err.Error())
+		return
+	}
+	logRouteDraftCreated(item, "duplicate")
+	httpx.WriteJSON(w, http.StatusCreated, item)
 }
 
 func (h *Handler) listStops(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +242,10 @@ func (h *Handler) createStop(w http.ResponseWriter, r *http.Request) {
 
 	item, err := h.svc.CreateStop(r.Context(), id, input)
 	if err != nil {
+		if strings.Contains(err.Error(), "eta_offset_minutes") {
+			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+			return
+		}
 		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_STOP_CREATE_ERROR", "could not create route stop", err.Error())
 		return
 	}
@@ -183,6 +272,14 @@ func (h *Handler) updateStop(w http.ResponseWriter, r *http.Request) {
 
 	item, err := h.svc.UpdateStop(r.Context(), routeID, stopID, input)
 	if err != nil {
+		if errors.Is(err, ErrRouteStopLocked) {
+			httpx.WriteError(w, http.StatusConflict, "ROUTE_STOP_LOCKED", "route stop reorder is locked for routes with linked trips", nil)
+			return
+		}
+		if strings.Contains(err.Error(), "eta_offset_minutes") {
+			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+			return
+		}
 		if IsNotFound(err) {
 			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route stop not found", nil)
 			return
@@ -191,4 +288,125 @@ func (h *Handler) updateStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) deleteStop(w http.ResponseWriter, r *http.Request) {
+	routeID, err := httpx.ParseUUIDParam(r, "routeId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
+		return
+	}
+	stopID, err := httpx.ParseUUIDParam(r, "stopId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid stop id", nil)
+		return
+	}
+
+	if err := h.svc.DeleteStop(r.Context(), routeID, stopID); err != nil {
+		if errors.Is(err, ErrRouteHasLinkedTrips) {
+			httpx.WriteError(w, http.StatusConflict, "ROUTE_STOP_LOCKED", "route stop delete is locked for routes with linked trips", nil)
+			return
+		}
+		if IsNotFound(err) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route stop not found", nil)
+			return
+		}
+		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_STOP_DELETE_ERROR", "could not delete route stop", err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func logRouteDraftCreated(item Route, source string) {
+	duplicatedFrom := ""
+	if item.DuplicatedFromRouteID != nil {
+		duplicatedFrom = *item.DuplicatedFromRouteID
+	}
+	log.Printf(
+		"event=route_draft_created route_id=%s source=%s stop_count=%d configuration_status=%s duplicated_from_route_id=%s",
+		item.ID,
+		source,
+		item.StopCount,
+		item.ConfigurationStatus,
+		duplicatedFrom,
+	)
+}
+
+func logRoutePublishAttempt(routeID string, source string) {
+	log.Printf("event=route_publish_attempt route_id=%s source=%s", routeID, source)
+	log.Printf("metric=route_publish_attempt_total value=1 source=%s", source)
+}
+
+func logRoutePublishBlocked(routeID string, source string, missingRequirements []string) {
+	log.Printf("metric=route_publish_blocked_total value=1 rule=any source=%s", source)
+	normalized := make([]string, 0, len(missingRequirements))
+	for _, requirement := range missingRequirements {
+		rule := normalizeRequirementRule(requirement)
+		normalized = append(normalized, rule)
+		log.Printf("metric=route_publish_blocked_total value=1 rule=%s source=%s", rule, source)
+	}
+	log.Printf(
+		"event=route_publish_blocked route_id=%s source=%s missing_count=%d missing_rules=%s",
+		routeID,
+		source,
+		len(normalized),
+		strings.Join(normalized, ","),
+	)
+}
+
+func logRoutePublished(item Route, source string) {
+	draftToPublishMinutes := time.Since(item.CreatedAt).Minutes()
+	if draftToPublishMinutes < 0 {
+		draftToPublishMinutes = 0
+	}
+	log.Printf(
+		"event=route_published route_id=%s source=%s stop_count=%d configuration_status=%s",
+		item.ID,
+		source,
+		item.StopCount,
+		item.ConfigurationStatus,
+	)
+	log.Printf(
+		"metric=route_draft_to_publish_minutes value=%.2f route_id=%s source=%s",
+		draftToPublishMinutes,
+		item.ID,
+		source,
+	)
+	log.Printf("metric=route_publish_success_total value=1 source=%s", source)
+}
+
+func normalizeRequirementRule(requirement string) string {
+	key := strings.TrimSpace(strings.ToLower(requirement))
+	switch key {
+	case "route must be active":
+		return "route_must_be_active"
+	case "at least two stops are required":
+		return "at_least_two_stops_required"
+	case "stop_order must start at 1":
+		return "stop_order_starts_at_1"
+	case "stop_order must be sequential without gaps":
+		return "stop_order_sequential_without_gaps"
+	case "first stop city must match origin_city":
+		return "first_stop_matches_origin_city"
+	case "last stop city must match destination_city":
+		return "last_stop_matches_destination_city"
+	case "eta_offset_minutes must be >= 0":
+		return "eta_offset_minutes_non_negative"
+	case "eta_offset_minutes must be non-decreasing":
+		return "eta_offset_minutes_non_decreasing"
+	case "route not found":
+		return "route_not_found"
+	default:
+		key = strings.ReplaceAll(key, " ", "_")
+		key = strings.ReplaceAll(key, "-", "_")
+		key = strings.ReplaceAll(key, ">", "gt")
+		key = strings.ReplaceAll(key, "<", "lt")
+		key = strings.ReplaceAll(key, "=", "")
+		key = strings.ReplaceAll(key, ".", "")
+		for strings.Contains(key, "__") {
+			key = strings.ReplaceAll(key, "__", "_")
+		}
+		return strings.Trim(key, "_")
+	}
 }

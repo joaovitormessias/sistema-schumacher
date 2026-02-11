@@ -8,6 +8,20 @@ type RequestOptions = {
   body?: unknown;
 };
 
+export class APIRequestError extends Error {
+  code?: string;
+  details?: unknown;
+  requirementsMissing?: string[];
+
+  constructor(message: string, options: { code?: string; details?: unknown; requirementsMissing?: string[] } = {}) {
+    super(message);
+    this.name = "APIRequestError";
+    this.code = options.code;
+    this.details = options.details;
+    this.requirementsMissing = options.requirementsMissing;
+  }
+}
+
 async function getAuthHeader() {
   try {
     const client = getSupabaseClient();
@@ -49,7 +63,11 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!res.ok) {
     const message = data?.message || data?.error || res.statusText;
-    throw new Error(message);
+    throw new APIRequestError(message, {
+      code: data?.code,
+      details: data?.details,
+      requirementsMissing: data?.requirements_missing ?? data?.details?.requirements_missing,
+    });
   }
 
   return data as T;
@@ -65,6 +83,14 @@ export function apiPost<T>(path: string, body: unknown) {
 
 export function apiPatch<T>(path: string, body: unknown) {
   return request<T>(path, { method: "PATCH", body });
+}
+
+export function apiPut<T>(path: string, body: unknown) {
+  return request<T>(path, { method: "PUT", body });
+}
+
+export function apiDelete<T>(path: string) {
+  return request<T>(path, { method: "DELETE" });
 }
 
 export function apiBaseUrl() {

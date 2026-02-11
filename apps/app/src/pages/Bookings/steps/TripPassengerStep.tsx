@@ -61,7 +61,7 @@ export default function TripPassengerStep({
   );
 
   const handleSeatClick = (seat: Seat) => {
-    setForm({ ...form, seat_id: seat.id });
+    setForm((prev) => ({ ...prev, seat_id: seat.id }));
   };
 
   const selectedSeatNumber = useMemo(() => {
@@ -87,13 +87,13 @@ export default function TripPassengerStep({
             className="input input-delightful"
             value={form.trip_id}
             onChange={(e) =>
-              setForm({
-                ...form,
+              setForm((prev) => ({
+                ...prev,
                 trip_id: e.target.value,
                 seat_id: "",
                 board_stop_id: "",
                 alight_stop_id: "",
-              })
+              }))
             }
             required
           >
@@ -111,12 +111,12 @@ export default function TripPassengerStep({
             className="input input-delightful"
             value={form.board_stop_id}
             onChange={(e) =>
-              setForm({
-                ...form,
+              setForm((prev) => ({
+                ...prev,
                 board_stop_id: e.target.value,
                 alight_stop_id: "",
                 seat_id: "",
-              })
+              }))
             }
             required
             disabled={!form.trip_id}
@@ -134,7 +134,9 @@ export default function TripPassengerStep({
           <select
             className="input input-delightful"
             value={form.alight_stop_id}
-            onChange={(e) => setForm({ ...form, alight_stop_id: e.target.value, seat_id: "" })}
+            onChange={(e) =>
+              setForm((prev) => ({ ...prev, alight_stop_id: e.target.value, seat_id: "" }))
+            }
             required
             disabled={!form.board_stop_id}
           >
@@ -152,7 +154,7 @@ export default function TripPassengerStep({
             <select
               className="input input-delightful"
               value={form.seat_id}
-              onChange={(e) => setForm({ ...form, seat_id: e.target.value })}
+              onChange={(e) => setForm((prev) => ({ ...prev, seat_id: e.target.value }))}
               required
               disabled={!form.board_stop_id || !form.alight_stop_id}
               style={{ flex: 1 }}
@@ -206,35 +208,37 @@ export default function TripPassengerStep({
           </div>
         ) : null}
 
-        <FormField label="Passageiro frequente" hint="Opcional">
-          <select
-            className="input input-delightful"
-            value={selectedSuggestionId}
-            onChange={(event) => {
-              const suggestionId = event.target.value;
-              setSelectedSuggestionId(suggestionId);
-              if (!suggestionId) return;
-              const suggestion = passengerSuggestions.find((item) => item.id === suggestionId);
-              if (suggestion) {
-                onApplyPassengerSuggestion(suggestion);
-              }
-            }}
-            disabled={passengerSuggestions.length === 0}
-          >
-            <option value="">
-              {passengerSuggestions.length === 0
-                ? "Sem historico para auto-complete"
-                : "Selecionar passageiro do historico"}
-            </option>
-            {passengerSuggestions.map((suggestion) => (
-              <option key={suggestion.id} value={suggestion.id}>
-                {suggestion.name}
-                {suggestion.phone ? ` - ${suggestion.phone}` : ""}
-                {suggestion.email ? ` - ${suggestion.email}` : ""}
+        <div className="full-span">
+          <FormField label="Passageiro frequente" hint="Opcional">
+            <select
+              className="input input-delightful"
+              value={selectedSuggestionId}
+              onChange={(event) => {
+                const suggestionId = event.target.value;
+                setSelectedSuggestionId(suggestionId);
+                if (!suggestionId) return;
+                const suggestion = passengerSuggestions.find((item) => item.id === suggestionId);
+                if (suggestion) {
+                  onApplyPassengerSuggestion(suggestion);
+                }
+              }}
+              disabled={passengerSuggestions.length === 0}
+            >
+              <option value="">
+                {passengerSuggestions.length === 0
+                  ? "Sem historico para auto-complete"
+                  : "Selecionar passageiro do historico"}
               </option>
-            ))}
-          </select>
-        </FormField>
+              {passengerSuggestions.map((suggestion) => (
+                <option key={suggestion.id} value={suggestion.id}>
+                  {suggestion.name}
+                  {suggestion.phone ? ` - ${suggestion.phone}` : ""}
+                  {suggestion.email ? ` - ${suggestion.email}` : ""}
+                </option>
+              ))}
+            </select>
+          </FormField>
+        </div>
 
         <FormField label="Nome do passageiro" required>
           <Autocomplete
@@ -250,7 +254,7 @@ export default function TripPassengerStep({
               label: suggestion.name,
               meta: [suggestion.phone, suggestion.email].filter(Boolean).join(" - "),
             }))}
-            onInputChange={(value) => setForm({ ...form, name: value })}
+            onInputChange={(value) => setForm((prev) => ({ ...prev, name: value }))}
             onOptionSelect={(option) => {
               const suggestion = passengerSuggestions.find((item) => item.id === option.id);
               if (suggestion) {
@@ -260,21 +264,12 @@ export default function TripPassengerStep({
           />
         </FormField>
 
-        <FormField label="Documento" hint="Opcional">
-          <input
-            className="input input-delightful"
-            placeholder="CPF ou documento"
-            value={form.document}
-            onChange={(e) => setForm({ ...form, document: e.target.value })}
-          />
-        </FormField>
-
         <FormField label="Telefone" hint="Opcional">
           <input
             className="input input-delightful"
             placeholder="(00) 00000-0000"
             value={form.phone}
-            onChange={(e) => setForm({ ...form, phone: e.target.value })}
+            onChange={(e) => setForm((prev) => ({ ...prev, phone: e.target.value }))}
           />
         </FormField>
 
@@ -283,7 +278,16 @@ export default function TripPassengerStep({
             className="input input-delightful"
             placeholder="email@exemplo.com"
             value={form.email}
-            onChange={(e) => setForm({ ...form, email: e.target.value })}
+            onChange={(e) => setForm((prev) => ({ ...prev, email: e.target.value }))}
+          />
+        </FormField>
+
+        <FormField label="Documento" hint="Opcional">
+          <input
+            className="input input-delightful"
+            placeholder="CPF ou documento"
+            value={form.document}
+            onChange={(e) => setForm((prev) => ({ ...prev, document: e.target.value }))}
           />
         </FormField>
       </div>

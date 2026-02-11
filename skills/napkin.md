@@ -118,3 +118,30 @@ wrong order. You catch it yourself. Log it:
 
 **Later** — you re-read the napkin before editing another file and use
 absolute imports without being told. That's the loop working.
+
+## Session Notes (2026-02-10)
+
+### Corrections
+| Date | Source | What Went Wrong | What To Do Instead |
+|------|--------|-----------------|--------------------|
+| 2026-02-10 | self | Used `ON CONFLICT (trip_id, booking_passenger_id)` with only partial unique index; migration failed (`42P10`) | Create a concrete unique constraint matching conflict columns when using `ON CONFLICT` |
+| 2026-02-10 | self | Attempted to write very large files in one shell command on Windows and hit `code 206` | Split writes into smaller chunks or use incremental patching |
+| 2026-02-10 | self | Booking form inputs used `setForm({ ...form, ... })` while fare quote updates `total_amount` asynchronously, causing intermittent overwrite to zero | In Booking steps, always use functional updates `setForm((prev) => ({ ...prev, ... }))` for field edits |
+
+### Patterns That Work
+- Validate backend-wide changes with `gofmt` + `go test ./...` before touching production DB.
+- Keep workflow blockers explicit (`requirements_missing`) so frontend can render pending compliance items.
+- Apply Supabase migration via MCP after local checks to keep code/schema synchronized.
+- For backend observability in this repo, emit event= and metric= lines via log.Printf in handlers/services (current production pattern).
+
+### User Preferences
+- 2026-02-10: When discussing major flow issues (ex.: criação de rotas), do a full code-flow analysis first and do not edit product code in that turn.
+- 2026-02-10: For business-rule discussions, bring external references from the web (regulatory/market) to ground recommendations.
+- 2026-02-10: In operational forms (ex.: Rotas/Paradas), ambiguous numeric fields must be explicitly labeled with business meaning.
+
+### Domain Notes
+- Current app flow has route stop entities in DB/API, but `Routes` UI still does only quick route header creation (`name`, `origin_city`, `destination_city`) without stop configuration.
+- Downstream modules (trip stops, booking boarding/alighting, segment pricing, operational workflow) assume stops are configured; missing stop setup upstream creates operational bottlenecks.
+- `docs-sistema/Procedimentos Operacionais Fretamento.md` reinforces that operations start from request intake with boarding point and schedule, then route/itinerary organization (including all trip points), passenger list checks, D-1 vehicle/driver assignment, and authorization workflow (DETER/ANTT) before departure.
+- Fretamento workflow also requires pre-trip travel folder/document checklist and post-trip reconciliation, so route/trip setup should capture enough stop/timing detail for authorization and execution artifacts.
+- Booking auto fare depends on `segment_fares`; repo currently has quote logic but no API/UI CRUD for `segment_fares`, so in many real scenarios checkout stays sem tarifa automatica until DB has active segment fare data.

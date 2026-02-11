@@ -69,7 +69,7 @@ export default function BookingPaymentStep({
           <select
             className="input input-delightful"
             value={form.fare_mode}
-            onChange={(e) => setForm({ ...form, fare_mode: e.target.value })}
+            onChange={(e) => setForm((prev) => ({ ...prev, fare_mode: e.target.value }))}
           >
             <option value="AUTO">Automático</option>
             <option value="FIXED">Fixo</option>
@@ -83,7 +83,9 @@ export default function BookingPaymentStep({
             value={form.total_amount}
             min={0}
             step="0.01"
-            onChange={(e) => setForm({ ...form, total_amount: Number(e.target.value) })}
+            onChange={(e) =>
+              setForm((prev) => ({ ...prev, total_amount: Number(e.target.value) }))
+            }
             disabled={form.fare_mode !== "MANUAL"}
           />
         </FormField>
@@ -91,7 +93,7 @@ export default function BookingPaymentStep({
           <select
             className="input input-delightful"
             value={form.payment_method}
-            onChange={(e) => setForm({ ...form, payment_method: e.target.value })}
+            onChange={(e) => setForm((prev) => ({ ...prev, payment_method: e.target.value }))}
             required
           >
             <option value="PIX">PIX</option>
@@ -111,11 +113,13 @@ export default function BookingPaymentStep({
             step="0.01"
             onChange={(e) => {
               const amount = Number(e.target.value);
-              const remainder = Math.max((Number(form.total_amount) || 0) - amount, 0);
-              setForm({
-                ...form,
-                deposit_amount: amount,
-                remainder_amount: remainder,
+              setForm((prev) => {
+                const remainder = Math.max((Number(prev.total_amount) || 0) - amount, 0);
+                return {
+                  ...prev,
+                  deposit_amount: amount,
+                  remainder_amount: remainder,
+                };
               });
             }}
             required
@@ -128,7 +132,9 @@ export default function BookingPaymentStep({
           <input
             className="input input-delightful"
             value={form.payment_description}
-            onChange={(e) => setForm({ ...form, payment_description: e.target.value })}
+            onChange={(e) =>
+              setForm((prev) => ({ ...prev, payment_description: e.target.value }))
+            }
             placeholder="Ex: Passagem"
           />
         </FormField>
@@ -137,7 +143,7 @@ export default function BookingPaymentStep({
             <input
               className="input input-delightful"
               value={form.payment_notes}
-              onChange={(e) => setForm({ ...form, payment_notes: e.target.value })}
+              onChange={(e) => setForm((prev) => ({ ...prev, payment_notes: e.target.value }))}
               placeholder="Ex: Recebido no balcão"
             />
           </FormField>

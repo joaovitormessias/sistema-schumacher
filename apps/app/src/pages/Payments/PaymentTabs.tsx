@@ -15,7 +15,7 @@ export default function PaymentTabs({ activeTab, onChange }: PaymentTabsProps) {
         role="tab"
         aria-selected={activeTab === "AUTOMATIC"}
       >
-        Automatico (PIX/CARTAO)
+        <span>🤖</span> Automático (PIX)
       </button>
       <button
         type="button"
@@ -24,7 +24,7 @@ export default function PaymentTabs({ activeTab, onChange }: PaymentTabsProps) {
         role="tab"
         aria-selected={activeTab === "MANUAL"}
       >
-        Manual (Dinheiro)
+        <span>✍️</span> Manual (Cartão/Dinheiro/etc)
       </button>
     </div>
   );

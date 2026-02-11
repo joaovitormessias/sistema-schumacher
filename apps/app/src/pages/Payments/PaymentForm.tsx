@@ -1,5 +1,6 @@
 import type { FormEvent } from "react";
 import FormField from "../../components/FormField";
+import PaymentMethodIcon from "../../components/icons/PaymentMethodIcon";
 
 type BookingOption = { value: string; label: string };
 
@@ -67,27 +68,77 @@ export default function PaymentForm({
           required
         />
       </FormField>
-      <FormField label="Metodo" required>
-        <select
-          className="input"
-          value={value.method}
-          onChange={(e) => onChange({ ...value, method: e.target.value } as any)}
-          required
-        >
-          {isAutomatic ? (
-            <>
-              <option value="PIX">PIX</option>
-              <option value="CARD">Cartao</option>
-            </>
-          ) : (
-            <>
-              <option value="CASH">Dinheiro</option>
-              <option value="TRANSFER">Transferencia</option>
-              <option value="OTHER">Outro</option>
-            </>
-          )}
-        </select>
-      </FormField>
+      <div className="full-span">
+        <FormField label="Método" required>
+          <div className="payment-method-selector">
+            {isAutomatic ? (
+              <label className={`method-option ${value.method === "PIX" ? "selected" : ""}`}>
+                <input
+                  type="radio"
+                  name="method"
+                  value="PIX"
+                  checked={value.method === "PIX"}
+                  onChange={(e) => onChange({ ...value, method: e.target.value } as any)}
+                  required
+                />
+                <PaymentMethodIcon method="PIX" size={24} />
+                <span>PIX</span>
+              </label>
+            ) : (
+              <>
+                <label className={`method-option ${value.method === "CARD" ? "selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="method"
+                    value="CARD"
+                    checked={value.method === "CARD"}
+                    onChange={(e) => onChange({ ...value, method: e.target.value } as any)}
+                    required
+                  />
+                  <PaymentMethodIcon method="CARD" size={24} />
+                  <span>Cartão</span>
+                </label>
+                <label className={`method-option ${value.method === "CASH" ? "selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="method"
+                    value="CASH"
+                    checked={value.method === "CASH"}
+                    onChange={(e) => onChange({ ...value, method: e.target.value } as any)}
+                    required
+                  />
+                  <PaymentMethodIcon method="CASH" size={24} />
+                  <span>Dinheiro</span>
+                </label>
+                <label className={`method-option ${value.method === "TRANSFER" ? "selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="method"
+                    value="TRANSFER"
+                    checked={value.method === "TRANSFER"}
+                    onChange={(e) => onChange({ ...value, method: e.target.value } as any)}
+                    required
+                  />
+                  <PaymentMethodIcon method="TRANSFER" size={24} />
+                  <span>Transferência</span>
+                </label>
+                <label className={`method-option ${value.method === "OTHER" ? "selected" : ""}`}>
+                  <input
+                    type="radio"
+                    name="method"
+                    value="OTHER"
+                    checked={value.method === "OTHER"}
+                    onChange={(e) => onChange({ ...value, method: e.target.value } as any)}
+                    required
+                  />
+                  <PaymentMethodIcon method="OTHER" size={24} />
+                  <span>Outro</span>
+                </label>
+              </>
+            )}
+          </div>
+        </FormField>
+      </div>
       {isAutomatic ? (
         <>
           <FormField label="Descricao">

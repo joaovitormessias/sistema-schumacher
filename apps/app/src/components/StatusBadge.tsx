@@ -4,9 +4,23 @@ export type StatusTone = "neutral" | "info" | "success" | "warning" | "danger";
 
 type StatusBadgeProps = {
   tone?: StatusTone;
-  children: ReactNode;
+  icon?: ReactNode;
+  label?: string;
+  children?: ReactNode;
 };
 
-export default function StatusBadge({ tone = "neutral", children }: StatusBadgeProps) {
-  return <span className={`status-badge ${tone}`}>{children}</span>;
+export default function StatusBadge({
+  tone = "neutral",
+  icon,
+  label,
+  children
+}: StatusBadgeProps) {
+  const content = label ?? children;
+
+  return (
+    <span className={`status-badge ${tone}`}>
+      {icon && <span className="status-badge-icon">{icon}</span>}
+      {content}
+    </span>
+  );
 }

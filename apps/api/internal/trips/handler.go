@@ -2,6 +2,7 @@ package trips
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -71,12 +72,34 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "route_id, bus_id and departure_at are required", nil)
 		return
 	}
+	if input.EstimatedKM != nil && *input.EstimatedKM < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "estimated_km must be >= 0", nil)
+		return
+	}
 
 	item, err := h.svc.Create(r.Context(), input)
 	if err != nil {
+		var routeErr RouteNotReadyError
+		if errors.As(err, &routeErr) {
+			log.Printf(
+				"event=trip_create_blocked_route_not_ready route_id=%s missing_count=%d missing_rules=%s",
+				input.RouteID,
+				len(routeErr.MissingRequirements),
+				strings.Join(routeErr.MissingRequirements, ","),
+			)
+			log.Printf("metric=trip_create_itinerary_validation_total value=1 outcome=blocked route_id=%s", input.RouteID)
+			httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"code":                 "ROUTE_NOT_READY",
+				"message":              "route is not ready for trip creation",
+				"requirements_missing": routeErr.MissingRequirements,
+			})
+			return
+		}
 		httpx.WriteError(w, http.StatusInternalServerError, "TRIP_CREATE_ERROR", "could not create trip", err.Error())
 		return
 	}
+	log.Printf("event=trip_created trip_id=%s route_id=%s status=%s", item.ID, item.RouteID, item.Status)
+	log.Printf("metric=trip_create_itinerary_validation_total value=1 outcome=ready route_id=%s", item.RouteID)
 	httpx.WriteJSON(w, http.StatusCreated, item)
 }
 
@@ -92,9 +115,34 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
 		return
 	}
+	if input.EstimatedKM != nil && *input.EstimatedKM < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "estimated_km must be >= 0", nil)
+		return
+	}
+	if input.OperationalStatus != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "WORKFLOW_LOCKED", "operational_status is managed by workflow", nil)
+		return
+	}
 
 	item, err := h.svc.Update(r.Context(), id, input)
 	if err != nil {
+		var routeErr RouteNotReadyError
+		if errors.As(err, &routeErr) {
+			httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
+				"code":                 "ROUTE_NOT_READY",
+				"message":              "route is not ready for trip update",
+				"requirements_missing": routeErr.MissingRequirements,
+			})
+			return
+		}
+		if errors.Is(err, ErrOperationalStatusManagedByWorkflow) {
+			httpx.WriteError(w, http.StatusBadRequest, "WORKFLOW_LOCKED", "operational_status is managed by workflow", nil)
+			return
+		}
+		if errors.Is(err, ErrTripStatusManagedByWorkflow) {
+			httpx.WriteError(w, http.StatusBadRequest, "WORKFLOW_LOCKED", "trip status progression is managed by workflow", nil)
+			return
+		}
 		if IsNotFound(err) {
 			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "trip not found", nil)
 			return
@@ -171,6 +219,14 @@ func (h *Handler) createStop(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.RouteStopID == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "route_stop_id is required", nil)
+		return
+	}
+	if input.LegDistanceKM != nil && *input.LegDistanceKM < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "leg_distance_km must be >= 0", nil)
+		return
+	}
+	if input.CumulativeDistanceKM != nil && *input.CumulativeDistanceKM < 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "cumulative_distance_km must be >= 0", nil)
 		return
 	}
 

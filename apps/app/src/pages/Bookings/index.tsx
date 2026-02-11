@@ -2,6 +2,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import InlineAlert from "../../components/InlineAlert";
 import PageHeader from "../../components/PageHeader";
+import StatusBadge from "../../components/StatusBadge";
 import { useBookings } from "../../hooks/useBookings";
 import { useRoutes } from "../../hooks/useRoutes";
 import { useTrips } from "../../hooks/useTrips";
@@ -152,6 +153,7 @@ export default function Bookings() {
   const [quote, setQuote] = useState<QuoteResult | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteWarning, setQuoteWarning] = useState<string | null>(null);
+  const [quoteRefreshKey, setQuoteRefreshKey] = useState(0);
   const [actionError, setActionError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [query, setQuery] = useState("");
@@ -218,7 +220,9 @@ export default function Bookings() {
       return;
     }
     setQuoteWarning(null);
+    setActionError(null);
     setQuoteLoading(true);
+    let cancelled = false;
     apiPost<QuoteResult>("/pricing/quote", {
       trip_id: form.trip_id,
       board_stop_id: form.board_stop_id,
@@ -226,21 +230,54 @@ export default function Bookings() {
       fare_mode: form.fare_mode,
     })
       .then((data) => {
+        if (cancelled) return;
         setQuote(data);
         setForm((prev) => ({ ...prev, total_amount: data.final_amount }));
       })
       .catch((err) => {
+        if (cancelled) return;
         const message = err?.message || "Erro ao calcular tarifa";
-        if (message === "segment fare not found") {
+        const code = typeof err?.code === "string" ? err.code.toUpperCase() : "";
+        if (code === "FARE_NOT_FOUND" || message === "segment fare not found") {
           setQuote(null);
+          setForm((prev) => ({ ...prev, total_amount: 0 }));
           setQuoteWarning("Tarifa do trecho nao encontrada. Informe o valor manualmente.");
           setActionError(null);
           return;
         }
+        if (code === "STOP_NOT_FOUND" || code === "INVALID_STOPS") {
+          setQuote(null);
+          setForm((prev) => ({ ...prev, total_amount: 0 }));
+          setQuoteWarning("Trecho invalido para esta viagem. Revise embarque e desembarque.");
+          setActionError(null);
+          return;
+        }
+        setQuote(null);
         setActionError(message);
       })
-      .finally(() => setQuoteLoading(false));
-  }, [form.trip_id, form.board_stop_id, form.alight_stop_id, form.fare_mode]);
+      .finally(() => {
+        if (cancelled) return;
+        setQuoteLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.trip_id, form.board_stop_id, form.alight_stop_id, form.fare_mode, quoteRefreshKey]);
+
+  useEffect(() => {
+    if (activeStep !== "payment") return;
+    if (form.fare_mode === "MANUAL") return;
+    if (!form.trip_id || !form.board_stop_id || !form.alight_stop_id) return;
+    if (Number(form.total_amount) > 0) return;
+    setQuoteRefreshKey((prev) => prev + 1);
+  }, [
+    activeStep,
+    form.trip_id,
+    form.board_stop_id,
+    form.alight_stop_id,
+    form.fare_mode,
+    form.total_amount,
+  ]);
 
   const minInitialAmount = useMemo(() => {
     if (!form.total_amount || form.total_amount <= 0) return 0;
@@ -673,9 +710,10 @@ export default function Bookings() {
   return (
     <section className="page">
       <PageHeader
-        title="Reservas"
+        eyebrow="VENDAS"
+        title="🎫 Reservas"
         subtitle="Fluxo integrado com pagamento inicial e validacao automatica."
-        meta={<span className="badge">{checkoutV2Enabled ? "Checkout v2" : "Checkout v1 fallback"}</span>}
+        meta={<StatusBadge tone="info" label={`${bookings.length} reservas`} />}
       />
 
       <BookingFormProvider value={{ form, setForm, activeStep, setActiveStep }}>

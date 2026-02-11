@@ -1,4 +1,5 @@
 import StatusBadge from "../../components/StatusBadge";
+import RuleTypeIcon from "../../components/icons/RuleTypeIcon";
 import { formatDate } from "../../utils/format";
 import { pricingRuleTypeLabel, pricingScopeLabel } from "../../utils/labels";
 
@@ -28,22 +29,30 @@ export default function PricingRuleCard({ rule, onEdit }: PricingRuleCardProps) 
   const showSeason = rule.rule_type === "SEASON" && windows.length > 0;
 
   return (
-    <div className="card">
-      <h3>{rule.name}</h3>
-      <p>Tipo: {typeLabel}</p>
-      <p>
-        Escopo: {scopeLabel}
-        {rule.scope_id ? ` • ${rule.scope_id}` : ""}
-      </p>
-      <p>Ordem de aplicação: {rule.priority}</p>
-      <p>
-        Status:{" "}
-        {rule.is_active ? (
-          <StatusBadge tone="success">Ativa</StatusBadge>
-        ) : (
-          <StatusBadge tone="warning">Inativa</StatusBadge>
-        )}
-      </p>
+    <div className="card pricing-rule-card">
+      <div className="pricing-rule-header">
+        <div className="pricing-rule-title-group">
+          <RuleTypeIcon ruleType={rule.rule_type as any} size={24} color="var(--accent)" />
+          <div>
+            <h3>{rule.name}</h3>
+            <p className="text-caption">{typeLabel}</p>
+          </div>
+        </div>
+        <StatusBadge
+          tone={rule.is_active ? "success" : "warning"}
+          label={rule.is_active ? "Ativa" : "Inativa"}
+        />
+      </div>
+
+      <div className="pricing-rule-meta">
+        <span className="meta-item">
+          <span className="meta-label">Escopo:</span> {scopeLabel}
+          {rule.scope_id ? ` • ${rule.scope_id}` : ""}
+        </span>
+        <span className="meta-item">
+          <span className="meta-label">Prioridade:</span> {rule.priority}
+        </span>
+      </div>
 
       {showSeason ? (
         <div className="form-summary">

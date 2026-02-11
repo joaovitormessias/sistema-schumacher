@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/joho/godotenv"
 
 	"schumacher-tur/api/internal/advance_returns"
 	"schumacher-tur/api/internal/auth"
@@ -32,6 +33,7 @@ import (
 	"schumacher-tur/api/internal/suppliers"
 	"schumacher-tur/api/internal/trip_advances"
 	"schumacher-tur/api/internal/trip_expenses"
+	"schumacher-tur/api/internal/trip_operations"
 	"schumacher-tur/api/internal/trip_settlements"
 	"schumacher-tur/api/internal/trip_validations"
 	"schumacher-tur/api/internal/trips"
@@ -39,6 +41,10 @@ import (
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("warning: .env file not found")
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
@@ -86,6 +92,7 @@ func main() {
 		busesHandler := buses.NewHandler(buses.NewService(buses.NewRepository(pool)))
 		driversHandler := drivers.NewHandler(drivers.NewService(drivers.NewRepository(pool)))
 		tripsHandler := trips.NewHandler(trips.NewService(trips.NewRepository(pool)))
+		tripOperationsHandler := trip_operations.NewHandler(trip_operations.NewService(trip_operations.NewRepository(pool)))
 		pricingSvc := pricing.NewService(pricing.NewRepository(pool))
 		bookingsHandler := bookings.NewHandler(bookings.NewService(bookings.NewRepository(pool), pricingSvc, paymentsSvc))
 		reportsHandler := reports.NewHandler(reports.NewService(reports.NewRepository(pool)))
@@ -95,6 +102,7 @@ func main() {
 		busesHandler.RegisterRoutes(pr)
 		driversHandler.RegisterRoutes(pr)
 		tripsHandler.RegisterRoutes(pr)
+		tripOperationsHandler.RegisterRoutes(pr)
 		bookingsHandler.RegisterRoutes(pr)
 		paymentsHandler.RegisterRoutes(pr)
 		reportsHandler.RegisterRoutes(pr)
@@ -185,7 +193,7 @@ func corsMiddleware(cfg config.Config) func(http.Handler) http.Handler {
 					w.Header().Set("Access-Control-Allow-Origin", origin)
 					w.Header().Set("Vary", "Origin")
 					w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 					w.Header().Set("Access-Control-Allow-Credentials", "true")
 				}
 			}

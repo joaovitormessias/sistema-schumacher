@@ -7,8 +7,12 @@ export type TripItem = {
   route_id: string;
   bus_id: string;
   driver_id?: string;
+  request_id?: string;
   departure_at: string;
   status: string;
+  operational_status: string;
+  estimated_km: number;
+  dispatch_validated_at?: string;
 };
 
 type UseTripsOptions = {

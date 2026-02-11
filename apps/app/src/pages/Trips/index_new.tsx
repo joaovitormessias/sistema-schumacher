@@ -52,7 +52,7 @@ const statusTone = (status: string): StatusTone => {
 export default function Trips() {
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [showWizard, setShowWizard] = useState(false);
-  const routes = (useRoutes(200, 0, { status: "active" }).data as RouteItem[] | undefined) ?? [];
+  const routes = (useRoutes(200, 0).data as RouteItem[] | undefined) ?? [];
   const buses = (useBuses(200, 0).data as BusItem[] | undefined) ?? [];
   const drivers = (useDrivers(200, 0).data as DriverItem[] | undefined) ?? [];
 

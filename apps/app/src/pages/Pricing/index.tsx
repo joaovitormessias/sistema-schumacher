@@ -3,6 +3,7 @@ import EmptyState from "../../components/EmptyState";
 import InlineAlert from "../../components/InlineAlert";
 import { Skeleton } from "../../components/feedback/SkeletonLoader";
 import PageHeader from "../../components/PageHeader";
+import StatusBadge from "../../components/StatusBadge";
 import SearchToolbar from "../../components/input/SearchToolbar";
 import useToast from "../../hooks/useToast";
 import { apiGet, apiPatch, apiPost } from "../../services/api";
@@ -200,9 +201,15 @@ export default function Pricing() {
   return (
     <section className="page">
       <PageHeader
-        title="Configuração de Tarifas"
+        eyebrow="CONFIGURAÇÃO"
+        title="💰 Tarifas"
         subtitle="Regras de multiplicadores por ocupação, antecedência e sazonalidade."
-        meta={<span className="badge">Config</span>}
+        meta={
+          <StatusBadge
+            tone="success"
+            label={`${rules.filter((r) => r.is_active).length} regras ativas`}
+          />
+        }
       />
 
       <PricingRuleForm

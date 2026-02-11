@@ -4,12 +4,17 @@ import "time"
 
 // Route represents a travel route.
 type Route struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	OriginCity      string    `json:"origin_city"`
-	DestinationCity string    `json:"destination_city"`
-	IsActive        bool      `json:"is_active"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID                    string    `json:"id"`
+	Name                  string    `json:"name"`
+	OriginCity            string    `json:"origin_city"`
+	DestinationCity       string    `json:"destination_city"`
+	IsActive              bool      `json:"is_active"`
+	StopCount             int       `json:"stop_count"`
+	ConfigurationStatus   string    `json:"configuration_status"`
+	MissingRequirements   []string  `json:"missing_requirements"`
+	HasLinkedTrips        bool      `json:"has_linked_trips"`
+	DuplicatedFromRouteID *string   `json:"duplicated_from_route_id,omitempty"`
+	CreatedAt             time.Time `json:"created_at"`
 }
 
 type CreateRouteInput struct {
@@ -30,6 +35,7 @@ type ListFilter struct {
 	Limit  int
 	Offset int
 	Search string
+	Status string
 }
 
 type RouteStop struct {

@@ -96,7 +96,7 @@ export default function Payments() {
     booking_id: "",
     amount: 0,
     method: "PIX",
-    description: "Passagem",
+    description: "",
     customer_name: "",
     customer_email: "",
     customer_phone: "",
@@ -126,7 +126,7 @@ export default function Payments() {
   useEffect(() => {
     if (activeTab === parsedSearch.mode) return;
     setActiveTab(parsedSearch.mode);
-  }, [activeTab, parsedSearch.mode]);
+  }, [parsedSearch.mode]);
 
   useEffect(() => {
     if (!parsedSearch.booking_id) return;
@@ -330,9 +330,15 @@ export default function Payments() {
   return (
     <section className="page">
       <PageHeader
-        title="Pagamentos"
+        eyebrow="FINANCEIRO"
+        title="💳 Pagamentos"
         subtitle="Cobrancas de reservas existentes, sincronizacao e historico."
-        meta={<span className="badge">Checkout support</span>}
+        meta={
+          <StatusBadge
+            tone="success"
+            label={`${payments.filter((p) => p.status === "PAID").length} pagos`}
+          />
+        }
       />
 
       <div className="section">

@@ -5,6 +5,7 @@ import Layout from "./Layout";
 
 const Dashboard = lazy(() => import("../pages/Dashboard"));
 const Trips = lazy(() => import("../pages/Trips"));
+const TripOperations = lazy(() => import("../pages/TripOperations"));
 const RoutesPage = lazy(() => import("../pages/Routes"));
 const Buses = lazy(() => import("../pages/Buses"));
 const Drivers = lazy(() => import("../pages/Drivers"));
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/dashboard" replace />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/trips" element={<Trips />} />
+          <Route path="/trips/:tripId/operations" element={<TripOperations />} />
           <Route path="/routes" element={<RoutesPage />} />
           <Route path="/buses" element={<Buses />} />
           <Route path="/drivers" element={<Drivers />} />

@@ -1,5 +1,5 @@
 import { QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useBookings } from "../../../hooks/useBookings";
@@ -197,5 +197,80 @@ describe("Bookings shortcuts", () => {
       expect(screen.getByRole("button", { name: /Poltrona 12/i })).toBeInTheDocument();
     });
     expect(screen.queryByRole("button", { name: /Poltrona 9/i })).not.toBeInTheDocument();
+  });
+
+  it("preserva total automatico quando quote e digitacao ocorrem juntos", async () => {
+    const user = userEvent.setup();
+    let resolveQuote: ((value: any) => void) | null = null;
+
+    vi.mocked(apiPost).mockImplementation((path: string) => {
+      if (path === "/pricing/quote") {
+        return new Promise((resolve) => {
+          resolveQuote = resolve;
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    renderBookings();
+
+    await user.selectOptions(screen.getByLabelText(/Viagem/i), "trip-1");
+    const boardSelect = screen.getByLabelText(/Embarque/i, { selector: "select:not([disabled])" });
+    await waitFor(() => {
+      expect(within(boardSelect).getByRole("option", { name: /1 - Chapeco/i })).toBeInTheDocument();
+    });
+    await user.selectOptions(boardSelect, "stop-1");
+    await user.selectOptions(screen.getByLabelText(/Desembarque/i), "stop-2");
+    await user.selectOptions(screen.getByLabelText(/Poltrona/i), "seat-1");
+
+    const passengerInput = screen.getByLabelText(/Nome do passageiro/i);
+    await user.type(passengerInput, "M");
+
+    await waitFor(() => {
+      expect(resolveQuote).toBeTypeOf("function");
+    });
+
+    await act(async () => {
+      resolveQuote?.({
+        base_amount: 180,
+        calc_amount: 180,
+        final_amount: 180,
+        currency: "BRL",
+        fare_mode: "AUTO",
+        occupancy_ratio: 0.3,
+      });
+      fireEvent.change(passengerInput, { target: { value: "Maria" } });
+      await Promise.resolve();
+    });
+
+    await user.click(screen.getByRole("button", { name: /Continuar para pagamento/i }));
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Total da reserva/i)).toHaveValue(180);
+    });
+  });
+
+  it("mostra aviso quando o backend retorna FARE_NOT_FOUND", async () => {
+    const user = userEvent.setup();
+
+    vi.mocked(apiPost).mockImplementation((path: string) => {
+      if (path === "/pricing/quote") {
+        return Promise.reject({ code: "FARE_NOT_FOUND", message: "falha ao calcular" });
+      }
+      return Promise.resolve({});
+    });
+
+    renderBookings();
+
+    await user.selectOptions(screen.getByLabelText(/Viagem/i), "trip-1");
+    const boardSelect = screen.getByLabelText(/Embarque/i, { selector: "select:not([disabled])" });
+    await waitFor(() => {
+      expect(within(boardSelect).getByRole("option", { name: /1 - Chapeco/i })).toBeInTheDocument();
+    });
+    await user.selectOptions(boardSelect, "stop-1");
+    await user.selectOptions(screen.getByLabelText(/Desembarque/i), "stop-2");
+
+    await waitFor(() => {
+      expect(screen.getByText(/Tarifa do trecho nao encontrada/i)).toBeInTheDocument();
+    });
   });
 });
