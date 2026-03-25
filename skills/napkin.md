@@ -138,6 +138,7 @@ absolute imports without being told. That's the loop working.
 - 2026-02-10: When discussing major flow issues (ex.: criação de rotas), do a full code-flow analysis first and do not edit product code in that turn.
 - 2026-02-10: For business-rule discussions, bring external references from the web (regulatory/market) to ground recommendations.
 - 2026-02-10: In operational forms (ex.: Rotas/Paradas), ambiguous numeric fields must be explicitly labeled with business meaning.
+- 2026-03-18: Para utilitarios tecnicos (ex.: requisicao API), preferir criar pasta isolada sem relacao com o restante do codigo.
 
 ### Domain Notes
 - Current app flow has route stop entities in DB/API, but `Routes` UI still does only quick route header creation (`name`, `origin_city`, `destination_city`) without stop configuration.
@@ -145,3 +146,12 @@ absolute imports without being told. That's the loop working.
 - `docs-sistema/Procedimentos Operacionais Fretamento.md` reinforces that operations start from request intake with boarding point and schedule, then route/itinerary organization (including all trip points), passenger list checks, D-1 vehicle/driver assignment, and authorization workflow (DETER/ANTT) before departure.
 - Fretamento workflow also requires pre-trip travel folder/document checklist and post-trip reconciliation, so route/trip setup should capture enough stop/timing detail for authorization and execution artifacts.
 - Booking auto fare depends on `segment_fares`; repo currently has quote logic but no API/UI CRUD for `segment_fares`, so in many real scenarios checkout stays sem tarifa automatica until DB has active segment fare data.
+
+- 2026-03-05: Para comparar modelo Excel com Supabase neste repo, extrair headers via openpyxl e cruzar com information_schema.columns via MCP.
+
+- 2026-03-16: g pode falhar por permissao no PowerShell deste ambiente; usar Select-String/Get-ChildItem como fallback para buscas em SQL e codigo.
+
+
+- 2026-03-18: Em Pagar.me v5, POST /core/v5/recipients pode retornar action_forbidden ('This company it not allowed to create a recipient') mesmo com payload valido; validar habilitacao de marketplace/permissao da conta antes de insistir em ajustes de schema.
+
+- 2026-03-19: Em criacao de recebedor Pagar.me v5, pode haver permissao para criar mas sem permissao para alterar antecipacao; se vier action_forbidden de anticipation parameters, remover automatic_anticipation_settings do POST.

@@ -19,6 +19,7 @@ import (
 	"schumacher-tur/api/internal/driver_cards"
 	"schumacher-tur/api/internal/drivers"
 	"schumacher-tur/api/internal/fiscal_documents"
+	"schumacher-tur/api/internal/imports_xlsx"
 	"schumacher-tur/api/internal/invoices"
 	"schumacher-tur/api/internal/payments"
 	"schumacher-tur/api/internal/pricing"
@@ -147,6 +148,9 @@ func main() {
 
 		invoicesHandler := invoices.NewHandler(invoices.NewService(invoices.NewRepository(pool)))
 		invoicesHandler.RegisterRoutes(pr)
+
+		importsXLSXHandler := imports_xlsx.NewHandler(imports_xlsx.NewService(imports_xlsx.NewRepository(pool)))
+		importsXLSXHandler.RegisterRoutes(pr)
 
 		users.NewHandler().RegisterRoutes(pr)
 	})

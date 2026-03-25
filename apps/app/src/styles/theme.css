@@ -2821,7 +2821,7 @@ textarea.input {
   display: flex;
   justify-content: space-between;
   gap: var(--space-2);
-  align-items: flex-start;
+  align-items: center;
 }
 
 .route-stop-empty {
