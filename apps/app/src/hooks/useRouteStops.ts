@@ -5,6 +5,8 @@ export type RouteStopItem = {
   id: string;
   route_id: string;
   city: string;
+  latitude?: number | null;
+  longitude?: number | null;
   stop_order: number;
   eta_offset_minutes?: number | null;
   notes?: string | null;

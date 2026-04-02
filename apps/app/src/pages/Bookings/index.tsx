@@ -14,7 +14,14 @@ import BookingList from "./BookingList";
 import { BookingFormProvider, type BookingFormState, type BookingStep } from "./BookingFormContext";
 import BookingStepForm from "./BookingStepForm";
 
-type TripItem = { id: string; route_id: string; bus_id: string; departure_at: string };
+type TripItem = {
+  id: string;
+  route_id: string;
+  bus_id: string;
+  departure_at: string;
+  seats_total?: number;
+  seats_available?: number;
+};
 type RouteItem = { id: string; origin_city: string; destination_city: string };
 type SeatItem = { id: string; seat_number: number; is_active: boolean; is_taken: boolean };
 
@@ -458,7 +465,12 @@ export default function Bookings() {
   const tripLabel = (tripId: string) => {
     const trip = trips.find((t) => t.id === tripId);
     if (!trip) return formatShortId(tripId);
-    return `${routeLabel(trip.route_id)} - ${formatDateTime(trip.departure_at)}`;
+    const seatsTotal = Number.isFinite(trip.seats_total) ? Math.max(0, Number(trip.seats_total)) : 0;
+    const seatsAvailable = Number.isFinite(trip.seats_available)
+      ? Math.max(0, Number(trip.seats_available))
+      : 0;
+    const capacitySuffix = seatsTotal > 0 ? ` - vagas ${seatsAvailable}/${seatsTotal}` : "";
+    return `${routeLabel(trip.route_id)} - ${formatDateTime(trip.departure_at)}${capacitySuffix}`;
   };
 
   const tripPassengerSummary = stepTripPassengerComplete

@@ -1,61 +1,41 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import {
-  BadgeCheck,
-  BarChart3,
-  Box,
-  Bus,
-  ChevronDown,
-  CreditCard,
-  FileText,
-  IdCard,
   LayoutDashboard,
-  MapPin,
-  Package,
-  Receipt,
   Route,
-  ShoppingCart,
-  Tag,
+  MapPin,
   Ticket,
-  Truck,
+  Bus,
+  IdCard,
+  CreditCard,
+  Tag,
+  BarChart3,
+  Wallet,
+  Box,
+  ChevronDown,
   Moon,
   Sun,
-  Wallet,
-  Wrench,
 } from "lucide-react";
 import { ToastProvider } from "../components/state/ToastProvider";
 import Drawer from "../components/overlay/Drawer";
 import ConfirmDialog from "../components/overlay/ConfirmDialog";
 import { getSupabaseClient } from "../services/supabase";
 
-const navItems = [
+const baseNavItems = [
   { path: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { path: "/trips", label: "Viagens", icon: Route },
   { path: "/routes", label: "Rotas", icon: MapPin },
+  { path: "/bookings", label: "Reservas", icon: Ticket },
+];
+
+const legacyNavItems = [
   { path: "/buses", label: "Onibus", icon: Bus },
   { path: "/drivers", label: "Motoristas", icon: IdCard },
-  { path: "/bookings", label: "Reservas", icon: Ticket },
   { path: "/payments", label: "Pagamentos", icon: CreditCard },
   { path: "/pricing", label: "Tarifas", icon: Tag },
   { path: "/reports", label: "Relatorios", icon: BarChart3 },
-];
-
-const financeItems = [
-  { tab: "advances", label: "Adiantamentos", icon: Wallet },
-  { tab: "expenses", label: "Despesas", icon: Receipt },
-  { tab: "settlements", label: "Acertos", icon: BadgeCheck },
-  { tab: "cards", label: "Cartoes", icon: CreditCard },
-  { tab: "validations", label: "Validacoes", icon: BadgeCheck },
-  { tab: "documents", label: "Documentos Fiscais", icon: FileText },
-];
-
-const warehouseItems = [
-  { tab: "suppliers", label: "Fornecedores", icon: Truck },
-  { tab: "products", label: "Produtos", icon: Package },
-  { tab: "service-orders", label: "Ordens de Servico", icon: Wrench },
-  { tab: "purchase-orders", label: "Pedidos de Compra", icon: ShoppingCart },
-  { tab: "invoices", label: "Notas Fiscais", icon: FileText },
-  { tab: "stock", label: "Estoque", icon: Box },
+  { path: "/financial", label: "Financeiro", icon: Wallet },
+  { path: "/warehouse", label: "Almoxarifado", icon: Box },
 ];
 
 const THEME_STORAGE_KEY = "app-theme";
@@ -64,6 +44,9 @@ type AppTheme = "light" | "dark";
 const SIDEBAR_STORAGE_KEY = "sidebar-collapsed";
 
 export default function Layout({ children }: { children: ReactNode }) {
+  const legacyMode = (import.meta.env.VITE_LEGACY_MODE ?? "false").toLowerCase() === "true";
+  const navItems = legacyMode ? [...baseNavItems, ...legacyNavItems] : baseNavItems;
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -77,41 +60,18 @@ export default function Layout({ children }: { children: ReactNode }) {
     const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
     return saved === "dark" ? "dark" : "light";
   });
-  const [openSections, setOpenSections] = useState({
-    financial: true,
-    warehouse: true,
-  });
   const location = useLocation();
 
-  const activeFinanceTab = useMemo(() => {
-    if (location.pathname !== "/financial") return null;
-    const tab = new URLSearchParams(location.search).get("tab") ?? "advances";
-    return financeItems.find((item) => item.tab === tab) ?? financeItems[0];
-  }, [location.pathname, location.search]);
-
-  const activeWarehouseTab = useMemo(() => {
-    if (location.pathname !== "/warehouse") return null;
-    return new URLSearchParams(location.search).get("tab") ?? "suppliers";
-  }, [location.pathname, location.search]);
-
   const currentItem = useMemo(() => {
-    if (activeFinanceTab) {
-      return { path: "/financial", label: `Financeiro - ${activeFinanceTab.label}` };
-    }
     return navItems.find((item) => location.pathname.startsWith(item.path));
-  }, [activeFinanceTab, location.pathname]);
+  }, [location.pathname]);
 
   const quickAction = useMemo(() => {
     const path = currentItem?.path ?? "";
     const map: Record<string, { label: string; to: string }> = {
       "/bookings": { label: "Nova reserva", to: "/bookings#booking-form" },
-      "/trips": { label: "Criar viagem", to: "/trips#crud-form" },
-      "/routes": { label: "Criar rota", to: "/routes#crud-form" },
-      "/buses": { label: "Criar onibus", to: "/buses#crud-form" },
-      "/drivers": { label: "Criar motorista", to: "/drivers#crud-form" },
-      "/payments": { label: "Registrar pagamento", to: "/payments" },
-      "/pricing": { label: "Nova tarifa", to: "/pricing" },
-      "/financial": { label: "Abrir financeiro", to: "/financial?tab=advances" },
+      "/trips": { label: "Nova viagem", to: "/trips#crud-form" },
+      "/routes": { label: "Nova rota", to: "/routes#crud-form" },
     };
     return map[path] ?? null;
   }, [currentItem]);
@@ -125,15 +85,6 @@ export default function Layout({ children }: { children: ReactNode }) {
     window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
-  useEffect(() => {
-    if (location.pathname === "/financial") {
-      setOpenSections((prev) => (prev.financial ? prev : { ...prev, financial: true }));
-    }
-    if (location.pathname === "/warehouse") {
-      setOpenSections((prev) => (prev.warehouse ? prev : { ...prev, warehouse: true }));
-    }
-  }, [location.pathname]);
-
   const handleSignOut = () => {
     setSignOutOpen(true);
   };
@@ -142,10 +93,6 @@ export default function Layout({ children }: { children: ReactNode }) {
     const client = getSupabaseClient();
     client?.auth.signOut();
     setSignOutOpen(false);
-  };
-
-  const toggleSection = (section: "financial" | "warehouse") => {
-    setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   };
 
   const toggleSidebar = () => {
@@ -190,7 +137,7 @@ export default function Layout({ children }: { children: ReactNode }) {
                   size={18}
                   style={{
                     transform: sidebarCollapsed ? "rotate(-90deg)" : "rotate(90deg)",
-                    transition: "transform 0.2s ease"
+                    transition: "transform 0.2s ease",
                   }}
                 />
               </button>
@@ -208,70 +155,6 @@ export default function Layout({ children }: { children: ReactNode }) {
                 <span>{item.label}</span>
               </NavLink>
             ))}
-            <div className="nav-section">
-              <button
-                type="button"
-                className={`nav-section-toggle ${openSections.financial ? "open" : ""}`}
-                onClick={() => toggleSection("financial")}
-                aria-expanded={openSections.financial}
-                aria-controls="financial-nav-section"
-              >
-                <span className="nav-section-title">Financeiro</span>
-                <ChevronDown size={16} />
-              </button>
-              <div
-                id="financial-nav-section"
-                className={`nav-section-content ${openSections.financial ? "open" : ""}`}
-              >
-                {financeItems.map((item) => (
-                  <Link
-                    key={item.tab}
-                    to={`/financial?tab=${item.tab}`}
-                    className={
-                      location.pathname === "/financial" && activeFinanceTab?.tab === item.tab
-                        ? "nav-link active"
-                        : "nav-link"
-                    }
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    <item.icon className="nav-icon" size={18} aria-hidden="true" />
-                    <span>{item.label}</span>
-                  </Link>
-                ))}
-              </div>
-            </div>
-            <div className="nav-section">
-              <button
-                type="button"
-                className={`nav-section-toggle ${openSections.warehouse ? "open" : ""}`}
-                onClick={() => toggleSection("warehouse")}
-                aria-expanded={openSections.warehouse}
-                aria-controls="warehouse-nav-section"
-              >
-                <span className="nav-section-title">Almoxarifado</span>
-                <ChevronDown size={16} />
-              </button>
-              <div
-                id="warehouse-nav-section"
-                className={`nav-section-content ${openSections.warehouse ? "open" : ""}`}
-              >
-                {warehouseItems.map((item) => (
-                  <Link
-                    key={item.tab}
-                    to={`/warehouse?tab=${item.tab}`}
-                    className={
-                      location.pathname === "/warehouse" && activeWarehouseTab === item.tab
-                        ? "nav-link active"
-                        : "nav-link"
-                    }
-                    onClick={() => setMenuOpen(false)}
-                  >
-                    <item.icon className="nav-icon" size={18} aria-hidden="true" />
-                    <span>{item.label}</span>
-                  </Link>
-                ))}
-              </div>
-            </div>
           </nav>
           <button className="button button-outline" onClick={handleSignOut}>
             Sair
@@ -296,7 +179,7 @@ export default function Layout({ children }: { children: ReactNode }) {
         onClose={() => setShortcutsOpen(false)}
       >
         <div className="shortcut-list">
-          {navItems.slice(0, 6).map((item) => (
+          {navItems.map((item) => (
             <Link
               key={item.path}
               className="shortcut-item"
@@ -307,22 +190,6 @@ export default function Layout({ children }: { children: ReactNode }) {
               <span>{item.label}</span>
             </Link>
           ))}
-          <Link
-            className="shortcut-item"
-            to="/financial?tab=advances"
-            onClick={() => setShortcutsOpen(false)}
-          >
-            <Wallet size={16} aria-hidden="true" />
-            <span>Financeiro</span>
-          </Link>
-          <Link
-            className="shortcut-item"
-            to="/warehouse?tab=suppliers"
-            onClick={() => setShortcutsOpen(false)}
-          >
-            <Box size={16} aria-hidden="true" />
-            <span>Almoxarifado</span>
-          </Link>
         </div>
       </Drawer>
       <ConfirmDialog

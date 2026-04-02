@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"log"
 	"math"
 	"strings"
 
@@ -107,10 +105,6 @@ func (s *Service) UpdateStatus(ctx context.Context, id string, status string) (B
 }
 
 func (s *Service) Checkout(ctx context.Context, input CheckoutBookingInput) (CheckoutResponse, error) {
-	if s.payments == nil {
-		return CheckoutResponse{}, fmt.Errorf("payments service not configured")
-	}
-	log.Printf("event=checkout_started trip_id=%s seat_id=%s method=%s amount=%.2f", input.TripID, input.SeatID, strings.ToUpper(strings.TrimSpace(input.InitialPayment.Method)), input.InitialPayment.Amount)
 	if strings.TrimSpace(input.InitialPayment.Method) == "" || input.InitialPayment.Amount <= 0 {
 		return CheckoutResponse{}, ErrInvalidInitialPayment
 	}
@@ -123,7 +117,8 @@ func (s *Service) Checkout(ctx context.Context, input CheckoutBookingInput) (Che
 		return CheckoutResponse{}, ErrInitialPaymentBelowMinimum
 	}
 
-	remainder := roundTo2(math.Max(input.TotalAmount-input.InitialPayment.Amount, 0))
+	deposit := roundTo2(input.InitialPayment.Amount)
+	remainder := roundTo2(math.Max(input.TotalAmount-deposit, 0))
 	booking, err := s.Create(ctx, CreateBookingInput{
 		TripID:          input.TripID,
 		SeatID:          input.SeatID,
@@ -134,48 +129,28 @@ func (s *Service) Checkout(ctx context.Context, input CheckoutBookingInput) (Che
 		Passenger:       input.Passenger,
 		Source:          input.Source,
 		TotalAmount:     input.TotalAmount,
-		DepositAmount:   roundTo2(input.InitialPayment.Amount),
+		DepositAmount:   deposit,
 		RemainderAmount: remainder,
 	})
 	if err != nil {
 		return CheckoutResponse{}, err
 	}
-	log.Printf("event=booking_created booking_id=%s status=%s", booking.Booking.ID, booking.Booking.Status)
-
-	var created payments.Payment
-	var providerRaw []byte
 	method := strings.ToUpper(strings.TrimSpace(input.InitialPayment.Method))
-	if isAutomaticCheckoutMethod(method) {
-		created, providerRaw, err = s.payments.Create(ctx, payments.CreatePaymentInput{
-			BookingID:   booking.Booking.ID,
-			Amount:      roundTo2(input.InitialPayment.Amount),
-			Method:      method,
-			Description: input.InitialPayment.Description,
-			Customer:    mapCustomer(input.InitialPayment.Customer),
-		})
-	} else {
-		created, err = s.payments.CreateManual(ctx, payments.ManualPaymentInput{
-			BookingID: booking.Booking.ID,
-			Amount:    roundTo2(input.InitialPayment.Amount),
-			Method:    method,
-			Notes:     input.InitialPayment.Notes,
-		})
+	payment := CheckoutPayment{
+		ID:        "",
+		BookingID: booking.Booking.ID,
+		Amount:    deposit,
+		Method:    method,
+		Status:    "PENDING",
+		CreatedAt: booking.Booking.CreatedAt,
 	}
-
-	if err != nil {
-		_, _ = s.UpdateStatus(ctx, booking.Booking.ID, "CANCELLED")
-		return CheckoutResponse{}, err
-	}
-	log.Printf("event=payment_created payment_id=%s booking_id=%s status=%s method=%s", created.ID, created.BookingID, created.Status, created.Method)
-
-	providerParsed, checkoutURL, pixCode := parseProviderData(providerRaw)
 
 	return CheckoutResponse{
 		Booking:     booking,
-		Payment:     mapPayment(created),
-		ProviderRaw: providerParsed,
-		CheckoutURL: checkoutURL,
-		PixCode:     pixCode,
+		Payment:     payment,
+		ProviderRaw: nil,
+		CheckoutURL: nil,
+		PixCode:     nil,
 	}, nil
 }
 

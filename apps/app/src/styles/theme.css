@@ -2739,6 +2739,95 @@ textarea.input {
   margin-top: var(--space-3);
 }
 
+.segment-prices-table-wrap {
+  max-height: min(60vh, 560px);
+  overflow: auto;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+}
+
+.trip-stops-table-wrap {
+  max-height: min(56vh, 520px);
+  overflow: auto;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+}
+
+.segment-prices-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+  background: var(--surface-elevated);
+}
+
+.segment-prices-table th,
+.segment-prices-table td {
+  border-bottom: 1px solid var(--border-light);
+  padding: var(--space-2);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.segment-prices-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-muted);
+  font-size: var(--body-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.segment-prices-order {
+  display: inline-flex;
+  margin-left: var(--space-1);
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-light);
+  color: var(--text-weak);
+  font-size: var(--body-sm);
+}
+
+.segment-prices-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--body-sm);
+}
+
+.segment-prices-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: space-between;
+  align-items: center;
+}
+
+.segment-prices-counter {
+  font-size: var(--body-sm);
+  color: var(--text-weak);
+}
+
+.segment-prices-stops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.segment-prices-stop-chip {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-full);
+  padding: 4px 10px;
+  font-size: var(--body-sm);
+  color: var(--text-weak);
+}
+
+.trip-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .overlay-drawer {
   display: grid;
   gap: var(--space-2);
@@ -2800,6 +2889,78 @@ textarea.input {
 .route-editor-panel {
   position: sticky;
   top: 90px;
+}
+
+.route-admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.route-admin-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+}
+
+.field-label {
+  font-size: var(--body-sm);
+  color: var(--text-weak);
+}
+
+.route-city-feedback {
+  font-size: 12px;
+  color: var(--text-weak);
+  margin-top: -2px;
+  margin-bottom: 2px;
+}
+
+.route-city-selected {
+  color: var(--success);
+}
+
+.route-city-candidate-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 6px;
+}
+
+.route-city-candidate-btn {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  color: var(--text);
+  padding: 8px 10px;
+  text-align: left;
+  display: grid;
+  gap: 4px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.route-city-candidate-btn:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.route-city-candidate-main {
+  font-size: var(--body-sm);
+  color: var(--text-strong);
+  font-weight: 600;
+}
+
+.route-city-candidate-sub {
+  font-size: 12px;
+  color: var(--text-weak);
 }
 
 .route-editor {

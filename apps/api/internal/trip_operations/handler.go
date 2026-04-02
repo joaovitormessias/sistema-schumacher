@@ -27,30 +27,28 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Post("/", h.createTripRequest)
 	})
 
-	r.Route("/trips/{tripId}", func(r chi.Router) {
-		r.Get("/manifest", h.listManifest)
-		r.Post("/manifest", h.createManifest)
-		r.Post("/manifest/sync", h.syncManifest)
-		r.Patch("/manifest/{entryId}", h.updateManifest)
+	r.Get("/trips/{tripId}/manifest", h.listManifest)
+	r.Post("/trips/{tripId}/manifest", h.createManifest)
+	r.Post("/trips/{tripId}/manifest/sync", h.syncManifest)
+	r.Patch("/trips/{tripId}/manifest/{entryId}", h.updateManifest)
 
-		r.Get("/authorizations", h.listAuthorizations)
-		r.Post("/authorizations", h.createAuthorization)
-		r.Patch("/authorizations/{authorizationId}", h.updateAuthorization)
+	r.Get("/trips/{tripId}/authorizations", h.listAuthorizations)
+	r.Post("/trips/{tripId}/authorizations", h.createAuthorization)
+	r.Patch("/trips/{tripId}/authorizations/{authorizationId}", h.updateAuthorization)
 
-		r.Get("/checklists/{stage}", h.getChecklist)
-		r.Put("/checklists/{stage}", h.upsertChecklist)
+	r.Get("/trips/{tripId}/checklists/{stage}", h.getChecklist)
+	r.Put("/trips/{tripId}/checklists/{stage}", h.upsertChecklist)
 
-		r.Get("/driver-report", h.getDriverReport)
-		r.Put("/driver-report", h.upsertDriverReport)
+	r.Get("/trips/{tripId}/driver-report", h.getDriverReport)
+	r.Put("/trips/{tripId}/driver-report", h.upsertDriverReport)
 
-		r.Get("/reconciliation", h.getReconciliation)
-		r.Put("/reconciliation", h.upsertReconciliation)
+	r.Get("/trips/{tripId}/reconciliation", h.getReconciliation)
+	r.Put("/trips/{tripId}/reconciliation", h.upsertReconciliation)
 
-		r.Get("/attachments", h.listAttachments)
-		r.Post("/attachments", h.createAttachment)
+	r.Get("/trips/{tripId}/attachments", h.listAttachments)
+	r.Post("/trips/{tripId}/attachments", h.createAttachment)
 
-		r.Post("/workflow/advance", h.advanceWorkflow)
-	})
+	r.Post("/trips/{tripId}/workflow/advance", h.advanceWorkflow)
 }
 
 func (h *Handler) listTripRequests(w http.ResponseWriter, r *http.Request) {

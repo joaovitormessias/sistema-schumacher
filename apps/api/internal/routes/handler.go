@@ -23,6 +23,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Route("/routes", func(r chi.Router) {
 		r.Get("/", h.list)
 		r.Post("/", h.create)
+		r.Get("/cities/candidates", h.searchCityCandidates)
 		r.Patch("/{routeId}", h.update)
 		r.Get("/{routeId}", h.get)
 		r.Post("/{routeId}/publish", h.publish)
@@ -31,7 +32,37 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Post("/{routeId}/stops", h.createStop)
 		r.Patch("/{routeId}/stops/{stopId}", h.updateStop)
 		r.Delete("/{routeId}/stops/{stopId}", h.deleteStop)
+		r.Get("/{routeId}/segment-prices", h.listSegmentPrices)
+		r.Put("/{routeId}/segment-prices", h.upsertSegmentPrices)
 	})
+}
+
+func (h *Handler) searchCityCandidates(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	if query == "" {
+		httpx.WriteJSON(w, http.StatusOK, []CityCandidate{})
+		return
+	}
+
+	limit := 8
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			httpx.WriteError(w, http.StatusBadRequest, "INVALID_LIMIT", "invalid limit", nil)
+			return
+		}
+		if parsed > 10 {
+			parsed = 10
+		}
+		limit = parsed
+	}
+
+	items, err := h.svc.SearchCityCandidates(r.Context(), query, limit)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_CITY_CANDIDATES_ERROR", "could not search city candidates", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, items)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -76,8 +107,8 @@ func parseListFilter(r *http.Request) (ListFilter, error) {
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
-	id, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	id := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if id == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
@@ -106,6 +137,19 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 	item, err := h.svc.Create(r.Context(), input)
 	if err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			httpx.WriteError(w, http.StatusNotImplemented, "NOT_SUPPORTED", "operation not supported for production ticketing schema", nil)
+			return
+		}
+		if strings.Contains(err.Error(), "origin_latitude") ||
+			strings.Contains(err.Error(), "origin_longitude") ||
+			strings.Contains(err.Error(), "destination_latitude") ||
+			strings.Contains(err.Error(), "destination_longitude") ||
+			strings.Contains(err.Error(), "latitude and longitude") ||
+			strings.Contains(err.Error(), "could not resolve coordinates") {
+			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+			return
+		}
 		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_CREATE_ERROR", "could not create route", err.Error())
 		return
 	}
@@ -114,8 +158,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
-	id, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	id := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if id == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
@@ -128,15 +172,19 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 
 	isPublishAttempt := input.IsActive != nil && *input.IsActive
 	if isPublishAttempt {
-		logRoutePublishAttempt(id.String(), "update")
+		logRoutePublishAttempt(id, "update")
 	}
 
 	item, err := h.svc.Update(r.Context(), id, input)
 	if err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			httpx.WriteError(w, http.StatusNotImplemented, "NOT_SUPPORTED", "operation not supported for production ticketing schema", nil)
+			return
+		}
 		var publishErr RoutePublishBlockedError
 		if errors.As(err, &publishErr) {
 			if isPublishAttempt {
-				logRoutePublishBlocked(id.String(), "update", publishErr.MissingRequirements)
+				logRoutePublishBlocked(id, "update", publishErr.MissingRequirements)
 			}
 			httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
 				"code":                 "ROUTE_PUBLISH_BLOCKED",
@@ -159,19 +207,23 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
-	id, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	id := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if id == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
 
-	logRoutePublishAttempt(id.String(), "publish")
+	logRoutePublishAttempt(id, "publish")
 
 	item, err := h.svc.Publish(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			httpx.WriteError(w, http.StatusNotImplemented, "NOT_SUPPORTED", "operation not supported for production ticketing schema", nil)
+			return
+		}
 		var publishErr RoutePublishBlockedError
 		if errors.As(err, &publishErr) {
-			logRoutePublishBlocked(id.String(), "publish", publishErr.MissingRequirements)
+			logRoutePublishBlocked(id, "publish", publishErr.MissingRequirements)
 			httpx.WriteJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{
 				"code":                 "ROUTE_PUBLISH_BLOCKED",
 				"message":              "route does not meet publish requirements",
@@ -191,14 +243,18 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) duplicate(w http.ResponseWriter, r *http.Request) {
-	id, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	id := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if id == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
 
 	item, err := h.svc.Duplicate(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			httpx.WriteError(w, http.StatusNotImplemented, "NOT_SUPPORTED", "operation not supported for production ticketing schema", nil)
+			return
+		}
 		if IsNotFound(err) {
 			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
 			return
@@ -211,8 +267,8 @@ func (h *Handler) duplicate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listStops(w http.ResponseWriter, r *http.Request) {
-	id, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	id := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if id == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
@@ -225,8 +281,8 @@ func (h *Handler) listStops(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) createStop(w http.ResponseWriter, r *http.Request) {
-	id, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	id := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if id == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
@@ -242,7 +298,18 @@ func (h *Handler) createStop(w http.ResponseWriter, r *http.Request) {
 
 	item, err := h.svc.CreateStop(r.Context(), id, input)
 	if err != nil {
-		if strings.Contains(err.Error(), "eta_offset_minutes") {
+		if errors.Is(err, ErrUnsupported) {
+			httpx.WriteError(w, http.StatusNotImplemented, "NOT_SUPPORTED", "operation not supported for production ticketing schema", nil)
+			return
+		}
+		if IsNotFound(err) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
+			return
+		}
+		if strings.Contains(err.Error(), "eta_offset_minutes") ||
+			strings.Contains(err.Error(), "latitude") ||
+			strings.Contains(err.Error(), "longitude") ||
+			strings.Contains(err.Error(), "could not resolve coordinates") {
 			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 			return
 		}
@@ -253,13 +320,13 @@ func (h *Handler) createStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateStop(w http.ResponseWriter, r *http.Request) {
-	routeID, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	routeID := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if routeID == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
-	stopID, err := httpx.ParseUUIDParam(r, "stopId")
-	if err != nil {
+	stopID := strings.TrimSpace(chi.URLParam(r, "stopId"))
+	if stopID == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid stop id", nil)
 		return
 	}
@@ -272,11 +339,18 @@ func (h *Handler) updateStop(w http.ResponseWriter, r *http.Request) {
 
 	item, err := h.svc.UpdateStop(r.Context(), routeID, stopID, input)
 	if err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			httpx.WriteError(w, http.StatusNotImplemented, "NOT_SUPPORTED", "operation not supported for production ticketing schema", nil)
+			return
+		}
 		if errors.Is(err, ErrRouteStopLocked) {
 			httpx.WriteError(w, http.StatusConflict, "ROUTE_STOP_LOCKED", "route stop reorder is locked for routes with linked trips", nil)
 			return
 		}
-		if strings.Contains(err.Error(), "eta_offset_minutes") {
+		if strings.Contains(err.Error(), "eta_offset_minutes") ||
+			strings.Contains(err.Error(), "latitude") ||
+			strings.Contains(err.Error(), "longitude") ||
+			strings.Contains(err.Error(), "could not resolve coordinates") {
 			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 			return
 		}
@@ -291,18 +365,22 @@ func (h *Handler) updateStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deleteStop(w http.ResponseWriter, r *http.Request) {
-	routeID, err := httpx.ParseUUIDParam(r, "routeId")
-	if err != nil {
+	routeID := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if routeID == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
 		return
 	}
-	stopID, err := httpx.ParseUUIDParam(r, "stopId")
-	if err != nil {
+	stopID := strings.TrimSpace(chi.URLParam(r, "stopId"))
+	if stopID == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid stop id", nil)
 		return
 	}
 
 	if err := h.svc.DeleteStop(r.Context(), routeID, stopID); err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			httpx.WriteError(w, http.StatusNotImplemented, "NOT_SUPPORTED", "operation not supported for production ticketing schema", nil)
+			return
+		}
 		if errors.Is(err, ErrRouteHasLinkedTrips) {
 			httpx.WriteError(w, http.StatusConflict, "ROUTE_STOP_LOCKED", "route stop delete is locked for routes with linked trips", nil)
 			return
@@ -316,6 +394,59 @@ func (h *Handler) deleteStop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) listSegmentPrices(w http.ResponseWriter, r *http.Request) {
+	routeID := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if routeID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
+		return
+	}
+
+	matrix, err := h.svc.ListSegmentPrices(r.Context(), routeID)
+	if err != nil {
+		if IsNotFound(err) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
+			return
+		}
+		httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_SEGMENT_PRICES_LIST_ERROR", "could not list route segment prices", err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, matrix)
+}
+
+func (h *Handler) upsertSegmentPrices(w http.ResponseWriter, r *http.Request) {
+	routeID := strings.TrimSpace(chi.URLParam(r, "routeId"))
+	if routeID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid route id", nil)
+		return
+	}
+
+	var input UpsertRouteSegmentPricesInput
+	if err := httpx.DecodeJSON(r, &input); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
+		return
+	}
+
+	matrix, err := h.svc.UpsertSegmentPrices(r.Context(), routeID, input)
+	if err != nil {
+		switch {
+		case IsNotFound(err):
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "route not found", nil)
+		case errors.Is(err, ErrInvalidSegmentPair):
+			httpx.WriteError(w, http.StatusBadRequest, "INVALID_SEGMENT_PAIR", "origin_stop and destination_stop must belong to route and keep route order", nil)
+		case errors.Is(err, ErrInvalidSegmentPrice):
+			httpx.WriteError(w, http.StatusBadRequest, "INVALID_SEGMENT_PRICE", "price must be >= 0", nil)
+		case errors.Is(err, ErrInvalidSegmentStatus):
+			httpx.WriteError(w, http.StatusBadRequest, "INVALID_SEGMENT_STATUS", "status must be ACTIVE or INACTIVE", nil)
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "ROUTE_SEGMENT_PRICES_UPDATE_ERROR", "could not update route segment prices", err.Error())
+		}
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, matrix)
 }
 
 func logRouteDraftCreated(item Route, source string) {

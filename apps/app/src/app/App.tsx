@@ -5,11 +5,11 @@ import Layout from "./Layout";
 
 const Dashboard = lazy(() => import("../pages/Dashboard"));
 const Trips = lazy(() => import("../pages/Trips"));
-const TripOperations = lazy(() => import("../pages/TripOperations"));
 const RoutesPage = lazy(() => import("../pages/Routes"));
+const Bookings = lazy(() => import("../pages/Bookings"));
+const TripOperations = lazy(() => import("../pages/TripOperations"));
 const Buses = lazy(() => import("../pages/Buses"));
 const Drivers = lazy(() => import("../pages/Drivers"));
-const Bookings = lazy(() => import("../pages/Bookings"));
 const Payments = lazy(() => import("../pages/Payments"));
 const Reports = lazy(() => import("../pages/Reports"));
 const Pricing = lazy(() => import("../pages/Pricing"));
@@ -17,6 +17,8 @@ const Financial = lazy(() => import("../pages/Financial"));
 const Warehouse = lazy(() => import("../pages/Warehouse"));
 
 export default function App() {
+  const legacyMode = (import.meta.env.VITE_LEGACY_MODE ?? "false").toLowerCase() === "true";
+
   return (
     <Layout>
       <Suspense
@@ -25,27 +27,32 @@ export default function App() {
             <LoadingState label="Carregando modulo..." />
           </section>
         }
-      >
+        >
         <Routes>
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/" element={<Navigate to="/bookings" replace />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/trips" element={<Trips />} />
-          <Route path="/trips/:tripId/operations" element={<TripOperations />} />
           <Route path="/routes" element={<RoutesPage />} />
-          <Route path="/buses" element={<Buses />} />
-          <Route path="/drivers" element={<Drivers />} />
           <Route path="/bookings" element={<Bookings />} />
-          <Route path="/payments" element={<Payments />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/pricing" element={<Pricing />} />
-          <Route path="/financial" element={<Financial />} />
-          <Route path="/warehouse" element={<Warehouse />} />
-          <Route path="/trip-advances" element={<Navigate to="/financial?tab=advances" replace />} />
-          <Route path="/trip-expenses" element={<Navigate to="/financial?tab=expenses" replace />} />
-          <Route path="/trip-settlements" element={<Navigate to="/financial?tab=settlements" replace />} />
-          <Route path="/driver-cards" element={<Navigate to="/financial?tab=cards" replace />} />
-          <Route path="/trip-validations" element={<Navigate to="/financial?tab=validations" replace />} />
-          <Route path="/fiscal-documents" element={<Navigate to="/financial?tab=documents" replace />} />
+          {legacyMode ? (
+            <>
+              <Route path="/trips/:tripId/operations" element={<TripOperations />} />
+              <Route path="/buses" element={<Buses />} />
+              <Route path="/drivers" element={<Drivers />} />
+              <Route path="/payments" element={<Payments />} />
+              <Route path="/reports" element={<Reports />} />
+              <Route path="/pricing" element={<Pricing />} />
+              <Route path="/financial" element={<Financial />} />
+              <Route path="/warehouse" element={<Warehouse />} />
+              <Route path="/trip-advances" element={<Navigate to="/financial?tab=advances" replace />} />
+              <Route path="/trip-expenses" element={<Navigate to="/financial?tab=expenses" replace />} />
+              <Route path="/trip-settlements" element={<Navigate to="/financial?tab=settlements" replace />} />
+              <Route path="/driver-cards" element={<Navigate to="/financial?tab=cards" replace />} />
+              <Route path="/trip-validations" element={<Navigate to="/financial?tab=validations" replace />} />
+              <Route path="/fiscal-documents" element={<Navigate to="/financial?tab=documents" replace />} />
+            </>
+          ) : null}
+          <Route path="*" element={<Navigate to="/bookings" replace />} />
         </Routes>
       </Suspense>
     </Layout>

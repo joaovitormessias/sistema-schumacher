@@ -11,6 +11,8 @@ export type TripItem = {
   departure_at: string;
   status: string;
   operational_status: string;
+  seats_total: number;
+  seats_available: number;
   estimated_km: number;
   dispatch_validated_at?: string;
 };

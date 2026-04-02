@@ -13,6 +13,8 @@ type Trip struct {
 	ArrivalAt           *time.Time `json:"arrival_at"`
 	Status              string     `json:"status"`
 	OperationalStatus   string     `json:"operational_status"`
+	SeatsTotal          int        `json:"seats_total"`
+	SeatsAvailable      int        `json:"seats_available"`
 	EstimatedKM         float64    `json:"estimated_km"`
 	DispatchValidatedAt *time.Time `json:"dispatch_validated_at"`
 	DispatchValidatedBy *string    `json:"dispatch_validated_by"`
@@ -85,4 +87,42 @@ type ListFilter struct {
 	Offset int
 	Search string
 	Status string
+}
+
+type TripSegmentPriceStop struct {
+	StopID      string `json:"stop_id"`
+	DisplayName string `json:"display_name"`
+	StopOrder   int    `json:"stop_order"`
+}
+
+type TripSegmentPriceItem struct {
+	OriginStopID           string     `json:"origin_stop_id"`
+	OriginDisplayName      string     `json:"origin_display_name"`
+	OriginStopOrder        int        `json:"origin_stop_order"`
+	DestinationStopID      string     `json:"destination_stop_id"`
+	DestinationDisplayName string     `json:"destination_display_name"`
+	DestinationStopOrder   int        `json:"destination_stop_order"`
+	Price                  *float64   `json:"price"`
+	Status                 string     `json:"status"`
+	Configured             bool       `json:"configured"`
+	CreatedAt              *time.Time `json:"created_at"`
+	UpdatedAt              *time.Time `json:"updated_at"`
+}
+
+type TripSegmentPriceMatrix struct {
+	TripID  string                 `json:"trip_id"`
+	RouteID string                 `json:"route_id"`
+	Stops   []TripSegmentPriceStop `json:"stops"`
+	Items   []TripSegmentPriceItem `json:"items"`
+}
+
+type UpsertTripSegmentPriceItem struct {
+	OriginStopID      string   `json:"origin_stop_id"`
+	DestinationStopID string   `json:"destination_stop_id"`
+	Price             *float64 `json:"price"`
+	Status            *string  `json:"status"`
+}
+
+type UpsertTripSegmentPricesInput struct {
+	Items []UpsertTripSegmentPriceItem `json:"items"`
 }
