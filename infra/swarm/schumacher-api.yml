@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  schumacher-api:
+    image: schumacher-api:local
+    networks:
+      - schumacher
+    environment:
+      ENV_FILE: /app/config/api.env
+    volumes:
+      - /etc/schumacher/api.env:/app/config/api.env:ro
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - traefik.enable=true
+        - traefik.docker.network=schumacher
+        - traefik.http.routers.schumacher-api.rule=Host(`api.schumachertursc.com.br`)
+        - traefik.http.routers.schumacher-api.entrypoints=websecure
+        - traefik.http.routers.schumacher-api.tls.certresolver=letsencryptresolver
+        - traefik.http.services.schumacher-api.loadbalancer.server.port=8080
+
+networks:
+  schumacher:
+    external: true
