@@ -2,7 +2,7 @@ version: "3.8"
 
 services:
   schumacher-api:
-    image: schumacher-api:local
+    image: ${SCHUMACHER_API_IMAGE:-ghcr.io/joaovitormessias/sistema-schumacher-api:main}
     networks:
       - schumacher
     environment:
