@@ -9,6 +9,7 @@ type Booking struct {
 	ID              string     `json:"id"`
 	TripID          string     `json:"trip_id"`
 	Status          string     `json:"status"`
+	ReservationCode string     `json:"reservation_code"`
 	Source          string     `json:"source"`
 	TotalAmount     float64    `json:"total_amount"`
 	DepositAmount   float64    `json:"deposit_amount"`
@@ -39,17 +40,19 @@ type PassengerInput struct {
 }
 
 type CreateBookingInput struct {
-	TripID          string         `json:"trip_id"`
-	SeatID          string         `json:"seat_id"`
-	BoardStopID     string         `json:"board_stop_id"`
-	AlightStopID    string         `json:"alight_stop_id"`
-	FareMode        *string        `json:"fare_mode"`
-	FareAmountFinal *float64       `json:"fare_amount_final"`
-	Passenger       PassengerInput `json:"passenger"`
-	Source          *string        `json:"source"`
-	TotalAmount     float64        `json:"total_amount"`
-	DepositAmount   float64        `json:"deposit_amount"`
-	RemainderAmount float64        `json:"remainder_amount"`
+	TripID          string           `json:"trip_id"`
+	SeatID          string           `json:"seat_id"`
+	BoardStopID     string           `json:"board_stop_id"`
+	AlightStopID    string           `json:"alight_stop_id"`
+	FareMode        *string          `json:"fare_mode"`
+	FareAmountFinal *float64         `json:"fare_amount_final"`
+	Passenger       PassengerInput   `json:"passenger"`
+	Passengers      []PassengerInput `json:"passengers"`
+	IdempotencyKey  string           `json:"idempotency_key"`
+	Source          *string          `json:"source"`
+	TotalAmount     float64          `json:"total_amount"`
+	DepositAmount   float64          `json:"deposit_amount"`
+	RemainderAmount float64          `json:"remainder_amount"`
 }
 
 type CheckoutCustomerInput struct {
@@ -75,6 +78,8 @@ type CheckoutBookingInput struct {
 	FareMode        *string              `json:"fare_mode"`
 	FareAmountFinal *float64             `json:"fare_amount_final"`
 	Passenger       PassengerInput       `json:"passenger"`
+	Passengers      []PassengerInput     `json:"passengers"`
+	IdempotencyKey  string               `json:"idempotency_key"`
 	Source          *string              `json:"source"`
 	TotalAmount     float64              `json:"total_amount"`
 	DepositAmount   float64              `json:"deposit_amount"`
@@ -112,8 +117,9 @@ type BookingPassenger struct {
 }
 
 type BookingDetails struct {
-	Booking   Booking          `json:"booking"`
-	Passenger BookingPassenger `json:"passenger"`
+	Booking    Booking            `json:"booking"`
+	Passenger  BookingPassenger   `json:"passenger"`
+	Passengers []BookingPassenger `json:"passengers"`
 }
 
 type CheckoutPayment struct {
@@ -148,7 +154,8 @@ type CreateBookingData struct {
 	FareAmountCalc  float64
 	FareAmountFinal float64
 	FareSnapshot    []byte
-	Passenger       PassengerInput
+	Passengers      []PassengerInput
+	IdempotencyKey  string
 	Source          *string
 	TotalAmount     float64
 	DepositAmount   float64

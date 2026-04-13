@@ -1,12 +1,14 @@
 # Documentacao da API Backend (Schumacher Tur)
 
-Atualizado em: 2026-04-02
+Atualizado em: 2026-04-08
 
 ## 1) Visao geral
 
-- Servidor HTTP em Go (chi router).
-- Rotas sem prefixo de versao (`/api/v1` nao existe no estado atual).
-- Quase todas as rotas exigem JWT de usuario (Supabase), com excecao de health checks e webhook publico.
+- Backend HTTP em Go com `chi`.
+- Sem prefixo de versao no path. O estado atual usa rotas como `/trips`, `/bookings` e `/payments`.
+- A API serve o app interno, fluxos de reservas/pagamentos e rotinas operacionais e administrativas.
+- Quase todas as rotas sao protegidas por JWT do Supabase.
+- Excecoes publicas: `GET /health`, `GET /ready`, `POST /webhooks/abacatepay`.
 
 Base local padrao:
 
@@ -14,58 +16,90 @@ Base local padrao:
 http://localhost:<PORT>
 ```
 
-## 2) Convencoes de requisicao
+## 2) Arquitetura e fonte de verdade
 
-### 2.1 Headers
+Entradas principais do codigo:
 
-- `Authorization: Bearer <jwt>` para rotas protegidas.
-- `Content-Type: application/json` para rotas com body JSON.
+- `apps/api/cmd/api/main.go`: bootstrap, middlewares e montagem de rotas.
+- `apps/api/internal/shared/config/config.go`: variaveis de ambiente.
+- `apps/api/internal/shared/http/decoder.go`: decoder JSON estrito.
+- `apps/api/internal/shared/http/response.go`: envelope padrao de resposta e erro.
+- `apps/api/internal/*/handler.go`: contratos HTTP por dominio.
 
-### 2.2 Body JSON (importante)
+Integracoes relevantes:
 
-O backend usa decoder estrito:
-
-- Campos desconhecidos geram erro (`DisallowUnknownFields`).
-- Body vazio em endpoints que esperam JSON gera erro.
-- Dados extras depois do JSON valido tambem geram erro.
-
-### 2.3 Datas e horas
-
-- Campos `time.Time` no JSON devem ser enviados em RFC3339.
-- Alguns filtros aceitam tambem data simples `YYYY-MM-DD` (ex.: pagamentos).
-
-### 2.4 Paginacao e filtros
-
-- Listagens usam `limit` e `offset`.
-- `limit` deve ser `> 0`.
-- `offset` deve ser `>= 0`.
-
-### 2.5 IDs
-
-- A maioria dos IDs eh `string` (geralmente UUID).
-- Alguns endpoints validam UUID explicitamente no path/body.
+- JWT do Supabase via JWKS.
+- Banco PostgreSQL.
+- Pagamentos e webhook publico da AbacatePay.
 
 ## 3) Autenticacao
 
-### 3.1 Publicas (sem JWT)
+### 3.1 Rotas publicas
 
 - `GET /health`
 - `GET /ready`
 - `POST /webhooks/abacatepay`
 
-### 3.2 Protegidas (com JWT)
+### 3.2 Rotas protegidas
 
-Todas as demais rotas.
+Todas as demais rotas passam pelo middleware de autenticacao.
 
-Formato esperado:
+Header esperado:
 
 ```http
-Authorization: Bearer <token>
+Authorization: Bearer <jwt-ou-service-token>
 ```
 
-## 4) Padrao de resposta de erro
+Validacoes aplicadas:
 
-Formato padrao:
+- token tecnico configurado em `API_SERVICE_TOKENS`; ou
+- token JWT valido;
+- `iss` igual ao `SUPABASE_ISSUER` quando configurado;
+- `aud` contendo `SUPABASE_AUDIENCE` quando configurado;
+- `sub` obrigatorio.
+
+Observacao importante:
+- falhas de autenticacao retornam `401` com corpo texto simples via `http.Error`, nao no envelope JSON padrao.
+- a autenticacao de servico existe para integracoes server-to-server como `n8n -> API`, evitando depender de `access_token` de sessao do `Supabase Auth` e de fluxo de refresh no workflow.
+
+## 4) Convencoes de requisicao
+
+### 4.1 JSON
+
+O backend usa decoder estrito:
+
+- body vazio em endpoints JSON gera erro;
+- campos desconhecidos geram erro;
+- dados extras apos um JSON valido geram erro.
+
+### 4.2 Datas e horas
+
+- campos `time.Time` devem ser enviados em RFC3339;
+- filtros de pagamentos aceitam RFC3339 e tambem `YYYY-MM-DD`.
+
+### 4.3 Paginacao
+
+Padrao de listagem:
+
+- `limit` deve ser `> 0`
+- `offset` deve ser `>= 0`
+
+### 4.4 IDs
+
+- a maior parte dos IDs e `UUID`;
+- varios handlers validam UUID explicitamente no path.
+
+## 5) Padrao de resposta
+
+Resposta JSON comum:
+
+```json
+{
+  "qualquer": "payload do endpoint"
+}
+```
+
+Envelope de erro padrao:
 
 ```json
 {
@@ -75,24 +109,68 @@ Formato padrao:
 }
 ```
 
-Obs.: alguns endpoints retornam payload de erro customizado (ex.: bloqueios de workflow/publicacao).
+Excecoes relevantes:
 
-## 5) Endpoints
+- middleware de auth responde texto simples;
+- alguns fluxos de publicacao/workflow respondem `422` com payload customizado, por exemplo `ROUTE_PUBLISH_BLOCKED` e `ROUTE_NOT_READY`.
 
-## 5.1 Infra
+## 6) Configuracao e ambiente
+
+### 6.1 Obrigatorias para subir a API
+
+- `DATABASE_URL`
+- `SUPABASE_JWKS_URL`
+- `SUPABASE_ISSUER`
+
+### 6.2 Principais opcionais
+
+- `APP_ENV` default `production`
+- `PORT` default `8080`
+- `CORS_ORIGINS`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_AUDIENCE` default `authenticated`
+- `AUTH_DISABLED`
+- `API_SERVICE_TOKENS` lista separada por virgula com tokens tecnicos aceitos no header `Authorization: Bearer ...`
+- `ABACATEPAY_API_KEY`
+- `ABACATEPAY_WEBHOOK_SECRET`
+- `ABACATEPAY_BASE_URL`
+- `ABACATEPAY_PUBLIC_KEY`
+- `ABACATEPAY_RETURN_URL`
+- `ABACATEPAY_COMPLETION_URL`
+
+### 6.3 CORS
+
+- em desenvolvimento, se `CORS_ORIGINS` estiver vazio e `APP_ENV != production`, a API libera origem dinamica;
+- quando configurado, compara `Origin` contra a lista;
+- metodos liberados: `GET, POST, PUT, PATCH, DELETE, OPTIONS`.
+
+## 7) Catalogo de endpoints
+
+## 7.1 Infra
+
+### Publicos
 
 - `GET /health`
 - `GET /ready`
 
-## 5.2 Usuarios
+`/ready` verifica `pool.Ping(...)` no banco e retorna `503 DB_UNAVAILABLE` se a conexao nao estiver pronta.
 
-- `GET /users/me` (atualmente retorna `NOT_IMPLEMENTED`)
+## 7.2 Usuarios
 
-## 5.3 Rotas (`/routes`)
+- `GET /users/me`
 
-- `GET /routes` (query: `search`, `status`, `limit`, `offset`)
+Status atual:
+- rota protegida;
+- implementacao atual responde `501 NOT_IMPLEMENTED`.
+
+## 7.3 Rotas (`/routes`)
+
+Endpoints:
+
+- `GET /routes`
 - `POST /routes`
-- `GET /routes/cities/candidates` (query: `query`, `limit` ate 10)
+- `GET /routes/cities/candidates`
 - `GET /routes/{routeId}`
 - `PATCH /routes/{routeId}`
 - `POST /routes/{routeId}/publish`
@@ -104,24 +182,129 @@ Obs.: alguns endpoints retornam payload de erro customizado (ex.: bloqueios de w
 - `GET /routes/{routeId}/segment-prices`
 - `PUT /routes/{routeId}/segment-prices`
 
-## 5.4 Viagens (`/trips`)
+Query params:
 
-- `GET /trips` (query: `search`, `status`, `limit`, `offset`)
+- `GET /routes`: `search`, `status`, `limit`, `offset`
+- `status`: `active`, `inactive`, `all`
+- `GET /routes/cities/candidates`: `query`, `limit` com teto em `10`
+
+Validacoes e comportamento:
+
+- `POST /routes` exige `name`, `origin_city`, `destination_city`
+- erros de geocoding/latitude/longitude caem em `VALIDATION_ERROR`
+- `POST /routes/{routeId}/publish` e `PATCH /routes/{routeId}` podem retornar `422` com:
+
+```json
+{
+  "code": "ROUTE_PUBLISH_BLOCKED",
+  "message": "route does not meet publish requirements",
+  "requirements_missing": ["..."]
+}
+```
+
+## 7.4 Viagens (`/trips`)
+
+Endpoints:
+
+- `GET /trips`
 - `POST /trips`
 - `GET /trips/{tripId}`
 - `PATCH /trips/{tripId}`
-- `GET /trips/{tripId}/seats` (query opcional: `board_stop_id` + `alight_stop_id` juntos)
+- `GET /trips/{tripId}/seats`
 - `GET /trips/{tripId}/stops`
 - `POST /trips/{tripId}/stops`
 - `GET /trips/{tripId}/segment-prices`
 - `PUT /trips/{tripId}/segment-prices`
 
-## 5.5 Operacao de viagem
+Query params:
 
-### Trip Requests
+- `GET /trips`: `search`, `status`, `limit`, `offset`
+- `GET /trips/{tripId}/seats`: `board_stop_id` e `alight_stop_id` devem ser enviados juntos quando usados
 
-- `GET /trip-requests` (query: `limit`, `offset`)
+Validacoes e comportamento:
+
+- `POST /trips` exige `route_id`, `bus_id`, `departure_at`
+- `estimated_km` deve ser `>= 0`
+- `PATCH /trips/{tripId}` bloqueia mudanca direta de `operational_status`
+- rotas de create/update podem retornar `422` com:
+
+```json
+{
+  "code": "ROUTE_NOT_READY",
+  "message": "route is not ready for trip creation or update",
+  "requirements_missing": ["..."]
+}
+```
+
+- `WORKFLOW_LOCKED` aparece quando o workflow controla status operacionais
+
+### Disponibilidade (`/availability`)
+
+Endpoint:
+
+- `GET /availability/search`
+
+Query params:
+
+- `origin`: cidade canonica, por exemplo `Videira/SC`
+- `destination`: cidade canonica, por exemplo `Sao Luis/MA`
+- `trip_date`: filtro opcional em `YYYY-MM-DD`
+- `package_name`: filtro opcional por pacote
+- `qtd`: quantidade minima de assentos necessarios; default `1`
+- `limit`: default `10`, max `50`
+- `only_active`: default `true`
+- `include_past`: default `false`
+
+Validacoes e comportamento:
+
+- ao menos um entre `origin`, `destination` ou `package_name` deve ser informado
+- `origin` e `destination` aceitam `Cidade/UF`, `Cidade UF`, `Cidade-UF` e `Cidade, UF`; o backend normaliza para `Cidade/UF`
+- `origin` e `destination` nao podem ser iguais quando ambos forem enviados
+- por padrao a busca retorna apenas viagens futuras com `trip.status in ('SCHEDULED','IN_PROGRESS')`
+- por padrao a busca retorna apenas segmentos com `route_segment_prices.status = ACTIVE`
+- o payload ja devolve `trip_id`, `board_stop_id`, `alight_stop_id`, `price`, `seats_available` e `package_name`, servindo como agregador para o fluxo `n8n -> API`
+
+Exemplo de integracao `n8n`:
+
+```http
+GET /availability/search?origin=Videira/SC&destination=Sao%20Luis/MA&qtd=1 HTTP/1.1
+Authorization: Bearer <valor-configurado-em-API_SERVICE_TOKENS>
+Accept: application/json
+```
+
+Resposta de sucesso:
+
+```json
+[
+  {
+    "segment_id": "trip:board:alight",
+    "trip_id": "uuid",
+    "route_id": "uuid",
+    "board_stop_id": "uuid",
+    "alight_stop_id": "uuid",
+    "origin_display_name": "Videira/SC",
+    "destination_display_name": "Sao Luis/MA",
+    "origin_depart_time": "18:30",
+    "trip_date": "2026-04-10",
+    "seats_available": 12,
+    "price": 250.0,
+    "currency": "BRL",
+    "status": "ACTIVE",
+    "trip_status": "SCHEDULED",
+    "package_name": "Pacote p/ Maranhao"
+  }
+]
+```
+
+## 7.5 Operacao de viagem
+
+### Trip requests
+
+- `GET /trip-requests`
 - `POST /trip-requests`
+
+Query params:
+- `limit`, `offset`
 
 ### Manifesto
 
@@ -130,109 +313,359 @@ Obs.: alguns endpoints retornam payload de erro customizado (ex.: bloqueios de w
 - `POST /trips/{tripId}/manifest/sync`
 - `PATCH /trips/{tripId}/manifest/{entryId}`
 
+Regras:
+
+- `tripId` e `entryId` sao validados como UUID
+- status invalidos retornam `VALIDATION_ERROR`
+- item inexistente retorna `404 NOT_FOUND`
+- `sync` rematerializa a partir das reservas
+
 ### Autorizacoes
 
 - `GET /trips/{tripId}/authorizations`
 - `POST /trips/{tripId}/authorizations`
 - `PATCH /trips/{tripId}/authorizations/{authorizationId}`
 
-### Checklist / Relatorio / Conciliacao / Anexos / Workflow
+Regras:
+
+- `created_by` pode ser derivado do `sub` autenticado
+- erros de autoridade/autorizacao caem em `VALIDATION_ERROR`
+
+### Checklist
 
 - `GET /trips/{tripId}/checklists/{stage}`
 - `PUT /trips/{tripId}/checklists/{stage}`
+
+### Driver report
+
 - `GET /trips/{tripId}/driver-report`
 - `PUT /trips/{tripId}/driver-report`
+
+### Reconciliation
+
 - `GET /trips/{tripId}/reconciliation`
 - `PUT /trips/{tripId}/reconciliation`
+
+### Attachments
+
 - `GET /trips/{tripId}/attachments`
 - `POST /trips/{tripId}/attachments`
+
+### Workflow
+
 - `POST /trips/{tripId}/workflow/advance`
 
-## 5.6 Reservas e pagamentos
+Observacoes:
 
-### Bookings (`/bookings`)
+- os blocos acima operam com `tripId` em UUID
+- `stage` invalido retorna `VALIDATION_ERROR`
+- varios subfluxos retornam `404 NOT_FOUND` quando o recurso ainda nao existe
 
-- `GET /bookings` (query: `limit`, `offset`)
+## 7.6 Reservas (`/bookings`)
+
+Endpoints:
+
+- `GET /bookings`
 - `POST /bookings`
 - `POST /bookings/checkout`
 - `GET /bookings/{bookingId}`
 - `PATCH /bookings/{bookingId}`
 
-### Payments (`/payments`)
+Query params:
 
-- `GET /payments` (query: `booking_id`, `status`, `since`, `until`, `paid_since`, `paid_until`, `limit`, `offset`)
+- `GET /bookings`: `limit`, `offset`
+
+Payload principal de criacao:
+
+```json
+{
+  "trip_id": "uuid",
+  "seat_id": "uuid opcional",
+  "board_stop_id": "uuid",
+  "alight_stop_id": "uuid",
+  "fare_mode": "AUTO ou MANUAL",
+  "fare_amount_final": 350,
+  "idempotency_key": "sha256-opcional",
+  "passengers": [
+    {
+      "name": "Maria",
+      "document": "00000000000",
+      "phone": "48999999999",
+      "email": "maria@example.com"
+    },
+    {
+      "name": "Joao",
+      "document": "11111111111",
+      "phone": "48988888888",
+      "email": "joao@example.com"
+    }
+  ],
+  "source": "APP",
+  "total_amount": 700,
+  "deposit_amount": 150,
+  "remainder_amount": 550
+}
+```
+
+Payload de checkout:
+
+```json
+{
+  "trip_id": "uuid",
+  "seat_id": "uuid opcional",
+  "board_stop_id": "uuid",
+  "alight_stop_id": "uuid",
+  "idempotency_key": "sha256-opcional",
+  "passengers": [
+    {
+      "name": "Maria",
+      "document": "00000000000",
+      "phone": "48999999999",
+      "email": "maria@example.com"
+    },
+    {
+      "name": "Joao",
+      "document": "11111111111",
+      "phone": "48988888888",
+      "email": "joao@example.com"
+    }
+  ],
+  "total_amount": 700,
+  "initial_payment": {
+    "method": "PIX",
+    "amount": 150,
+    "description": "Sinal",
+    "notes": "",
+    "customer": {
+      "name": "Maria",
+      "email": "maria@example.com",
+      "phone": "48999999999",
+      "document": "00000000000"
+    }
+  }
+}
+```
+
+Validacoes e regras:
+
+- `trip_id`, `board_stop_id`, `alight_stop_id` e pelo menos um `passenger.name` sao obrigatorios
+- `passengers[]` e o contrato principal para grupos; `passenger` singular segue aceito como alias retrocompativel para um unico passageiro
+- `idempotency_key` e opcional; quando enviado, a API o persiste junto ao booking para correlacao operacional
+- `seat_id` e opcional; quando omitido, a API tenta alocar automaticamente a primeira poltrona livre da viagem
+- quando `seat_id` e informado, ele so pode ser usado com um unico passageiro
+- a API calcula a tarifa por trecho uma vez e multiplica pelo numero de passageiros para compor `total_amount`
+- valores monetarios nao podem ser negativos
+- `board_stop_id` precisa vir antes de `alight_stop_id`
+- conflito de unicidade de poltrona retorna `409 SEAT_TAKEN`
+- `PATCH /bookings/{bookingId}` hoje atualiza apenas `status`
+- status aceitos: `PENDING`, `CONFIRMED`, `CANCELLED`, `EXPIRED`
+
+Observacao operacional:
+
+- a resposta de `GET /bookings/{bookingId}`, `POST /bookings` e `POST /bookings/checkout` passa a incluir `passengers[]`; o campo `passenger` continua presente como alias do primeiro passageiro para compatibilidade.
+- `POST /bookings` tambem devolve `booking.reservation_code`; o vencimento da reserva segue em `booking.expires_at`.
+
+Resposta importante:
+
+- `POST /bookings/checkout` retorna `booking`, `payment`, `provider_raw`, `checkout_url`, `pix_code`
+
+## 7.7 Pagamentos (`/payments`) e webhook
+
+Endpoints protegidos:
+
+- `GET /payments`
 - `POST /payments`
 - `POST /payments/manual`
 - `GET /payments/{paymentId}/status`
 - `POST /payments/{paymentId}/sync`
 
-### Webhook publico
+Endpoint publico:
 
 - `POST /webhooks/abacatepay`
 
-Headers/query aceitos para seguranca:
+Query params de listagem:
 
-- `X-Webhook-Secret: <secret>` ou
-- `Authorization: Bearer <secret>` ou
-- query `?webhookSecret=<secret>`
-- assinatura: `X-AbacatePay-Signature` (ou `X-Webhook-Signature`)
+- `booking_id`
+- `status`
+- `since`
+- `until`
+- `paid_since`
+- `paid_until`
+- `limit`
+- `offset`
 
-## 5.7 Pricing
+Payload de criacao:
+
+```json
+{
+  "booking_id": "uuid",
+  "amount": 150,
+  "method": "PIX",
+  "description": "Sinal passagem",
+  "customer": {
+    "name": "Maria",
+    "email": "maria@example.com",
+    "phone": "48999999999",
+    "document": "00000000000"
+  }
+}
+```
+
+Payload de pagamento manual:
+
+```json
+{
+  "booking_id": "uuid",
+  "amount": 200,
+  "method": "CASH",
+  "notes": "Pago no embarque"
+}
+```
+
+Regras:
+
+- `POST /payments` aceita apenas metodos do provedor, como `PIX` e `CARD`
+- `POST /payments/manual` aceita metodos manuais, como `CASH`, `TRANSFER`, `OTHER`
+- erro de configuracao de checkout retorna `503 CHECKOUT_NOT_CONFIGURED`
+- `GET /payments/{paymentId}/status` retorna um resumo com `status`, `amount`, `provider`, `provider_ref`, `metadata`
+- `POST /payments/{paymentId}/sync` retorna `payment`, `booking_status`, `synced`
+
+Seguranca do webhook:
+
+- aceita `X-Webhook-Secret`
+- aceita `Authorization: Bearer <secret>`
+- aceita query `webhookSecret=<secret>`
+- valida assinatura em `X-AbacatePay-Signature` ou `X-Webhook-Signature` quando configurada
+
+Erros relevantes:
+
+- `401 INVALID_SECRET`
+- `401 INVALID_SIGNATURE`
+- `400 INVALID_BODY`
+- `503 WEBHOOK_NOT_CONFIGURED`
+
+## 7.8 Pricing (`/pricing`)
+
+Endpoints:
 
 - `POST /pricing/quote`
-- `GET /pricing/rules` (query: `limit`, `offset`, `scope`, `scope_id`, `rule_type`, `is_active`)
+- `GET /pricing/rules`
 - `POST /pricing/rules`
 - `GET /pricing/rules/{ruleId}`
 - `PATCH /pricing/rules/{ruleId}`
 
-## 5.8 Frota e motoristas
+Query params de regras:
+
+- `limit`
+- `offset`
+- `scope`: `GLOBAL`, `ROUTE`, `TRIP`
+- `scope_id`
+- `rule_type`: `OCCUPANCY`, `LEAD_TIME`, `DOW`, `SEASON`
+- `is_active`
+
+Payload de quote:
+
+```json
+{
+  "trip_id": "uuid",
+  "board_stop_id": "uuid",
+  "alight_stop_id": "uuid",
+  "fare_mode": "AUTO",
+  "fare_amount_final": 350
+}
+```
+
+Resposta de quote:
+
+- `trip_id`, `route_id`, `board_stop_id`, `alight_stop_id`
+- `base_amount`, `calc_amount`, `final_amount`
+- `currency`
+- `fare_mode`
+- `occupancy_ratio`
+- `applied_rules`
+- `snapshot`
+
+Validacoes:
+
+- `trip_id`, `board_stop_id`, `alight_stop_id` obrigatorios
+- `scope_id` e obrigatorio quando `scope` for `ROUTE` ou `TRIP`
+- `scope_id` deve ser vazio em `GLOBAL`
+- `rule_type` e `scope` sao normalizados para uppercase
+
+Erros comuns:
+
+- `TRIP_NOT_FOUND`
+- `STOP_NOT_FOUND`
+- `INVALID_STOPS`
+- `FARE_NOT_FOUND`
+- `INVALID_FARE_MODE`
+- `FARE_AMOUNT_REQUIRED`
+
+## 7.9 Frota e motoristas
 
 ### Buses
 
-- `GET /buses` (query: `search`, `limit`, `offset`)
+- `GET /buses`
 - `POST /buses`
 - `GET /buses/{busId}`
 - `PATCH /buses/{busId}`
 
+Query params:
+- `search`, `limit`, `offset`
+
 ### Drivers
 
-- `GET /drivers` (query: `search`, `limit`, `offset`)
+- `GET /drivers`
 - `POST /drivers`
 - `GET /drivers/{driverId}`
 - `PATCH /drivers/{driverId}`
 
-### Driver Cards
+Query params:
+- `search`, `limit`, `offset`
 
-- `GET /driver-cards` (query: `driver_id`, `is_active`, `is_blocked`, `limit`, `offset`)
+### Driver cards
+
+- `GET /driver-cards`
 - `POST /driver-cards`
 - `GET /driver-cards/{cardId}`
 - `PATCH /driver-cards/{cardId}`
-- `POST /driver-cards/{cardId}/block` (body opcional)
+- `POST /driver-cards/{cardId}/block`
 - `POST /driver-cards/{cardId}/unblock`
-- `GET /driver-cards/{cardId}/transactions` (query: `limit`, `offset`)
+- `GET /driver-cards/{cardId}/transactions`
 - `POST /driver-cards/{cardId}/transactions`
 
-## 5.9 Financeiro de viagem
+Query params:
 
-### Trip Advances
+- `GET /driver-cards`: `driver_id`, `is_active`, `is_blocked`, `limit`, `offset`
+- `GET /driver-cards/{cardId}/transactions`: `limit`, `offset`
 
-- `GET /trip-advances` (query: `trip_id`, `driver_id`, `status`, `limit`, `offset`)
+## 7.10 Financeiro de viagem
+
+### Trip advances
+
+- `GET /trip-advances`
 - `POST /trip-advances`
 - `GET /trip-advances/{advanceId}`
 - `PATCH /trip-advances/{advanceId}`
 - `POST /trip-advances/{advanceId}/deliver`
 
-### Trip Expenses
+Query params:
+- `trip_id`, `driver_id`, `status`, `limit`, `offset`
 
-- `GET /trip-expenses` (query: `trip_id`, `driver_id`, `expense_type`, `payment_method`, `approved`, `limit`, `offset`)
+### Trip expenses
+
+- `GET /trip-expenses`
 - `POST /trip-expenses`
 - `GET /trip-expenses/{expenseId}`
 - `PATCH /trip-expenses/{expenseId}`
 - `POST /trip-expenses/{expenseId}/approve`
 
-### Trip Settlements
+Query params:
+- `trip_id`, `driver_id`, `expense_type`, `payment_method`, `approved`, `limit`, `offset`
 
-- `GET /trip-settlements` (query: `trip_id`, `driver_id`, `status`, `limit`, `offset`)
+### Trip settlements
+
+- `GET /trip-settlements`
 - `POST /trip-settlements`
 - `GET /trip-settlements/{settlementId}`
 - `POST /trip-settlements/{settlementId}/review`
@@ -240,47 +673,79 @@ Headers/query aceitos para seguranca:
 - `POST /trip-settlements/{settlementId}/reject`
 - `POST /trip-settlements/{settlementId}/complete`
 
-### Trip Validations
+Query params:
+- `trip_id`, `driver_id`, `status`, `limit`, `offset`
 
-- `GET /trip-validations` (query: `trip_id`, `limit`, `offset`)
+### Trip validations
+
+- `GET /trip-validations`
 - `POST /trip-validations`
 - `GET /trip-validations/{validationId}`
 - `PATCH /trip-validations/{validationId}`
 
-### Advance Returns
+Query params:
+- `trip_id`, `limit`, `offset`
 
-- `GET /advance-returns` (query: `trip_advance_id`, `trip_settlement_id`, `limit`, `offset`)
+### Advance returns
+
+- `GET /advance-returns`
 - `POST /advance-returns`
 - `GET /advance-returns/{returnId}`
 
-### Fiscal Documents
+Query params:
+- `trip_advance_id`, `trip_settlement_id`, `limit`, `offset`
 
-- `GET /fiscal-documents` (query: `trip_id`, `document_type`, `status`, `limit`, `offset`)
+### Fiscal documents
+
+- `GET /fiscal-documents`
 - `POST /fiscal-documents`
 - `GET /fiscal-documents/{documentId}`
 - `PATCH /fiscal-documents/{documentId}`
 
-## 5.10 Almoxarifado e compras
+Query params:
+- `trip_id`, `document_type`, `status`, `limit`, `offset`
+
+## 7.11 Relatorios
+
+- `GET /reports/passengers`
+
+Query params:
+
+- `trip_id` obrigatorio
+- `format`: `json` ou `csv`, default `json`
+
+Comportamento:
+
+- em `csv`, responde com `Content-Type: text/csv`
+- arquivo baixado usa `manifesto.csv`
+
+## 7.12 Almoxarifado e compras
 
 ### Suppliers
 
-- `GET /suppliers` (query: `limit`, `offset`, `active`)
+- `GET /suppliers`
 - `POST /suppliers`
 - `GET /suppliers/{supplierId}`
 - `PATCH /suppliers/{supplierId}`
 - `DELETE /suppliers/{supplierId}`
 
+Query params:
+- `limit`, `offset`, `active`
+
 ### Products
 
-- `GET /products` (query: `limit`, `offset`, `active`, `category`, `search`)
+- `GET /products`
 - `POST /products`
 - `GET /products/{productId}`
 - `PATCH /products/{productId}`
 - `DELETE /products/{productId}`
 
-### Service Orders
+Query params:
+- `limit`, `offset`, `active`, `category`, `search`
 
-- `GET /service-orders` (query: `limit`, `offset`, `status`, `order_type`, `bus_id`)
+### Service orders
+
+- `GET /service-orders`
 - `POST /service-orders`
 - `GET /service-orders/{orderId}`
 - `PATCH /service-orders/{orderId}`
@@ -289,9 +754,12 @@ Headers/query aceitos para seguranca:
 - `POST /service-orders/{orderId}/cancel`
 - `DELETE /service-orders/{orderId}`
 
-### Purchase Orders
+Query params:
+- `limit`, `offset`, `status`, `order_type`, `bus_id`
 
-- `GET /purchase-orders` (query: `limit`, `offset`, `status`, `supplier_id`, `service_order_id`)
+### Purchase orders
+
+- `GET /purchase-orders`
 - `POST /purchase-orders`
 - `GET /purchase-orders/{orderId}`
 - `PATCH /purchase-orders/{orderId}`
@@ -302,9 +770,12 @@ Headers/query aceitos para seguranca:
 - `POST /purchase-orders/{orderId}/cancel`
 - `DELETE /purchase-orders/{orderId}`
 
+Query params:
+- `limit`, `offset`, `status`, `supplier_id`, `service_order_id`
+
 ### Invoices
 
-- `GET /invoices` (query: `limit`, `offset`, `status`, `supplier_id`, `service_order_id`, `purchase_order_id`, `bus_id`)
+- `GET /invoices`
 - `POST /invoices`
 - `GET /invoices/{invoiceId}`
 - `PATCH /invoices/{invoiceId}`
@@ -312,711 +783,34 @@ Headers/query aceitos para seguranca:
 - `POST /invoices/{invoiceId}/cancel`
 - `DELETE /invoices/{invoiceId}`
 
-## 5.11 Importacao e relatorios
+Query params:
+- `limit`, `offset`, `status`, `supplier_id`, `service_order_id`, `purchase_order_id`, `bus_id`
 
-### Import XLSX
+## 7.13 Importacao XLSX
 
 - `POST /imports/xlsx/upload`
 - `POST /imports/xlsx/{batchId}/validate`
 - `POST /imports/xlsx/{batchId}/promote`
 - `GET /imports/xlsx/{batchId}/report`
 
-### Reports
-
-- `GET /reports/passengers` (query obrigatoria: `trip_id`; `format=json|csv`)
-
-## 6) Schemas de request (JSON)
-
-Os exemplos abaixo cobrem os payloads de escrita mais usados.
-
-## 6.1 Rotas
-
-`POST /routes`
-
-```json
-{
-  "name": "Linha Serra - Capital",
-  "origin_city": "Lages",
-  "origin_latitude": -27.815,
-  "origin_longitude": -50.325,
-  "destination_city": "Florianopolis",
-  "destination_latitude": -27.594,
-  "destination_longitude": -48.548,
-  "is_active": false
-}
-```
-
-`PATCH /routes/{routeId}`
-
-```json
-{
-  "name": "Linha Serra - Capital (Ajustada)",
-  "origin_city": "Lages",
-  "destination_city": "Florianopolis",
-  "is_active": true
-}
-```
-
-`POST /routes/{routeId}/stops`
-
-```json
-{
-  "city": "Sao Joaquim",
-  "latitude": -28.293,
-  "longitude": -49.932,
-  "stop_order": 2,
-  "eta_offset_minutes": 80,
-  "notes": "Parada principal"
-}
-```
-
-`PUT /routes/{routeId}/segment-prices`
-
-```json
-{
-  "items": [
-    {
-      "origin_stop_id": "uuid",
-      "destination_stop_id": "uuid",
-      "price": 89.9,
-      "status": "ACTIVE"
-    }
-  ]
-}
-```
-
-## 6.2 Viagens
-
-`POST /trips`
-
-```json
-{
-  "route_id": "uuid",
-  "bus_id": "uuid",
-  "driver_id": "uuid",
-  "fare_id": "uuid",
-  "request_id": "uuid",
-  "departure_at": "2026-04-10T08:00:00Z",
-  "arrival_at": "2026-04-10T14:00:00Z",
-  "status": "PLANNED",
-  "estimated_km": 280.5,
-  "pair_trip_id": "uuid",
-  "notes": "Viagem extra"
-}
-```
-
-`PATCH /trips/{tripId}`
-
-```json
-{
-  "bus_id": "uuid",
-  "driver_id": "uuid",
-  "departure_at": "2026-04-10T09:00:00Z",
-  "estimated_km": 300,
-  "notes": "Ajuste operacional"
-}
-```
-
-`PUT /trips/{tripId}/segment-prices`
-
-```json
-{
-  "items": [
-    {
-      "origin_stop_id": "uuid",
-      "destination_stop_id": "uuid",
-      "price": 99.9,
-      "status": "ACTIVE"
-    }
-  ]
-}
-```
-
-## 6.3 Bookings e checkout
-
-`POST /bookings`
-
-```json
-{
-  "trip_id": "uuid",
-  "seat_id": "uuid",
-  "board_stop_id": "uuid",
-  "alight_stop_id": "uuid",
-  "fare_mode": "AUTO",
-  "fare_amount_final": 129.9,
-  "passenger": {
-    "name": "Maria Souza",
-    "document": "12345678900",
-    "phone": "48999999999",
-    "email": "maria@email.com"
-  },
-  "source": "COUNTER",
-  "total_amount": 129.9,
-  "deposit_amount": 50.0,
-  "remainder_amount": 79.9
-}
-```
-
-`POST /bookings/checkout`
-
-```json
-{
-  "trip_id": "uuid",
-  "seat_id": "uuid",
-  "board_stop_id": "uuid",
-  "alight_stop_id": "uuid",
-  "fare_mode": "AUTO",
-  "fare_amount_final": 129.9,
-  "passenger": {
-    "name": "Maria Souza",
-    "document": "12345678900",
-    "phone": "48999999999",
-    "email": "maria@email.com"
-  },
-  "source": "COUNTER",
-  "total_amount": 129.9,
-  "deposit_amount": 50.0,
-  "remainder_amount": 79.9,
-  "initial_payment": {
-    "method": "PIX",
-    "amount": 50.0,
-    "description": "Sinal da reserva",
-    "notes": "Pago no guiche",
-    "customer": {
-      "name": "Maria Souza",
-      "email": "maria@email.com",
-      "phone": "48999999999",
-      "document": "12345678900"
-    }
-  }
-}
-```
-
-`PATCH /bookings/{bookingId}`
-
-```json
-{
-  "status": "CONFIRMED"
-}
-```
-
-Valores aceitos para `status`: `PENDING`, `CONFIRMED`, `CANCELLED`, `EXPIRED`.
-
-## 6.4 Pagamentos
-
-`POST /payments`
-
-```json
-{
-  "booking_id": "uuid",
-  "amount": 79.9,
-  "method": "PIX",
-  "description": "Pagamento saldo",
-  "customer": {
-    "name": "Maria Souza",
-    "email": "maria@email.com",
-    "phone": "48999999999",
-    "document": "12345678900"
-  }
-}
-```
-
-Valores aceitos para `method`:
-
-- Provider: `PIX`, `CARD`
-
-`POST /payments/manual`
-
-```json
-{
-  "booking_id": "uuid",
-  "amount": 79.9,
-  "method": "CASH",
-  "notes": "Recebido em especie"
-}
-```
-
-Valores aceitos para `method` manual:
-
-- `CASH`, `TRANSFER`, `OTHER`
-
-Filtro `status` em `GET /payments`:
-
-- `PENDING`, `PAID`, `FAILED`, `REFUNDED`, `CANCELLED`
-
-## 6.5 Pricing
-
-`POST /pricing/quote`
-
-```json
-{
-  "trip_id": "uuid",
-  "board_stop_id": "uuid",
-  "alight_stop_id": "uuid",
-  "fare_mode": "AUTO",
-  "fare_amount_final": 129.9
-}
-```
-
-`POST /pricing/rules`
-
-```json
-{
-  "name": "Regra promocional",
-  "scope": "TRIP",
-  "scope_id": "uuid",
-  "rule_type": "PERCENT_DISCOUNT",
-  "priority": 10,
-  "is_active": true,
-  "params": {
-    "percent": 5
-  }
-}
-```
-
-## 6.6 Operacao de viagem (payloads principais)
-
-`POST /trip-requests`
-
-```json
-{
-  "route_id": "uuid",
-  "source": "SYSTEM",
-  "status": "OPEN",
-  "requester_name": "Comercial",
-  "requester_contact": "ramal 201",
-  "requested_departure_at": "2026-04-15T10:00:00Z",
-  "notes": "Evento corporativo"
-}
-```
-
-`POST /trips/{tripId}/manifest`
-
-```json
-{
-  "booking_passenger_id": "uuid",
-  "passenger_name": "Maria Souza",
-  "passenger_document": "12345678900",
-  "passenger_phone": "48999999999",
-  "status": "EXPECTED",
-  "seat_number": 12
-}
-```
-
-`POST /trips/{tripId}/authorizations`
-
-```json
-{
-  "authority": "DETER",
-  "status": "PENDING",
-  "protocol_number": "ABC123",
-  "license_number": "LIC-01",
-  "issued_at": "2026-04-09T12:00:00Z",
-  "valid_until": "2026-04-20T23:59:59Z",
-  "src_policy_number": "SRC-777",
-  "src_valid_until": "2026-04-20T23:59:59Z",
-  "exceptional_deadline_ok": false,
-  "attachment_id": "uuid",
-  "notes": "Aguardando emissao"
-}
-```
-
-`PUT /trips/{tripId}/checklists/{stage}`
-
-```json
-{
-  "checklist_data": {
-    "items": [
-      {
-        "label": "Tacografo",
-        "ok": true
-      }
-    ]
-  },
-  "is_complete": true,
-  "documents_checked": true,
-  "tachograph_checked": true,
-  "receipts_checked": false,
-  "rest_compliance_ok": true,
-  "notes": "Checklist pre-partida"
-}
-```
-
-`PUT /trips/{tripId}/driver-report`
-
-```json
-{
-  "driver_id": "uuid",
-  "odometer_start": 150000,
-  "odometer_end": 150320,
-  "fuel_used_liters": 72.5,
-  "incidents": "Nenhum",
-  "delays": "10 min de transito",
-  "rest_hours": 8,
-  "notes": "Viagem regular"
-}
-```
-
-`PUT /trips/{tripId}/reconciliation`
-
-```json
-{
-  "total_receipts_amount": 450.75,
-  "receipts_validated": true,
-  "verified_expense_ids": [
-    "uuid"
-  ],
-  "notes": "Conferencia final"
-}
-```
-
-`POST /trips/{tripId}/attachments`
-
-```json
-{
-  "attachment_type": "PDF",
-  "storage_bucket": "trip-docs",
-  "storage_path": "trips/uuid/doc.pdf",
-  "file_name": "doc.pdf",
-  "mime_type": "application/pdf",
-  "file_size": 123456,
-  "metadata": {
-    "source": "mobile"
-  }
-}
-```
-
-`POST /trips/{tripId}/workflow/advance`
-
-```json
-{
-  "to_status": "PASSENGERS_READY"
-}
-```
-
-Enums principais do modulo de operacao:
-
-- `trip-requests.source`: `EMAIL`, `SYSTEM`
-- `trip-requests.status`: `OPEN`, `IN_REVIEW`, `APPROVED`, `REJECTED`
-- `manifest.status`: `EXPECTED`, `BOARDED`, `NO_SHOW`, `CANCELLED`
-- `authorizations.authority`: `ANTT`, `DETER`, `EXCEPTIONAL`
-- `authorizations.status`: `PENDING`, `ISSUED`, `REJECTED`, `EXPIRED`
-- `checklists.stage`: `PRE_DEPARTURE`, `RETURN`
-- `workflow.to_status`: `REQUESTED`, `PASSENGERS_READY`, `ITINERARY_READY`, `DISPATCH_VALIDATED`, `AUTHORIZED`, `IN_PROGRESS`, `RETURNED`, `RETURN_CHECKED`, `SETTLED`, `CLOSED`
-
-## 6.7 Cadastros e financeiro (esquema resumido)
-
-### Buses
-
-`POST /buses`
-
-```json
-{
-  "name": "Bus 101",
-  "plate": "ABC1D23",
-  "capacity": 46,
-  "seat_map_name": "2x2",
-  "is_active": true,
-  "create_seats": true
-}
-```
-
-### Drivers
-
-`POST /drivers`
-
-```json
-{
-  "name": "Joao Silva",
-  "document": "12345678900",
-  "phone": "48999999999",
-  "is_active": true
-}
-```
-
-### Driver Cards
-
-`POST /driver-cards`
-
-```json
-{
-  "driver_id": "uuid",
-  "card_number": "9999888877776666",
-  "card_type": "FUEL",
-  "current_balance": 300,
-  "notes": "Cartao principal"
-}
-```
-
-`POST /driver-cards/{cardId}/transactions`
-
-```json
-{
-  "transaction_type": "DEBIT",
-  "amount": 120.5,
-  "description": "Abastecimento"
-}
-```
-
-Tipos de cartao: `FUEL`, `MULTIPURPOSE`, `FOOD`.
-
-### Trip Advances
-
-`POST /trip-advances`
-
-```json
-{
-  "trip_id": "uuid",
-  "driver_id": "uuid",
-  "amount": 500,
-  "purpose": "Pedagios e despesas",
-  "notes": "Entrega antecipada"
-}
-```
-
-`POST /trip-advances/{advanceId}/deliver`
-
-```json
-{
-  "delivered_by": "uuid"
-}
-```
-
-### Trip Expenses
-
-`POST /trip-expenses`
-
-```json
-{
-  "trip_id": "uuid",
-  "driver_id": "uuid",
-  "expense_type": "FUEL",
-  "amount": 180.5,
-  "description": "Abastecimento",
-  "expense_date": "2026-04-02T16:00:00Z",
-  "payment_method": "CARD",
-  "driver_card_id": "uuid",
-  "receipt_number": "REC-123",
-  "notes": "Posto central"
-}
-```
-
-### Trip Settlements
-
-`POST /trip-settlements`
-
-```json
-{
-  "trip_id": "uuid",
-  "notes": "Fechamento da viagem"
-}
-```
-
-### Trip Validations
-
-`POST /trip-validations`
-
-```json
-{
-  "trip_id": "uuid",
-  "odometer_initial": 150000,
-  "odometer_final": 150320,
-  "passengers_expected": 40,
-  "passengers_boarded": 38,
-  "passengers_no_show": 2,
-  "validation_notes": "Tudo conforme"
-}
-```
-
-### Advance Returns
-
-`POST /advance-returns`
-
-```json
-{
-  "trip_advance_id": "uuid",
-  "trip_settlement_id": "uuid",
-  "amount": 50,
-  "return_date": "2026-04-03T10:00:00Z",
-  "payment_method": "CASH",
-  "notes": "Troco devolvido"
-}
-```
-
-### Fiscal Documents
-
-`POST /fiscal-documents`
-
-```json
-{
-  "trip_id": "uuid",
-  "document_type": "NFE",
-  "document_number": "12345",
-  "issue_date": "2026-04-02T12:00:00Z",
-  "amount": 1000,
-  "recipient_name": "Empresa X",
-  "recipient_document": "00111222000199",
-  "status": "ISSUED",
-  "external_id": "ext-01",
-  "metadata": {
-    "serie": "1"
-  }
-}
-```
-
-## 6.8 Almoxarifado e compras (esquema resumido)
-
-### Suppliers
-
-`POST /suppliers`
-
-```json
-{
-  "name": "Fornecedor A",
-  "document": "00111222000199",
-  "phone": "4833334444",
-  "email": "contato@fornecedor.com",
-  "payment_terms": "30 dias",
-  "billing_day": 10,
-  "is_active": true,
-  "notes": "Atende regiao sul"
-}
-```
-
-### Products
-
-`POST /products`
-
-```json
-{
-  "code": "OLEO-15W40",
-  "name": "Oleo 15W40",
-  "category": "LUBRIFICANTE",
-  "unit": "L",
-  "min_stock": 20,
-  "is_active": true
-}
-```
-
-### Service Orders
-
-`POST /service-orders`
-
-```json
-{
-  "bus_id": "uuid",
-  "driver_id": "uuid",
-  "order_type": "CORRECTIVE",
-  "description": "Troca de pastilha de freio",
-  "odometer_km": 150120,
-  "scheduled_date": "2026-04-05T08:00:00Z",
-  "location": "Garagem A",
-  "notes": "Prioridade alta"
-}
-```
-
-### Purchase Orders
-
-`POST /purchase-orders`
-
-```json
-{
-  "service_order_id": "uuid",
-  "supplier_id": "uuid",
-  "expected_delivery": "2026-04-08T10:00:00Z",
-  "own_delivery": false,
-  "discount": 10,
-  "freight": 25,
-  "notes": "Entrega parcial permitida",
-  "items": [
-    {
-      "product_id": "uuid",
-      "quantity": 4,
-      "unit_price": 85.5,
-      "discount": 0
-    }
-  ]
-}
-```
-
-`POST /purchase-orders/{orderId}/items`
-
-```json
-{
-  "product_id": "uuid",
-  "quantity": 2,
-  "unit_price": 90,
-  "discount": 5
-}
-```
-
-### Invoices
-
-`POST /invoices`
-
-```json
-{
-  "invoice_number": "NF-2026-001",
-  "barcode": "123456789",
-  "supplier_id": "uuid",
-  "purchase_order_id": "uuid",
-  "service_order_id": "uuid",
-  "bus_id": "uuid",
-  "issue_date": "2026-04-02T00:00:00Z",
-  "issue_time": "14:30",
-  "cfop": "5102",
-  "payment_type": "PIX",
-  "due_date": "2026-05-02T00:00:00Z",
-  "discount": 0,
-  "freight": 0,
-  "notes": "Compra mensal",
-  "driver_id": "uuid",
-  "odometer_km": 150120,
-  "items": [
-    {
-      "product_id": "uuid",
-      "quantity": 3,
-      "unit_price": 120,
-      "discount": 0
-    }
-  ]
-}
-```
-
-## 6.9 Importacao XLSX
-
-`POST /imports/xlsx/upload`
-
-```json
-{
-  "source_file_name": "arquivo.xlsx",
-  "sheets": {
-    "aba1": [
-      {
-        "campo": "valor"
-      }
-    ]
-  }
-}
-```
-
-## 7) Exemplo rapido (cURL)
-
-```bash
-curl -X POST "http://localhost:8080/trips" \
-  -H "Authorization: Bearer <jwt>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "route_id":"<uuid>",
-    "bus_id":"<uuid>",
-    "departure_at":"2026-04-10T08:00:00Z"
-  }'
-```
-
-## 8) Fontes no codigo
-
-- `apps/api/cmd/api/main.go`
-- `apps/api/internal/*/handler.go`
-- `apps/api/internal/*/model.go`
-- `apps/api/internal/shared/http/decoder.go`
-- `apps/api/internal/shared/http/response.go`
+Regras:
+
+- upload exige `sheets` no body JSON
+- `batchId` vem no path e e validado apenas como string nao vazia no handler
+- erros retornam `XLSX_UPLOAD_ERROR`, `XLSX_VALIDATE_ERROR`, `XLSX_PROMOTE_ERROR`, `XLSX_REPORT_ERROR`
+
+## 8) Regras operacionais importantes
+
+- `Supabase` JWT e obrigatorio para quase tudo, mas auth failures nao usam o envelope JSON padrao.
+- `routes` e `trips` tem bloqueios de publicacao e readiness com resposta `422`.
+- `bookings` protege contra overbooking por conflito de unicidade de poltrona.
+- `pricing/quote` e `bookings` dependem da ordem correta entre parada de embarque e desembarque.
+- `payments` mistura cobranca via provedor, pagamento manual e sincronizacao posterior.
+- `trip_operations` concentra manifesto, autorizacoes, checklist, relatorio do motorista, reconciliacao, anexos e avancos de workflow.
+
+## 9) Gaps e TODOs visiveis no codigo
+
+- `GET /users/me` ainda responde `NOT_IMPLEMENTED`.
+- Nao existe prefixo de versao (`/api/v1`) no estado atual.
+- O comentario em `payments.RegisterWebhooks` ainda indica ajuste futuro do dominio publico do webhook em producao.
+- A documentacao deve ser revisada sempre a partir de `cmd/api/main.go` e `internal/*/handler.go`, porque a API cresceu alem do escopo inicial do plano MVP.

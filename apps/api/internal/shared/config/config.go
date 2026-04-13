@@ -17,6 +17,7 @@ type Config struct {
 	SupabaseIssuer          string
 	SupabaseAudience        string
 	AuthDisabled            bool
+	APIServiceTokens        []string
 	AbacatePayAPIKey        string
 	AbacatePayWebhookSecret string
 	AbacatePayBaseURL       string
@@ -39,6 +40,7 @@ func Load() (Config, error) {
 		SupabaseIssuer:          os.Getenv("SUPABASE_ISSUER"),
 		SupabaseAudience:        getEnv("SUPABASE_AUDIENCE", "authenticated"),
 		AuthDisabled:            parseBool(os.Getenv("AUTH_DISABLED")),
+		APIServiceTokens:        splitCSV(os.Getenv("API_SERVICE_TOKENS")),
 		AbacatePayAPIKey:        os.Getenv("ABACATEPAY_API_KEY"),
 		AbacatePayWebhookSecret: os.Getenv("ABACATEPAY_WEBHOOK_SECRET"),
 		AbacatePayBaseURL:       os.Getenv("ABACATEPAY_BASE_URL"),
@@ -70,4 +72,24 @@ func parseBool(val string) bool {
 	default:
 		return false
 	}
+}
+
+func splitCSV(val string) []string {
+	if strings.TrimSpace(val) == "" {
+		return nil
+	}
+
+	parts := strings.Split(val, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
