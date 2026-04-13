@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-
 	"schumacher-tur/api/internal/shared/config"
 )
 
@@ -58,8 +57,6 @@ func (s *Service) Create(ctx context.Context, input CreatePaymentInput) (Payment
 			Quantity:   1,
 			Price:      cents,
 		}},
-		// TODO(abacatepay-domain): Configure both URLs with the hosted frontend domain.
-		// Localhost can be used only for local checkout testing.
 		ReturnURL:     s.returnURL,
 		CompletionURL: s.completionURL,
 		Customer:      nil,
@@ -79,15 +76,11 @@ func (s *Service) Create(ctx context.Context, input CreatePaymentInput) (Payment
 		return Payment{}, nil, err
 	}
 
-	meta, _ := json.Marshal(map[string]interface{}{
-		"billing": billing,
-	})
-
+	meta, _ := json.Marshal(map[string]interface{}{"billing": billing})
 	created, err := s.repo.CreateWithProvider(ctx, paymentID, input.BookingID, input.Amount, input.Method, "ABACATEPAY", billing.ID, meta)
 	if err != nil {
 		return Payment{}, raw, err
 	}
-
 	return created, raw, nil
 }
 
@@ -115,13 +108,9 @@ func (s *Service) List(ctx context.Context, filter PaymentListFilter) ([]Payment
 }
 
 func (s *Service) HandleWebhook(ctx context.Context, event AbacateWebhookEvent) error {
-	if event.Event != "billing.paid" {
+	if event.Event != "billing.paid" || event.BillingID == "" {
 		return nil
 	}
-	if event.BillingID == "" {
-		return nil
-	}
-
 	_, err := s.repo.MarkPaidAndConfirmBooking(ctx, event.BillingID, event.Raw)
 	if err != nil {
 		if IsNotFound(err) {
@@ -138,33 +127,21 @@ func (s *Service) Sync(ctx context.Context, paymentID string) (PaymentSyncRespon
 	if err != nil {
 		return PaymentSyncResponse{}, err
 	}
-
 	bookingStatus, err := s.repo.GetBookingStatus(ctx, payment.BookingID)
 	if err != nil {
 		return PaymentSyncResponse{}, err
 	}
-
 	if payment.Provider == nil || strings.TrimSpace(*payment.Provider) != "ABACATEPAY" {
-		return PaymentSyncResponse{
-			Payment:       payment,
-			BookingStatus: bookingStatus,
-			Synced:        false,
-		}, nil
+		return PaymentSyncResponse{Payment: payment, BookingStatus: bookingStatus, Synced: false}, nil
 	}
-
 	if payment.ProviderRef == nil || strings.TrimSpace(*payment.ProviderRef) == "" {
-		return PaymentSyncResponse{
-			Payment:       payment,
-			BookingStatus: bookingStatus,
-			Synced:        false,
-		}, nil
+		return PaymentSyncResponse{Payment: payment, BookingStatus: bookingStatus, Synced: false}, nil
 	}
 
 	billing, raw, err := s.client.GetBillingByID(ctx, *payment.ProviderRef)
 	if err != nil {
 		return PaymentSyncResponse{}, err
 	}
-
 	if isPaidBillingStatus(billing.Status) && payment.Status != "PAID" {
 		updated, err := s.repo.MarkPaidAndConfirmBooking(ctx, *payment.ProviderRef, raw)
 		if err != nil {
@@ -182,12 +159,52 @@ func (s *Service) Sync(ctx context.Context, paymentID string) (PaymentSyncRespon
 		providerRef = strings.TrimSpace(*payment.ProviderRef)
 	}
 	log.Printf("event=payment_synced payment_id=%s booking_id=%s payment_status=%s booking_status=%s provider_ref=%s", payment.ID, payment.BookingID, payment.Status, bookingStatus, providerRef)
+	return PaymentSyncResponse{Payment: payment, BookingStatus: bookingStatus, Synced: true}, nil
+}
 
-	return PaymentSyncResponse{
-		Payment:       payment,
-		BookingStatus: bookingStatus,
-		Synced:        true,
-	}, nil
+func parseProviderData(raw []byte) (interface{}, *string, *string) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+	var parsed interface{}
+	_ = json.Unmarshal(raw, &parsed)
+
+	obj, ok := parsed.(map[string]interface{})
+	if !ok {
+		return parsed, nil, nil
+	}
+
+	checkout := readStringFromMap(obj, "url")
+	if checkout == nil {
+		if dataObj, ok := obj["data"].(map[string]interface{}); ok {
+			checkout = readStringFromMap(dataObj, "url")
+		}
+	}
+
+	var pixCode *string
+	if dataObj, ok := obj["data"].(map[string]interface{}); ok {
+		pixCode = readStringFromMap(dataObj, "pixQrCode")
+	}
+	if pixCode == nil {
+		pixCode = readStringFromMap(obj, "pixQrCode")
+	}
+	return parsed, checkout, pixCode
+}
+
+func readStringFromMap(obj map[string]interface{}, key string) *string {
+	raw, ok := obj[key]
+	if !ok {
+		return nil
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return nil
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func isPaidBillingStatus(status string) bool {

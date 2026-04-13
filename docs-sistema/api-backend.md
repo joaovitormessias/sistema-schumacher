@@ -373,7 +373,7 @@ Endpoints:
 
 Query params:
 
-- `GET /bookings`: `limit`, `offset`
+- `GET /bookings`: `booking_id`, `reservation_code`, `trip_id`, `status`, `limit`, `offset`
 
 Payload principal de criacao:
 
@@ -462,6 +462,7 @@ Validacoes e regras:
 
 Observacao operacional:
 
+- `GET /bookings` agora permite localizar reserva por `booking_id`, `reservation_code`, `trip_id` e `status`; quando `booking_id` e `reservation_code` vierem juntos, a API trata a busca como `OR` para facilitar integracao com workflows.
 - a resposta de `GET /bookings/{bookingId}`, `POST /bookings` e `POST /bookings/checkout` passa a incluir `passengers[]`; o campo `passenger` continua presente como alias do primeiro passageiro para compatibilidade.
 - `POST /bookings` tambem devolve `booking.reservation_code`; o vencimento da reserva segue em `booking.expires_at`.
 
@@ -524,11 +525,12 @@ Payload de pagamento manual:
 
 Regras:
 
-- `POST /payments` aceita apenas metodos do provedor, como `PIX` e `CARD`
-- `POST /payments/manual` aceita metodos manuais, como `CASH`, `TRANSFER`, `OTHER`
-- erro de configuracao de checkout retorna `503 CHECKOUT_NOT_CONFIGURED`
-- `GET /payments/{paymentId}/status` retorna um resumo com `status`, `amount`, `provider`, `provider_ref`, `metadata`
-- `POST /payments/{paymentId}/sync` retorna `payment`, `booking_status`, `synced`
+- `POST /payments` aceita apenas metodos do provedor, como `PIX` e `CARD`.
+- `POST /payments/manual` aceita metodos manuais, como `CASH`, `TRANSFER`, `OTHER`.
+- erro de configuracao de checkout retorna `503 CHECKOUT_NOT_CONFIGURED`.
+- `POST /payments` agora devolve `payment`, `provider_raw`, `checkout_url` e `pix_code` quando o provedor retornar esses dados.
+- `GET /payments/{paymentId}/status` retorna um resumo com `status`, `amount`, `provider`, `provider_ref`, `metadata`.
+- `POST /payments/{paymentId}/sync` retorna `payment`, `booking_status`, `synced`.
 
 Seguranca do webhook:
 
@@ -711,11 +713,13 @@ Query params:
 
 Query params:
 
-- `trip_id` obrigatorio
+- pelo menos um entre `trip_id`, `trip_date`, `booking_id` e `reservation_code` e obrigatorio
+- `include_canceled`: `true` ou `false`, default `false`
 - `format`: `json` ou `csv`, default `json`
 
 Comportamento:
 
+- em `json`, retorna linhas por passageiro com `trip_date`, `trip_id`, `booking_id`, `reservation_code`, `seat_number`, `origin`, `destination`, `booking_status`, `passenger_status`, `total_amount`, `deposit_amount`, `remainder_amount`, `amount_paid` e `payment_stage`
 - em `csv`, responde com `Content-Type: text/csv`
 - arquivo baixado usa `manifesto.csv`
 

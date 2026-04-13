@@ -19,17 +19,19 @@ type Booking struct {
 }
 
 type BookingListItem struct {
-	ID              string    `json:"id"`
-	TripID          string    `json:"trip_id"`
-	Status          string    `json:"status"`
-	TotalAmount     float64   `json:"total_amount"`
-	DepositAmount   float64   `json:"deposit_amount"`
-	RemainderAmount float64   `json:"remainder_amount"`
-	PassengerName   string    `json:"passenger_name"`
-	PassengerPhone  string    `json:"passenger_phone"`
-	PassengerEmail  string    `json:"passenger_email"`
-	SeatNumber      int       `json:"seat_number"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID              string     `json:"id"`
+	TripID          string     `json:"trip_id"`
+	Status          string     `json:"status"`
+	ReservationCode string     `json:"reservation_code"`
+	TotalAmount     float64    `json:"total_amount"`
+	DepositAmount   float64    `json:"deposit_amount"`
+	RemainderAmount float64    `json:"remainder_amount"`
+	PassengerName   string     `json:"passenger_name"`
+	PassengerPhone  string     `json:"passenger_phone"`
+	PassengerEmail  string     `json:"passenger_email"`
+	SeatNumber      int        `json:"seat_number"`
+	ExpiresAt       *time.Time `json:"expires_at"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 type PassengerInput struct {
@@ -92,8 +94,12 @@ type UpdateBookingInput struct {
 }
 
 type ListFilter struct {
-	Limit  int
-	Offset int
+	Limit           int
+	Offset          int
+	BookingID       string
+	ReservationCode string
+	TripID          string
+	Status          string
 }
 
 type BookingPassenger struct {

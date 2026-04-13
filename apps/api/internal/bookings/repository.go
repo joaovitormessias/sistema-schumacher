@@ -35,31 +35,62 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
 		offset = 0
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	query := `
     select
       b.booking_id as id,
       b.trip_id,
       b.status,
+      coalesce(b.reservation_code, '') as reservation_code,
       coalesce(pd.amount_total, 0)::numeric as total_amount,
       coalesce(pd.amount_paid, 0)::numeric as deposit_amount,
       coalesce(pd.amount_due, greatest(coalesce(pd.amount_total, 0) - coalesce(pd.amount_paid, 0), 0))::numeric as remainder_amount,
       coalesce(p.full_name, b.customer_name) as passenger_name,
       coalesce(p.phone, b.customer_phone) as passenger_phone,
-      ''::text as passenger_email,
+      coalesce(p.email, '') as passenger_email,
       case when coalesce(p.seat_number, '') ~ '^[0-9]+$' then p.seat_number::int else 0 end as seat_number,
+      b.reserved_until,
       b.created_at
     from bookings b
     left join booking_payment_details pd on pd.booking_id = b.booking_id
     left join lateral (
-      select full_name, phone, seat_number
+      select full_name, phone, email, seat_number
       from passengers p
       where p.booking_id = b.booking_id
       order by p.created_at asc
       limit 1
-    ) p on true
-    order by b.created_at desc
-    limit $1 offset $2
-  `, limit, offset)
+    ) p on true`
+
+	args := []interface{}{}
+	clauses := []string{}
+
+	if filter.BookingID != "" && filter.ReservationCode != "" {
+		args = append(args, filter.BookingID, filter.ReservationCode)
+		clauses = append(clauses, fmt.Sprintf("(b.booking_id = $%d or b.reservation_code = $%d)", len(args)-1, len(args)))
+	} else if filter.BookingID != "" {
+		args = append(args, filter.BookingID)
+		clauses = append(clauses, fmt.Sprintf("b.booking_id = $%d", len(args)))
+	} else if filter.ReservationCode != "" {
+		args = append(args, filter.ReservationCode)
+		clauses = append(clauses, fmt.Sprintf("b.reservation_code = $%d", len(args)))
+	}
+	if filter.TripID != "" {
+		args = append(args, filter.TripID)
+		clauses = append(clauses, fmt.Sprintf("b.trip_id = $%d", len(args)))
+	}
+	if filter.Status != "" {
+		args = append(args, filter.Status)
+		clauses = append(clauses, fmt.Sprintf("b.status = $%d", len(args)))
+	}
+	if len(clauses) > 0 {
+		query += "\n    where " + strings.Join(clauses, " and ")
+	}
+
+	args = append(args, limit)
+	query += fmt.Sprintf("\n    order by b.created_at desc\n    limit $%d", len(args))
+	args = append(args, offset)
+	query += fmt.Sprintf(" offset $%d", len(args))
+
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +103,7 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
 			&item.ID,
 			&item.TripID,
 			&item.Status,
+			&item.ReservationCode,
 			&item.TotalAmount,
 			&item.DepositAmount,
 			&item.RemainderAmount,
@@ -79,6 +111,7 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
 			&item.PassengerPhone,
 			&item.PassengerEmail,
 			&item.SeatNumber,
+			&item.ExpiresAt,
 			&item.CreatedAt,
 		); err != nil {
 			return nil, err

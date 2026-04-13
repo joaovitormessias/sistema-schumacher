@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"schumacher-tur/api/internal/pricing"
@@ -29,7 +30,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	filter, err := parseListFilter(r)
 	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "INVALID_PAGINATION", "invalid pagination parameters", nil)
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_PAGINATION", "invalid query parameters", nil)
 		return
 	}
 	items, err := h.svc.List(r.Context(), filter)
@@ -221,6 +222,13 @@ func isValidBookingStatus(status string) bool {
 func parseListFilter(r *http.Request) (ListFilter, error) {
 	filter := ListFilter{}
 	q := r.URL.Query()
+	filter.BookingID = strings.TrimSpace(q.Get("booking_id"))
+	filter.ReservationCode = strings.TrimSpace(q.Get("reservation_code"))
+	filter.TripID = strings.TrimSpace(q.Get("trip_id"))
+	filter.Status = strings.ToUpper(strings.TrimSpace(q.Get("status")))
+	if filter.Status != "" && !isValidBookingStatus(filter.Status) {
+		return filter, errors.New("invalid status")
+	}
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
