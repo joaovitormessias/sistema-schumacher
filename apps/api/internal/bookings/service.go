@@ -16,6 +16,7 @@ var (
 	ErrNegativeAmounts             = errors.New("amounts cannot be negative")
 	ErrMissingStops                = errors.New("board_stop_id and alight_stop_id are required")
 	ErrMissingFields               = errors.New("trip_id and at least one passenger.name are required")
+	ErrPassengerDocumentType       = errors.New("passenger document_type must be CPF or RG")
 	ErrPassengerNameRequired       = errors.New("every passenger must include name")
 	ErrSeatRequiresSinglePassenger = errors.New("seat_id can be used only with a single passenger")
 	ErrInitialPaymentRequired      = errors.New("initial_payment is required")
@@ -45,6 +46,9 @@ func (s *Service) Create(ctx context.Context, input CreateBookingInput) (Booking
 	for _, passenger := range passengers {
 		if strings.TrimSpace(passenger.Name) == "" {
 			return BookingDetails{}, ErrPassengerNameRequired
+		}
+		if passenger.DocumentType != "" && !isSupportedPassengerDocumentType(passenger.DocumentType) {
+			return BookingDetails{}, ErrPassengerDocumentType
 		}
 	}
 	if strings.TrimSpace(input.SeatID) != "" && len(passengers) > 1 {
@@ -268,10 +272,11 @@ func normalizePassengers(primary PassengerInput, list []PassengerInput) []Passen
 		passengers := make([]PassengerInput, 0, len(list))
 		for _, passenger := range list {
 			passengers = append(passengers, PassengerInput{
-				Name:     strings.TrimSpace(passenger.Name),
-				Document: strings.TrimSpace(passenger.Document),
-				Phone:    strings.TrimSpace(passenger.Phone),
-				Email:    strings.TrimSpace(passenger.Email),
+				Name:         strings.TrimSpace(passenger.Name),
+				Document:     strings.TrimSpace(passenger.Document),
+				DocumentType: normalizePassengerDocumentType(passenger.DocumentType, passenger.Document),
+				Phone:        strings.TrimSpace(passenger.Phone),
+				Email:        strings.TrimSpace(passenger.Email),
 			})
 		}
 		return passengers
@@ -280,16 +285,57 @@ func normalizePassengers(primary PassengerInput, list []PassengerInput) []Passen
 		return nil
 	}
 	return []PassengerInput{{
-		Name:     strings.TrimSpace(primary.Name),
-		Document: strings.TrimSpace(primary.Document),
-		Phone:    strings.TrimSpace(primary.Phone),
-		Email:    strings.TrimSpace(primary.Email),
+		Name:         strings.TrimSpace(primary.Name),
+		Document:     strings.TrimSpace(primary.Document),
+		DocumentType: normalizePassengerDocumentType(primary.DocumentType, primary.Document),
+		Phone:        strings.TrimSpace(primary.Phone),
+		Email:        strings.TrimSpace(primary.Email),
 	}}
 }
 
 func hasPassengerPayload(passenger PassengerInput) bool {
 	return strings.TrimSpace(passenger.Name) != "" ||
 		strings.TrimSpace(passenger.Document) != "" ||
+		strings.TrimSpace(passenger.DocumentType) != "" ||
 		strings.TrimSpace(passenger.Phone) != "" ||
 		strings.TrimSpace(passenger.Email) != ""
+}
+
+func normalizePassengerDocumentType(documentType, document string) string {
+	normalizedType := strings.ToUpper(strings.TrimSpace(documentType))
+	if normalizedType != "" {
+		return normalizedType
+	}
+
+	trimmedDocument := strings.TrimSpace(document)
+	if trimmedDocument == "" {
+		return ""
+	}
+	if isCPFDocument(trimmedDocument) {
+		return "CPF"
+	}
+	return "RG"
+}
+
+func isSupportedPassengerDocumentType(documentType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(documentType)) {
+	case "CPF", "RG":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCPFDocument(document string) bool {
+	digits := 0
+	for _, r := range strings.TrimSpace(document) {
+		if r < '0' || r > '9' {
+			if r == '.' || r == '-' || r == '/' || r == ' ' {
+				continue
+			}
+			return false
+		}
+		digits++
+	}
+	return digits == 11
 }

@@ -62,7 +62,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 	item, err := h.svc.Create(r.Context(), input)
 	if err != nil {
-		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrPassengerNameRequired) || errors.Is(err, ErrSeatRequiresSinglePassenger) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) {
+		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrPassengerNameRequired) || errors.Is(err, ErrPassengerDocumentType) || errors.Is(err, ErrSeatRequiresSinglePassenger) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) {
 			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 			return
 		}
@@ -121,7 +121,7 @@ func (h *Handler) checkout(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.svc.Checkout(r.Context(), input)
 	if err != nil {
-		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrPassengerNameRequired) || errors.Is(err, ErrSeatRequiresSinglePassenger) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) || errors.Is(err, ErrInvalidInitialPayment) || errors.Is(err, ErrInitialPaymentBelowMinimum) {
+		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrPassengerNameRequired) || errors.Is(err, ErrPassengerDocumentType) || errors.Is(err, ErrSeatRequiresSinglePassenger) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) || errors.Is(err, ErrInvalidInitialPayment) || errors.Is(err, ErrInitialPaymentBelowMinimum) {
 			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 			return
 		}

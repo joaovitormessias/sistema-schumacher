@@ -35,10 +35,11 @@ type BookingListItem struct {
 }
 
 type PassengerInput struct {
-	Name     string `json:"name"`
-	Document string `json:"document"`
-	Phone    string `json:"phone"`
-	Email    string `json:"email"`
+	Name         string `json:"name"`
+	Document     string `json:"document"`
+	DocumentType string `json:"document_type"`
+	Phone        string `json:"phone"`
+	Email        string `json:"email"`
 }
 
 type CreateBookingInput struct {
@@ -108,6 +109,7 @@ type BookingPassenger struct {
 	TripID          string    `json:"trip_id"`
 	Name            string    `json:"name"`
 	Document        string    `json:"document"`
+	DocumentType    string    `json:"document_type"`
 	Phone           string    `json:"phone"`
 	Email           string    `json:"email"`
 	SeatID          string    `json:"seat_id"`

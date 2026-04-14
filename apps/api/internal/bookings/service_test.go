@@ -14,7 +14,7 @@ func TestNormalizePassengersUsesPluralListWhenPresent(t *testing.T) {
 	if len(passengers) != 2 {
 		t.Fatalf("expected 2 passengers, got %d", len(passengers))
 	}
-	if passengers[0].Name != "Maria" || passengers[0].Document != "123" || passengers[0].Phone != "4899" || passengers[0].Email != "maria@example.com" {
+	if passengers[0].Name != "Maria" || passengers[0].Document != "123" || passengers[0].DocumentType != "RG" || passengers[0].Phone != "4899" || passengers[0].Email != "maria@example.com" {
 		t.Fatalf("unexpected normalization result: %+v", passengers[0])
 	}
 	if passengers[1].Name != "Joao" {
@@ -31,8 +31,25 @@ func TestNormalizePassengersFallsBackToSingularPassenger(t *testing.T) {
 	if len(passengers) != 1 {
 		t.Fatalf("expected 1 passenger, got %d", len(passengers))
 	}
-	if passengers[0].Name != "Ana" || passengers[0].Document != "456" {
+	if passengers[0].Name != "Ana" || passengers[0].Document != "456" || passengers[0].DocumentType != "RG" {
 		t.Fatalf("unexpected normalization result: %+v", passengers[0])
+	}
+}
+
+func TestNormalizePassengersPreservesExplicitDocumentType(t *testing.T) {
+	passengers := normalizePassengers(
+		PassengerInput{},
+		[]PassengerInput{
+			{Name: "Maria", Document: "06645648105", DocumentType: "cpf"},
+			{Name: "Joao", Document: "12.345.678-X", DocumentType: "rg"},
+		},
+	)
+
+	if passengers[0].DocumentType != "CPF" {
+		t.Fatalf("expected CPF document type, got %+v", passengers[0])
+	}
+	if passengers[1].DocumentType != "RG" {
+		t.Fatalf("expected RG document type, got %+v", passengers[1])
 	}
 }
 

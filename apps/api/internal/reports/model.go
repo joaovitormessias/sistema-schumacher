@@ -18,6 +18,7 @@ type PassengerReportRow struct {
 	TripDate        string    `json:"trip_date"`
 	Name            string    `json:"name"`
 	Document        string    `json:"document"`
+	DocumentType    string    `json:"document_type"`
 	Phone           string    `json:"phone"`
 	Email           string    `json:"email"`
 	Origin          string    `json:"origin"`
