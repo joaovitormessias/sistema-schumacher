@@ -68,6 +68,8 @@ type QuoteResult struct {
   RouteID         string        `json:"route_id"`
   BoardStopID     string        `json:"board_stop_id"`
   AlightStopID    string        `json:"alight_stop_id"`
+  OriginStopID    string        `json:"origin_stop_id"`
+  DestinationStopID string      `json:"destination_stop_id"`
   BoardStopOrder  int           `json:"board_stop_order"`
   AlightStopOrder int           `json:"alight_stop_order"`
   BaseAmount      float64       `json:"base_amount"`

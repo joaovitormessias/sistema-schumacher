@@ -90,14 +90,16 @@ func (s *Service) Create(ctx context.Context, input CreateBookingInput) (Booking
 		}
 	}
 
-	data := CreateBookingData{
-		TripID:          input.TripID,
-		SeatID:          input.SeatID,
-		BoardStopID:     input.BoardStopID,
-		AlightStopID:    input.AlightStopID,
-		BoardStopOrder:  quote.BoardStopOrder,
-		AlightStopOrder: quote.AlightStopOrder,
-		FareMode:        quote.FareMode,
+		data := CreateBookingData{
+			TripID:          input.TripID,
+			SeatID:          input.SeatID,
+			BoardStopID:     input.BoardStopID,
+			AlightStopID:    input.AlightStopID,
+			OriginStopID:    quote.OriginStopID,
+			DestinationStopID: quote.DestinationStopID,
+			BoardStopOrder:  quote.BoardStopOrder,
+			AlightStopOrder: quote.AlightStopOrder,
+			FareMode:        quote.FareMode,
 		FareAmountCalc:  quote.CalcAmount,
 		FareAmountFinal: quote.FinalAmount,
 		FareSnapshot:    quote.Snapshot,

@@ -156,6 +156,8 @@ type CreateBookingData struct {
 	SeatID          string
 	BoardStopID     string
 	AlightStopID    string
+	OriginStopID    string
+	DestinationStopID string
 	BoardStopOrder  int
 	AlightStopOrder int
 	FareMode        string

@@ -165,7 +165,7 @@ func (r *Repository) Create(ctx context.Context, input CreateBookingData) (Booki
       now(), now()
     from generated g
     returning booking_id, trip_id, status, reservation_code, reserved_until, created_at
-  `, input.TripID, input.BoardStopID, input.AlightStopID, len(input.Passengers), firstPassengerName(input.Passengers), firstPassengerPhone(input.Passengers), input.IdempotencyKey)
+	  `, input.TripID, input.OriginStopID, input.DestinationStopID, len(input.Passengers), firstPassengerName(input.Passengers), firstPassengerPhone(input.Passengers), input.IdempotencyKey)
 	if err := row.Scan(&booking.ID, &booking.TripID, &booking.Status, &booking.ReservationCode, &booking.ExpiresAt, &booking.CreatedAt); err != nil {
 		return BookingDetails{}, err
 	}
@@ -199,7 +199,7 @@ func (r *Repository) Create(ctx context.Context, input CreateBookingData) (Booki
       $7, $8, nullif($9, ''), null, 'RESERVED', 'passenger', now(), now()
     from generated g
     returning passenger_id, booking_id, trip_id, full_name, coalesce(document, ''), coalesce(document_type, ''), coalesce(phone, ''), coalesce(seat_number, ''), status, created_at
-  `, booking.ID, input.TripID, inputPassenger.Name, inputPassenger.Document, inputPassenger.DocumentType, passengerSeatID, input.BoardStopID, input.AlightStopID, inputPassenger.Phone)
+	  `, booking.ID, input.TripID, inputPassenger.Name, inputPassenger.Document, inputPassenger.DocumentType, passengerSeatID, input.OriginStopID, input.DestinationStopID, inputPassenger.Phone)
 		var seatNumber string
 		if err := row.Scan(&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.DocumentType, &passenger.Phone, &seatNumber, &passenger.Status, &passenger.CreatedAt); err != nil {
 			return BookingDetails{}, err
