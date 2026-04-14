@@ -22,6 +22,8 @@ func (r *Repository) Search(ctx context.Context, filter SearchFilter) ([]SearchR
 		limit = 10
 	}
 
+	tripStatusExpr := normalizedTripStatusSQL("t.status")
+
 	query := `select
     concat(t.trip_id, ':', board.trip_stop_id, ':', alight.trip_stop_id) as segment_id,
     t.trip_id,
@@ -41,7 +43,7 @@ func (r *Repository) Search(ctx context.Context, filter SearchFilter) ([]SearchR
       when upper(coalesce(rsp.status, 'ACTIVE')) = 'INACTIVE' then 'INACTIVE'
       else 'ACTIVE'
     end as status,
-    upper(coalesce(t.status, '')) as trip_status,
+    ` + tripStatusExpr + ` as trip_status,
     coalesce(t.package_name, '') as package_name
   from trips t
   join trip_stops board on board.trip_id = t.trip_id and board.is_active = true
@@ -55,7 +57,7 @@ func (r *Repository) Search(ctx context.Context, filter SearchFilter) ([]SearchR
 
 	args := []interface{}{}
 	clauses := []string{
-		"upper(coalesce(t.status, '')) in ('SCHEDULED', 'IN_PROGRESS')",
+		activeTripStatusClause("t.status"),
 	}
 
 	if !filter.IncludePast {
@@ -128,4 +130,15 @@ func (r *Repository) Search(ctx context.Context, filter SearchFilter) ([]SearchR
 	}
 
 	return items, rows.Err()
+}
+
+func activeTripStatusClause(column string) string {
+	return fmt.Sprintf("upper(coalesce(%s, '')) in ('SCHEDULED', 'IN_PROGRESS', 'ATIVO', 'ACTIVE')", column)
+}
+
+func normalizedTripStatusSQL(column string) string {
+	return fmt.Sprintf(`case
+      when upper(coalesce(%s, '')) in ('ATIVO', 'ACTIVE') then 'SCHEDULED'
+      else upper(coalesce(%s, ''))
+    end`, column, column)
 }

@@ -260,7 +260,7 @@ Validacoes e comportamento:
 - ao menos um entre `origin`, `destination` ou `package_name` deve ser informado
 - `origin` e `destination` aceitam `Cidade/UF`, `Cidade UF`, `Cidade-UF` e `Cidade, UF`; o backend normaliza para `Cidade/UF`
 - `origin` e `destination` nao podem ser iguais quando ambos forem enviados
-- por padrao a busca retorna apenas viagens futuras com `trip.status in ('SCHEDULED','IN_PROGRESS')`
+- por padrao a busca retorna apenas viagens futuras com `trip.status in ('SCHEDULED','IN_PROGRESS')`, aceitando tambem `ATIVO` e `ACTIVE` como compatibilidade com carga legada
 - por padrao a busca retorna apenas segmentos com `route_segment_prices.status = ACTIVE`
 - o payload ja devolve `trip_id`, `board_stop_id`, `alight_stop_id`, `price`, `seats_available` e `package_name`, servindo como agregador para o fluxo `n8n -> API`
 
