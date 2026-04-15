@@ -46,14 +46,14 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
       coalesce(pd.amount_due, greatest(coalesce(pd.amount_total, 0) - coalesce(pd.amount_paid, 0), 0))::numeric as remainder_amount,
       coalesce(p.full_name, b.customer_name) as passenger_name,
       coalesce(p.phone, b.customer_phone) as passenger_phone,
-      coalesce(p.email, '') as passenger_email,
+      ''::text as passenger_email,
       case when coalesce(p.seat_number, '') ~ '^[0-9]+$' then p.seat_number::int else 0 end as seat_number,
       b.reserved_until,
       b.created_at
     from bookings b
     left join booking_payment_details pd on pd.booking_id = b.booking_id
     left join lateral (
-      select full_name, phone, email, seat_number
+      select full_name, phone, seat_number
       from passengers p
       where p.booking_id = b.booking_id
       order by p.created_at asc
