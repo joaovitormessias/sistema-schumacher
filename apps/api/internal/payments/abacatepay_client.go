@@ -42,7 +42,7 @@ type BillingProduct struct {
 
 type BillingCustomer struct {
 	Name      string `json:"name"`
-	Email     string `json:"email"`
+	Email     string `json:"email,omitempty"`
 	Cellphone string `json:"cellphone"`
 	TaxID     string `json:"taxId"`
 }
