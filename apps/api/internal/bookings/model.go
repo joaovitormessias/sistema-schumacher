@@ -40,6 +40,8 @@ type PassengerInput struct {
 	DocumentType string `json:"document_type"`
 	Phone        string `json:"phone"`
 	Email        string `json:"email"`
+	Notes        string `json:"notes"`
+	IsLapChild   bool   `json:"is_lap_child"`
 }
 
 type CreateBookingInput struct {
@@ -112,6 +114,8 @@ type BookingPassenger struct {
 	DocumentType    string    `json:"document_type"`
 	Phone           string    `json:"phone"`
 	Email           string    `json:"email"`
+	Notes           string    `json:"notes"`
+	IsLapChild      bool      `json:"is_lap_child"`
 	SeatID          string    `json:"seat_id"`
 	BoardStopID     string    `json:"board_stop_id"`
 	AlightStopID    string    `json:"alight_stop_id"`
@@ -152,22 +156,22 @@ type CheckoutResponse struct {
 }
 
 type CreateBookingData struct {
-	TripID          string
-	SeatID          string
-	BoardStopID     string
-	AlightStopID    string
-	OriginStopID    string
+	TripID            string
+	SeatID            string
+	BoardStopID       string
+	AlightStopID      string
+	OriginStopID      string
 	DestinationStopID string
-	BoardStopOrder  int
-	AlightStopOrder int
-	FareMode        string
-	FareAmountCalc  float64
-	FareAmountFinal float64
-	FareSnapshot    []byte
-	Passengers      []PassengerInput
-	IdempotencyKey  string
-	Source          *string
-	TotalAmount     float64
-	DepositAmount   float64
-	RemainderAmount float64
+	BoardStopOrder    int
+	AlightStopOrder   int
+	FareMode          string
+	FareAmountCalc    float64
+	FareAmountFinal   float64
+	FareSnapshot      []byte
+	Passengers        []PassengerInput
+	IdempotencyKey    string
+	Source            *string
+	TotalAmount       float64
+	DepositAmount     float64
+	RemainderAmount   float64
 }

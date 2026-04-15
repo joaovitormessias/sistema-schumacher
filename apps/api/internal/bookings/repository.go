@@ -196,21 +196,27 @@ func (r *Repository) Create(ctx context.Context, input CreateBookingData) (Booki
     select
       g.passenger_id,
       $1, $2, $3, nullif($4, ''), nullif($5, ''), $6,
-      $7, $8, nullif($9, ''), null, 'RESERVED', 'passenger', now(), now()
+      $7, $8, nullif($9, ''), nullif($10, ''), 'RESERVED', 'passenger', now(), now()
     from generated g
-    returning passenger_id, booking_id, trip_id, full_name, coalesce(document, ''), coalesce(document_type, ''), coalesce(phone, ''), coalesce(seat_number, ''), status, created_at
-	  `, booking.ID, input.TripID, inputPassenger.Name, inputPassenger.Document, inputPassenger.DocumentType, passengerSeatID, input.OriginStopID, input.DestinationStopID, inputPassenger.Phone)
+    returning passenger_id, booking_id, trip_id, full_name, coalesce(document, ''), coalesce(document_type, ''), coalesce(phone, ''), coalesce(notes, ''), coalesce(seat_number, ''), status, created_at
+	  `, booking.ID, input.TripID, inputPassenger.Name, inputPassenger.Document, inputPassenger.DocumentType, passengerSeatID, input.OriginStopID, input.DestinationStopID, inputPassenger.Phone, inputPassenger.Notes)
 		var seatNumber string
-		if err := row.Scan(&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.DocumentType, &passenger.Phone, &seatNumber, &passenger.Status, &passenger.CreatedAt); err != nil {
+		if err := row.Scan(&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.DocumentType, &passenger.Phone, &passenger.Notes, &seatNumber, &passenger.Status, &passenger.CreatedAt); err != nil {
 			return BookingDetails{}, err
 		}
+		passenger.IsLapChild = isLapChildNotes(passenger.Notes)
 		passenger.SeatID = seatNumber
 		passenger.Email = inputPassenger.Email
 		passenger.BoardStopID = input.BoardStopID
 		passenger.AlightStopID = input.AlightStopID
 		passenger.FareMode = input.FareMode
-		passenger.FareAmountCalc = input.FareAmountCalc
-		passenger.FareAmountFinal = input.FareAmountFinal
+		if passenger.IsLapChild {
+			passenger.FareAmountCalc = 0
+			passenger.FareAmountFinal = 0
+		} else {
+			passenger.FareAmountCalc = input.FareAmountCalc
+			passenger.FareAmountFinal = input.FareAmountFinal
+		}
 
 		passengers = append(passengers, passenger)
 	}
@@ -288,19 +294,33 @@ func (r *Repository) Get(ctx context.Context, id string) (BookingDetails, error)
     select
       p.passenger_id, p.booking_id, p.trip_id, p.full_name, coalesce(p.document, ''), coalesce(p.document_type, ''), coalesce(p.phone, ''),
       ''::text as email,
+      coalesce(p.notes, '') as notes,
+      case when position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) > 0 then true else false end as is_lap_child,
       coalesce(p.seat_number, '') as seat_id,
       coalesce(p.origin_stop_id, ''),
       coalesce(p.destination_stop_id, ''),
       0::int as board_stop_order,
       0::int as alight_stop_order,
       'AUTO'::text as fare_mode,
-      (coalesce(pd.amount_total, 0) / greatest(coalesce(b.passenger_qty, 0), 1))::numeric as fare_amount_calc,
-      (coalesce(pd.amount_total, 0) / greatest(coalesce(b.passenger_qty, 0), 1))::numeric as fare_amount_final,
+      case
+        when position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) > 0 then 0::numeric
+        else (coalesce(pd.amount_total, 0) / greatest(coalesce(pc.chargeable_count, 0), 1))::numeric
+      end as fare_amount_calc,
+      case
+        when position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) > 0 then 0::numeric
+        else (coalesce(pd.amount_total, 0) / greatest(coalesce(pc.chargeable_count, 0), 1))::numeric
+      end as fare_amount_final,
       p.status,
       p.created_at
     from passengers p
     join bookings b on b.booking_id = p.booking_id
     left join booking_payment_details pd on pd.booking_id = p.booking_id
+    left join lateral (
+      select count(*)::numeric as chargeable_count
+      from passengers px
+      where px.booking_id = p.booking_id
+        and position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(px.notes, ''))) = 0
+    ) pc on true
     where p.booking_id=$1
     order by p.created_at asc`, id)
 	if err != nil {
@@ -312,7 +332,7 @@ func (r *Repository) Get(ctx context.Context, id string) (BookingDetails, error)
 	for rows.Next() {
 		var passenger BookingPassenger
 		if err := rows.Scan(
-			&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.DocumentType, &passenger.Phone, &passenger.Email, &passenger.SeatID,
+			&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.DocumentType, &passenger.Phone, &passenger.Email, &passenger.Notes, &passenger.IsLapChild, &passenger.SeatID,
 			&passenger.BoardStopID, &passenger.AlightStopID, &passenger.BoardStopOrder, &passenger.AlightStopOrder,
 			&passenger.FareMode, &passenger.FareAmountCalc, &passenger.FareAmountFinal, &passenger.Status, &passenger.CreatedAt,
 		); err != nil {

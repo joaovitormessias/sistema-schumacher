@@ -73,6 +73,35 @@ func TestNormalizePassengersPreservesExplicitItemsForValidation(t *testing.T) {
 	}
 }
 
+func TestNormalizePassengersPreservesLapChildMetadata(t *testing.T) {
+	passengers := normalizePassengers(
+		PassengerInput{},
+		[]PassengerInput{
+			{Name: "Adulto", Document: "06645648105", DocumentType: "CPF"},
+			{Name: "Crianca", Document: "MG1234567", DocumentType: "RG", IsLapChild: true},
+		},
+	)
+
+	if !passengers[1].IsLapChild {
+		t.Fatalf("expected second passenger to be lap child, got %+v", passengers[1])
+	}
+	if passengers[1].Notes != lapChildPassengerNote {
+		t.Fatalf("expected lap child note marker, got %+v", passengers[1])
+	}
+}
+
+func TestCountChargeablePassengersIgnoresLapChild(t *testing.T) {
+	count := countChargeablePassengers([]PassengerInput{
+		{Name: "Adulto 1"},
+		{Name: "Adulto 2"},
+		{Name: "Crianca", IsLapChild: true},
+	})
+
+	if count != 2 {
+		t.Fatalf("expected 2 chargeable passengers, got %d", count)
+	}
+}
+
 func TestBookingDetailsWithPassengersKeepsFirstPassengerAlias(t *testing.T) {
 	details := bookingDetailsWithPassengers(Booking{ID: "BK-1"}, []BookingPassenger{
 		{ID: "PS-1", Name: "Maria"},

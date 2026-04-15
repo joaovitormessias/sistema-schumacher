@@ -24,6 +24,8 @@ var (
 	ErrInitialPaymentBelowMinimum  = errors.New("initial_payment.amount must be at least 30% of total_amount")
 )
 
+const lapChildPassengerNote = "CRIANCA_DE_COLO_ATE_5_ANOS"
+
 type Service struct {
 	repo     *Repository
 	pricing  *pricing.Service
@@ -77,7 +79,7 @@ func (s *Service) Create(ctx context.Context, input CreateBookingInput) (Booking
 		return BookingDetails{}, err
 	}
 
-	total := roundTo2(quote.FinalAmount * float64(len(passengers)))
+	total := roundTo2(quote.FinalAmount * float64(countChargeablePassengers(passengers)))
 	deposit := input.DepositAmount
 	remainder := input.RemainderAmount
 	if deposit == 0 && remainder == 0 {
@@ -90,25 +92,25 @@ func (s *Service) Create(ctx context.Context, input CreateBookingInput) (Booking
 		}
 	}
 
-		data := CreateBookingData{
-			TripID:          input.TripID,
-			SeatID:          input.SeatID,
-			BoardStopID:     input.BoardStopID,
-			AlightStopID:    input.AlightStopID,
-			OriginStopID:    quote.OriginStopID,
-			DestinationStopID: quote.DestinationStopID,
-			BoardStopOrder:  quote.BoardStopOrder,
-			AlightStopOrder: quote.AlightStopOrder,
-			FareMode:        quote.FareMode,
-		FareAmountCalc:  quote.CalcAmount,
-		FareAmountFinal: quote.FinalAmount,
-		FareSnapshot:    quote.Snapshot,
-		Passengers:      passengers,
-		IdempotencyKey:  strings.TrimSpace(input.IdempotencyKey),
-		Source:          input.Source,
-		TotalAmount:     total,
-		DepositAmount:   deposit,
-		RemainderAmount: remainder,
+	data := CreateBookingData{
+		TripID:            input.TripID,
+		SeatID:            input.SeatID,
+		BoardStopID:       input.BoardStopID,
+		AlightStopID:      input.AlightStopID,
+		OriginStopID:      quote.OriginStopID,
+		DestinationStopID: quote.DestinationStopID,
+		BoardStopOrder:    quote.BoardStopOrder,
+		AlightStopOrder:   quote.AlightStopOrder,
+		FareMode:          quote.FareMode,
+		FareAmountCalc:    quote.CalcAmount,
+		FareAmountFinal:   quote.FinalAmount,
+		FareSnapshot:      quote.Snapshot,
+		Passengers:        passengers,
+		IdempotencyKey:    strings.TrimSpace(input.IdempotencyKey),
+		Source:            input.Source,
+		TotalAmount:       total,
+		DepositAmount:     deposit,
+		RemainderAmount:   remainder,
 	}
 
 	return s.repo.Create(ctx, data)
@@ -279,6 +281,8 @@ func normalizePassengers(primary PassengerInput, list []PassengerInput) []Passen
 				DocumentType: normalizePassengerDocumentType(passenger.DocumentType, passenger.Document),
 				Phone:        strings.TrimSpace(passenger.Phone),
 				Email:        strings.TrimSpace(passenger.Email),
+				Notes:        mergePassengerNotes(passenger.Notes, passenger.IsLapChild),
+				IsLapChild:   passenger.IsLapChild,
 			})
 		}
 		return passengers
@@ -292,6 +296,8 @@ func normalizePassengers(primary PassengerInput, list []PassengerInput) []Passen
 		DocumentType: normalizePassengerDocumentType(primary.DocumentType, primary.Document),
 		Phone:        strings.TrimSpace(primary.Phone),
 		Email:        strings.TrimSpace(primary.Email),
+		Notes:        mergePassengerNotes(primary.Notes, primary.IsLapChild),
+		IsLapChild:   primary.IsLapChild,
 	}}
 }
 
@@ -300,7 +306,37 @@ func hasPassengerPayload(passenger PassengerInput) bool {
 		strings.TrimSpace(passenger.Document) != "" ||
 		strings.TrimSpace(passenger.DocumentType) != "" ||
 		strings.TrimSpace(passenger.Phone) != "" ||
-		strings.TrimSpace(passenger.Email) != ""
+		strings.TrimSpace(passenger.Email) != "" ||
+		passenger.IsLapChild
+}
+
+func countChargeablePassengers(passengers []PassengerInput) int {
+	count := 0
+	for _, passenger := range passengers {
+		if passenger.IsLapChild {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func mergePassengerNotes(notes string, isLapChild bool) string {
+	notes = strings.TrimSpace(notes)
+	if !isLapChild {
+		return notes
+	}
+	if notes == "" {
+		return lapChildPassengerNote
+	}
+	if strings.Contains(strings.ToUpper(notes), lapChildPassengerNote) {
+		return notes
+	}
+	return notes + " | " + lapChildPassengerNote
+}
+
+func isLapChildNotes(notes string) bool {
+	return strings.Contains(strings.ToUpper(strings.TrimSpace(notes)), lapChildPassengerNote)
 }
 
 func normalizePassengerDocumentType(documentType, document string) string {
