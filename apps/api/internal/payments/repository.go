@@ -16,6 +16,12 @@ type Repository struct {
 	pool *pgxpool.Pool
 }
 
+type BookingPaymentContext struct {
+	BookingID       string
+	ReservationCode string
+	TripID          string
+}
+
 func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
@@ -85,6 +91,18 @@ func (r *Repository) GetBookingStatus(ctx context.Context, bookingID string) (st
 		return "", err
 	}
 	return status, nil
+}
+
+func (r *Repository) GetBookingPaymentContext(ctx context.Context, bookingID string) (BookingPaymentContext, error) {
+	var item BookingPaymentContext
+	row := r.pool.QueryRow(ctx, `
+        select booking_id, coalesce(reservation_code, ''), coalesce(trip_id, '')
+        from bookings
+        where booking_id=$1`, bookingID)
+	if err := row.Scan(&item.BookingID, &item.ReservationCode, &item.TripID); err != nil {
+		return item, err
+	}
+	return item, nil
 }
 
 func (r *Repository) List(ctx context.Context, filter PaymentListFilter) ([]Payment, error) {

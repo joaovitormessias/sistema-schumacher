@@ -1,7 +1,6 @@
 package payments
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -16,12 +15,11 @@ import (
 
 type Handler struct {
 	svc       *Service
-	publicKey string
-	secret    string
+	secretKey string
 }
 
-func NewHandler(svc *Service, publicKey, secret string) *Handler {
-	return &Handler{svc: svc, publicKey: publicKey, secret: secret}
+func NewHandler(svc *Service, secretKey string) *Handler {
+	return &Handler{svc: svc, secretKey: strings.TrimSpace(secretKey)}
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
@@ -35,6 +33,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 }
 
 func (h *Handler) RegisterWebhooks(r chi.Router) {
+	r.Post("/webhooks/pagarme", h.handleWebhook)
 	r.Post("/webhooks/abacatepay", h.handleWebhook)
 }
 
@@ -55,7 +54,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 	payment, raw, err := h.svc.Create(r.Context(), input)
 	if err != nil {
-		if errors.Is(err, errMissingCheckoutURLs) {
+		if strings.Contains(err.Error(), "PAGARME_SECRET_KEY is required") {
 			httpx.WriteError(w, http.StatusServiceUnavailable, "CHECKOUT_NOT_CONFIGURED", err.Error(), nil)
 			return
 		}
@@ -199,33 +198,16 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
-	if h.secret == "" && h.publicKey == "" {
+	if h.secretKey == "" {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "WEBHOOK_NOT_CONFIGURED", "webhook security not configured", nil)
 		return
 	}
 
 	body, _ := io.ReadAll(r.Body)
-	querySecret := WebhookSecretFromQuery(r.URL.RawQuery)
-
-	if h.secret != "" {
-		secretOK := secretMatches(r, h.secret)
-		if !secretOK && querySecret != "" {
-			secretOK = querySecret == h.secret
-		}
-		if !secretOK {
-			log.Printf("event=webhook_rejected reason=invalid_secret path=%s remote=%s", r.URL.Path, r.RemoteAddr)
-			httpx.WriteError(w, http.StatusUnauthorized, "INVALID_SECRET", "invalid webhook secret", nil)
-			return
-		}
-	}
-
-	sig := webhookSignatureFromHeaders(r)
-	if shouldVerifyWebhookSignature(h.publicKey, sig) {
-		if !verifyWebhookSignatureWithFallback(sig, body, h.publicKey, h.secret) {
-			log.Printf("event=webhook_rejected reason=invalid_signature path=%s remote=%s", r.URL.Path, r.RemoteAddr)
-			httpx.WriteError(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "invalid webhook signature", nil)
-			return
-		}
+	if !verifyWebhookSignature(r, body, h.secretKey) {
+		log.Printf("event=webhook_rejected reason=invalid_signature path=%s remote=%s", r.URL.Path, r.RemoteAddr)
+		httpx.WriteError(w, http.StatusUnauthorized, "INVALID_SIGNATURE", "invalid webhook signature", nil)
+		return
 	}
 
 	evt, err := ParseWebhook(body)
@@ -242,48 +224,33 @@ func (h *Handler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func secretMatches(r *http.Request, secret string) bool {
-	if v := r.Header.Get("X-Webhook-Secret"); v != "" {
-		return v == secret
-	}
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		return strings.TrimSpace(auth[7:]) == secret
-	}
-	return false
-}
-
-func webhookSignatureFromHeaders(r *http.Request) string {
-	if v := strings.TrimSpace(r.Header.Get("X-AbacatePay-Signature")); v != "" {
-		return v
-	}
-	return strings.TrimSpace(r.Header.Get("X-Webhook-Signature"))
-}
-
-func verifyWebhookSignatureWithFallback(signature string, body []byte, publicKey, secret string) bool {
-	signature = strings.TrimSpace(signature)
-	if signature == "" {
+func verifyWebhookSignature(r *http.Request, body []byte, secret string) bool {
+	if strings.TrimSpace(secret) == "" {
 		return false
 	}
-
-	primaryKey := strings.TrimSpace(publicKey)
-	if primaryKey != "" && VerifyWebhookSignature(primaryKey, body, signature) {
-		return true
+	incoming := webhookSignaturesFromHeaders(r)
+	if len(incoming) == 0 {
+		return false
 	}
-
-	fallbackKey := strings.TrimSpace(secret)
-	if fallbackKey != "" && VerifyWebhookSignature(fallbackKey, body, signature) {
-		return true
-	}
-
-	return false
+	return VerifyWebhookSignature(secret, body, incoming)
 }
 
-func shouldVerifyWebhookSignature(publicKey, signature string) bool {
-	if strings.TrimSpace(signature) != "" {
-		return true
+func webhookSignaturesFromHeaders(r *http.Request) []string {
+	values := []string{}
+	for _, name := range []string{"X-Hub-Signature", "X-Hub-Signature-256"} {
+		raw := strings.TrimSpace(r.Header.Get(name))
+		if raw == "" {
+			continue
+		}
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			values = append(values, part)
+		}
 	}
-	return strings.TrimSpace(publicKey) != ""
+	return values
 }
 
 func parseTimeParam(value string) (*time.Time, error) {
@@ -301,7 +268,7 @@ func parseTimeParam(value string) (*time.Time, error) {
 
 func isProviderMethod(method string) bool {
 	switch method {
-	case "PIX", "CARD":
+	case "PIX":
 		return true
 	default:
 		return false

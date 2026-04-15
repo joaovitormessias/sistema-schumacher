@@ -2,8 +2,9 @@ package payments
 
 import (
 	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/sha256"
-	"encoding/base64"
+	"encoding/hex"
 	"net/http/httptest"
 	"testing"
 )
@@ -29,21 +30,21 @@ func TestIsValidPaymentStatus(t *testing.T) {
 	}
 }
 
-func TestParseWebhookExtractBillingID(t *testing.T) {
+func TestParseWebhookExtractProviderRef(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload string
 		want    string
 	}{
 		{
-			name:    "nested billing id",
-			payload: `{"event":"billing.paid","data":{"billing":{"id":"bill-123"}}}`,
-			want:    "bill-123",
+			name:    "charge paid uses charge id",
+			payload: `{"type":"charge.paid","data":{"id":"ch_123","order_id":"or_999"}}`,
+			want:    "ch_123",
 		},
 		{
-			name:    "flat billing id",
-			payload: `{"event":"billing.paid","data":{"billingId":"bill-456"}}`,
-			want:    "bill-456",
+			name:    "order paid uses paid charge id",
+			payload: `{"type":"order.paid","data":{"id":"or_456","charges":[{"id":"ch_456","status":"paid"}]}}`,
+			want:    "ch_456",
 		},
 	}
 
@@ -53,86 +54,47 @@ func TestParseWebhookExtractBillingID(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected parse error: %v", err)
 			}
-			if evt.BillingID != tc.want {
-				t.Fatalf("expected %q, got %q", tc.want, evt.BillingID)
+			if evt.ProviderRef != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, evt.ProviderRef)
 			}
 		})
 	}
 }
 
-func TestWebhookSecretAndSignatureHelpers(t *testing.T) {
-	req := httptest.NewRequest("POST", "/webhooks/abacatepay?webhookSecret=secret123", nil)
-	req.Header.Set("X-Webhook-Secret", "secret123")
-	req.Header.Set("X-AbacatePay-Signature", "sig-abc")
+func TestWebhookSignaturesFromHeaders(t *testing.T) {
+	req := httptest.NewRequest("POST", "/webhooks/pagarme", nil)
+	req.Header.Set("X-Hub-Signature", "sha1=abc")
+	req.Header.Set("X-Hub-Signature-256", "sha256=def")
 
-	if got := WebhookSecretFromQuery(req.URL.RawQuery); got != "secret123" {
-		t.Fatalf("expected webhookSecret from query, got %q", got)
+	got := webhookSignaturesFromHeaders(req)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 signatures, got %d", len(got))
 	}
-	if !secretMatches(req, "secret123") {
-		t.Fatalf("expected header secret to match")
-	}
-	if got := webhookSignatureFromHeaders(req); got != "sig-abc" {
-		t.Fatalf("expected signature header, got %q", got)
+	if got[0] != "sha1=abc" || got[1] != "sha256=def" {
+		t.Fatalf("unexpected signatures: %#v", got)
 	}
 }
 
 func TestVerifyWebhookSignature(t *testing.T) {
 	secret := "super-secret"
-	body := []byte(`{"event":"billing.paid"}`)
-	signature := signPayload(secret, body)
+	body := []byte(`{"type":"charge.paid"}`)
+	signatures := signPayloads(secret, body)
 
-	if !VerifyWebhookSignature(secret, body, signature) {
+	if !VerifyWebhookSignature(secret, body, signatures) {
 		t.Fatalf("expected valid signature")
 	}
-	if VerifyWebhookSignature(secret, body, "wrong-signature") {
+	if VerifyWebhookSignature(secret, body, []string{"wrong-signature"}) {
 		t.Fatalf("expected invalid signature to fail")
 	}
 }
 
-func TestVerifyWebhookSignatureWithFallback(t *testing.T) {
-	body := []byte(`{"event":"billing.paid","data":{"id":"bill-1"}}`)
-	t.Run("accept signature with public key when both keys configured", func(t *testing.T) {
-		publicKey := "public-key-123"
-		secret := "secret-key-123"
-		signature := signPayload(publicKey, body)
-
-		if !verifyWebhookSignatureWithFallback(signature, body, publicKey, secret) {
-			t.Fatalf("expected signature validation to pass with public key")
-		}
-	})
-
-	t.Run("fallback to secret when public key is invalid", func(t *testing.T) {
-		publicKey := "invalid-public-key"
-		secret := "secret-key-123"
-		signature := signPayload(secret, body)
-
-		if !verifyWebhookSignatureWithFallback(signature, body, publicKey, secret) {
-			t.Fatalf("expected signature validation to pass with secret fallback")
-		}
-	})
-
-	t.Run("reject invalid signatures for both keys", func(t *testing.T) {
-		publicKey := "public-key-123"
-		secret := "secret-key-123"
-		signature := signPayload("different-key", body)
-
-		if verifyWebhookSignatureWithFallback(signature, body, publicKey, secret) {
-			t.Fatalf("expected signature validation to fail")
-		}
-	})
-
-	t.Run("reject missing signature when signature validation is active", func(t *testing.T) {
-		publicKey := "public-key-123"
-		secret := "secret-key-123"
-
-		if verifyWebhookSignatureWithFallback("", body, publicKey, secret) {
-			t.Fatalf("expected empty signature to fail")
-		}
-	})
-}
-
-func signPayload(key string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(key))
-	mac.Write(body)
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+func signPayloads(key string, body []byte) []string {
+	sha1Mac := hmac.New(sha1.New, []byte(key))
+	sha1Mac.Write(body)
+	sha256Mac := hmac.New(sha256.New, []byte(key))
+	sha256Mac.Write(body)
+	return []string{
+		"sha1=" + hex.EncodeToString(sha1Mac.Sum(nil)),
+		"sha256=" + hex.EncodeToString(sha256Mac.Sum(nil)),
+	}
 }

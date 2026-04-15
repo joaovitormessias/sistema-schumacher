@@ -84,7 +84,7 @@ func main() {
 	})
 
 	paymentsSvc := payments.NewService(payments.NewRepository(pool), cfg)
-	paymentsHandler := payments.NewHandler(paymentsSvc, cfg.AbacatePayPublicKey, cfg.AbacatePayWebhookSecret)
+	paymentsHandler := payments.NewHandler(paymentsSvc, cfg.PagarmeSecretKey)
 	paymentsHandler.RegisterWebhooks(r)
 
 	r.Group(func(pr chi.Router) {

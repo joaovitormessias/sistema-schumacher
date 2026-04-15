@@ -16,3 +16,19 @@ func TestParseProviderData(t *testing.T) {
 		t.Fatalf("unexpected pix code: %#v", pixCode)
 	}
 }
+
+func TestBuildCustomerSynthesizesEmailWhenMissing(t *testing.T) {
+	customer := BuildCustomer(&CustomerInput{
+		Name:     "Joao Vitor Messias",
+		Email:    "",
+		Phone:    "554988709047",
+		Document: "06645648103",
+	}, "BK-C9A55BC8C67846F9B09EF5EFFC576A50")
+
+	if customer == nil {
+		t.Fatalf("expected customer payload")
+	}
+	if customer.Email != "reserva.bkc9a55bc8c67846f9b09ef5effc576a50@schumachertur.com" {
+		t.Fatalf("unexpected fallback email: %q", customer.Email)
+	}
+}

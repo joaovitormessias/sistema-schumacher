@@ -13,71 +13,80 @@ import (
 )
 
 type Service struct {
-	repo          *Repository
-	client        *Client
-	returnURL     string
-	completionURL string
+	repo   *Repository
+	client *Client
 }
 
-var (
-	errMissingCheckoutURLs = errors.New("ABACATEPAY_RETURN_URL and ABACATEPAY_COMPLETION_URL are required for automatic payments")
-)
-
 func NewService(repo *Repository, cfg config.Config) *Service {
-	client := NewClient(cfg.AbacatePayBaseURL, cfg.AbacatePayAPIKey)
 	return &Service{
-		repo:          repo,
-		client:        client,
-		returnURL:     cfg.AbacatePayReturnURL,
-		completionURL: cfg.AbacatePayCompletionURL,
+		repo:   repo,
+		client: NewClient(cfg.PagarmeBaseURL, cfg.PagarmeSecretKey),
 	}
 }
 
 func (s *Service) Create(ctx context.Context, input CreatePaymentInput) (Payment, json.RawMessage, error) {
-	if input.Method != "PIX" && input.Method != "CARD" {
+	if input.Method != "PIX" {
 		return Payment{}, nil, errors.New("invalid method")
 	}
-	if strings.TrimSpace(s.returnURL) == "" || strings.TrimSpace(s.completionURL) == "" {
-		return Payment{}, nil, errMissingCheckoutURLs
+	if s.client == nil || strings.TrimSpace(s.client.apiKey) == "" {
+		return Payment{}, nil, errors.New("PAGARME_SECRET_KEY is required for automatic payments")
 	}
 
-	desc := input.Description
+	desc := strings.TrimSpace(input.Description)
 	if desc == "" {
 		desc = "Passagem"
 	}
 
 	paymentID := uuid.NewString()
+	bookingCtx, err := s.repo.GetBookingPaymentContext(ctx, input.BookingID)
+	if err != nil {
+		return Payment{}, nil, err
+	}
+	orderCode := strings.TrimSpace(bookingCtx.ReservationCode)
+	if orderCode == "" {
+		orderCode = paymentID
+	}
 	cents := int64(math.Round(input.Amount * 100))
-	billingReq := BillingRequest{
-		Frequency: "ONE_TIME",
-		Methods:   []string{input.Method},
-		Products: []BillingProduct{{
-			ExternalID: paymentID,
-			Name:       desc,
-			Quantity:   1,
-			Price:      cents,
+	orderReq := OrderRequest{
+		Code: orderCode,
+		Items: []OrderItem{{
+			Code:        orderCode,
+			Amount:      cents,
+			Description: desc,
+			Quantity:    1,
 		}},
-		ReturnURL:     s.returnURL,
-		CompletionURL: s.completionURL,
-		Customer:      nil,
+		Payments: []OrderPayment{{
+			PaymentMethod: "pix",
+			Pix: &PixPayment{
+				ExpiresIn: 3600,
+			},
+		}},
+		Metadata: map[string]string{
+			"booking_id":       input.BookingID,
+			"payment_id":       paymentID,
+			"reservation_code": bookingCtx.ReservationCode,
+			"trip_id":          bookingCtx.TripID,
+		},
 	}
-
 	if input.Customer != nil {
-		billingReq.Customer = &BillingCustomer{
-			Name:      input.Customer.Name,
-			Email:     input.Customer.Email,
-			Cellphone: input.Customer.Phone,
-			TaxID:     input.Customer.Document,
-		}
+		orderReq.Customer = BuildCustomer(input.Customer, input.BookingID)
 	}
 
-	billing, raw, err := s.client.CreateBilling(ctx, billingReq)
+	order, raw, err := s.client.CreateOrder(ctx, orderReq)
 	if err != nil {
 		return Payment{}, nil, err
 	}
 
-	meta, _ := json.Marshal(map[string]interface{}{"billing": billing})
-	created, err := s.repo.CreateWithProvider(ctx, paymentID, input.BookingID, input.Amount, input.Method, "ABACATEPAY", billing.ID, meta)
+	providerRef := strings.TrimSpace(order.PrimaryChargeID())
+	if providerRef == "" {
+		providerRef = strings.TrimSpace(order.ID)
+	}
+	if providerRef == "" {
+		return Payment{}, raw, errors.New("pagarme response missing charge/order id")
+	}
+
+	meta, _ := json.Marshal(map[string]interface{}{"order": order})
+	created, err := s.repo.CreateWithProvider(ctx, paymentID, input.BookingID, input.Amount, input.Method, "PAGARME", providerRef, meta)
 	if err != nil {
 		return Payment{}, raw, err
 	}
@@ -107,14 +116,14 @@ func (s *Service) List(ctx context.Context, filter PaymentListFilter) ([]Payment
 	return s.repo.List(ctx, filter)
 }
 
-func (s *Service) HandleWebhook(ctx context.Context, event AbacateWebhookEvent) error {
-	if event.Event != "billing.paid" || event.BillingID == "" {
+func (s *Service) HandleWebhook(ctx context.Context, event WebhookEvent) error {
+	if !event.IsPaidEvent() || event.ProviderRef == "" {
 		return nil
 	}
-	_, err := s.repo.MarkPaidAndConfirmBooking(ctx, event.BillingID, event.Raw)
+	_, err := s.repo.MarkPaidAndConfirmBooking(ctx, event.ProviderRef, event.Raw)
 	if err != nil {
 		if IsNotFound(err) {
-			_ = s.repo.AddEvent(ctx, nil, event.Event, event.Raw)
+			_ = s.repo.AddEvent(ctx, nil, event.Type, event.Raw)
 			return nil
 		}
 		return err
@@ -131,19 +140,25 @@ func (s *Service) Sync(ctx context.Context, paymentID string) (PaymentSyncRespon
 	if err != nil {
 		return PaymentSyncResponse{}, err
 	}
-	if payment.Provider == nil || strings.TrimSpace(*payment.Provider) != "ABACATEPAY" {
-		return PaymentSyncResponse{Payment: payment, BookingStatus: bookingStatus, Synced: false}, nil
-	}
-	if payment.ProviderRef == nil || strings.TrimSpace(*payment.ProviderRef) == "" {
+	if payment.Provider == nil || strings.TrimSpace(*payment.Provider) != "PAGARME" {
 		return PaymentSyncResponse{Payment: payment, BookingStatus: bookingStatus, Synced: false}, nil
 	}
 
-	billing, raw, err := s.client.GetBillingByID(ctx, *payment.ProviderRef)
+	orderID := extractPagarmeOrderID(payment.Metadata)
+	if orderID == "" {
+		return PaymentSyncResponse{Payment: payment, BookingStatus: bookingStatus, Synced: false}, nil
+	}
+
+	order, raw, err := s.client.GetOrderByID(ctx, orderID)
 	if err != nil {
 		return PaymentSyncResponse{}, err
 	}
-	if isPaidBillingStatus(billing.Status) && payment.Status != "PAID" {
-		updated, err := s.repo.MarkPaidAndConfirmBooking(ctx, *payment.ProviderRef, raw)
+	providerRef := strings.TrimSpace(order.PrimaryChargeID())
+	if providerRef == "" && payment.ProviderRef != nil {
+		providerRef = strings.TrimSpace(*payment.ProviderRef)
+	}
+	if isPaidOrderStatus(order) && providerRef != "" && payment.Status != "PAID" {
+		updated, err := s.repo.MarkPaidAndConfirmBooking(ctx, providerRef, raw)
 		if err != nil {
 			return PaymentSyncResponse{}, err
 		}
@@ -154,7 +169,6 @@ func (s *Service) Sync(ctx context.Context, paymentID string) (PaymentSyncRespon
 	if err != nil {
 		return PaymentSyncResponse{}, err
 	}
-	providerRef := ""
 	if payment.ProviderRef != nil {
 		providerRef = strings.TrimSpace(*payment.ProviderRef)
 	}
@@ -174,20 +188,7 @@ func parseProviderData(raw []byte) (interface{}, *string, *string) {
 		return parsed, nil, nil
 	}
 
-	checkout := readStringFromMap(obj, "url")
-	if checkout == nil {
-		if dataObj, ok := obj["data"].(map[string]interface{}); ok {
-			checkout = readStringFromMap(dataObj, "url")
-		}
-	}
-
-	var pixCode *string
-	if dataObj, ok := obj["data"].(map[string]interface{}); ok {
-		pixCode = readStringFromMap(dataObj, "pixQrCode")
-	}
-	if pixCode == nil {
-		pixCode = readStringFromMap(obj, "pixQrCode")
-	}
+	checkout, pixCode := extractPagarmeCheckoutAndPix(obj)
 	return parsed, checkout, pixCode
 }
 
@@ -207,11 +208,86 @@ func readStringFromMap(obj map[string]interface{}, key string) *string {
 	return &value
 }
 
-func isPaidBillingStatus(status string) bool {
-	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case "PAID", "COMPLETED", "RECEIVED":
-		return true
-	default:
-		return false
+func extractPagarmeCheckoutAndPix(obj map[string]interface{}) (*string, *string) {
+	checkout := readStringFromMap(obj, "qr_code_url")
+	if checkout == nil {
+		checkout = readStringFromMap(obj, "checkout_url")
 	}
+	pixCode := readStringFromMap(obj, "qr_code")
+	if pixCode == nil {
+		pixCode = readStringFromMap(obj, "pix_code")
+	}
+	if checkout != nil || pixCode != nil {
+		return checkout, pixCode
+	}
+
+	if dataObj, ok := obj["data"].(map[string]interface{}); ok {
+		checkout = readStringFromMap(dataObj, "url")
+		if checkout == nil {
+			checkout = readStringFromMap(dataObj, "qr_code_url")
+		}
+		pixCode = readStringFromMap(dataObj, "pixQrCode")
+		if pixCode == nil {
+			pixCode = readStringFromMap(dataObj, "qr_code")
+		}
+		if checkout != nil || pixCode != nil {
+			return checkout, pixCode
+		}
+	}
+
+	charges, _ := obj["charges"].([]interface{})
+	for _, rawCharge := range charges {
+		charge, ok := rawCharge.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		lastTx, _ := charge["last_transaction"].(map[string]interface{})
+		if lastTx == nil {
+			continue
+		}
+		checkout := readStringFromMap(lastTx, "qr_code_url")
+		if checkout == nil {
+			checkout = readStringFromMap(lastTx, "checkout_url")
+		}
+		pixCode := readStringFromMap(lastTx, "qr_code")
+		if pixCode == nil {
+			pixCode = readStringFromMap(lastTx, "pix_code")
+		}
+		if checkout != nil || pixCode != nil {
+			return checkout, pixCode
+		}
+	}
+	return nil, nil
+}
+
+func extractPagarmeOrderID(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var payload struct {
+		Order *struct {
+			ID string `json:"id"`
+		} `json:"order"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	if payload.Order == nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Order.ID)
+}
+
+func isPaidOrderStatus(order OrderResponse) bool {
+	switch strings.ToUpper(strings.TrimSpace(order.Status)) {
+	case "PAID", "CLOSED":
+		return true
+	}
+	for _, charge := range order.Charges {
+		switch strings.ToUpper(strings.TrimSpace(charge.Status)) {
+		case "PAID", "CAPTURED":
+			return true
+		}
+	}
+	return false
 }

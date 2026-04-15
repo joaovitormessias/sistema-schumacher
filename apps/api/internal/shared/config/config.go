@@ -18,6 +18,8 @@ type Config struct {
 	SupabaseAudience        string
 	AuthDisabled            bool
 	APIServiceTokens        []string
+	PagarmeSecretKey        string
+	PagarmeBaseURL          string
 	AbacatePayAPIKey        string
 	AbacatePayWebhookSecret string
 	AbacatePayBaseURL       string
@@ -41,6 +43,8 @@ func Load() (Config, error) {
 		SupabaseAudience:        getEnv("SUPABASE_AUDIENCE", "authenticated"),
 		AuthDisabled:            parseBool(os.Getenv("AUTH_DISABLED")),
 		APIServiceTokens:        splitCSV(os.Getenv("API_SERVICE_TOKENS")),
+		PagarmeSecretKey:        os.Getenv("PAGARME_SECRET_KEY"),
+		PagarmeBaseURL:          os.Getenv("PAGARME_BASE_URL"),
 		AbacatePayAPIKey:        os.Getenv("ABACATEPAY_API_KEY"),
 		AbacatePayWebhookSecret: os.Getenv("ABACATEPAY_WEBHOOK_SECRET"),
 		AbacatePayBaseURL:       os.Getenv("ABACATEPAY_BASE_URL"),
