@@ -72,3 +72,30 @@ type PaymentListFilter struct {
 	Limit     int
 	Offset    int
 }
+
+type PaymentNotificationContext struct {
+	BookingID       string  `json:"booking_id"`
+	ReservationCode string  `json:"reservation_code"`
+	CustomerName    string  `json:"customer_name"`
+	CustomerPhone   string  `json:"customer_phone"`
+	AmountTotal     float64 `json:"amount_total"`
+	AmountPaid      float64 `json:"amount_paid"`
+	AmountDue       float64 `json:"amount_due"`
+	PaymentStatus   string  `json:"payment_status"`
+}
+
+type PaymentNotificationPayload struct {
+	Event           string    `json:"event"`
+	SentAt          time.Time `json:"sent_at"`
+	PaymentID       string    `json:"payment_id"`
+	PaymentAmount   float64   `json:"payment_amount"`
+	PaymentMethod   string    `json:"payment_method"`
+	BookingID       string    `json:"booking_id"`
+	ReservationCode string    `json:"reservation_code"`
+	CustomerName    string    `json:"customer_name"`
+	CustomerPhone   string    `json:"customer_phone"`
+	AmountTotal     float64   `json:"amount_total"`
+	AmountPaid      float64   `json:"amount_paid"`
+	AmountDue       float64   `json:"amount_due"`
+	PaymentStatus   string    `json:"payment_status"`
+}

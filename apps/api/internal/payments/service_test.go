@@ -1,6 +1,13 @@
 package payments
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
 
 func TestParseProviderData(t *testing.T) {
 	raw := []byte(`{"data":{"url":"https://checkout.example/pix","pixQrCode":"000201abc"}}`)
@@ -30,5 +37,56 @@ func TestBuildCustomerSynthesizesEmailWhenMissing(t *testing.T) {
 	}
 	if customer.Email != "reserva.bkc9a55bc8c67846f9b09ef5effc576a50@schumachertur.com" {
 		t.Fatalf("unexpected fallback email: %q", customer.Email)
+	}
+}
+
+func TestWebhookPaymentConfirmationNotifierPostsPayload(t *testing.T) {
+	var gotMethod string
+	var gotContentType string
+	var gotPayload PaymentNotificationPayload
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotContentType = r.Header.Get("Content-Type")
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("could not decode payload: %v", err)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	notifier := &webhookPaymentConfirmationNotifier{
+		url:  server.URL,
+		http: server.Client(),
+	}
+
+	payload := PaymentNotificationPayload{
+		Event:           "payment.confirmed",
+		SentAt:          time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC),
+		PaymentID:       "pay-1",
+		PaymentAmount:   250,
+		PaymentMethod:   "PIX",
+		BookingID:       "BK-1",
+		ReservationCode: "ABCD1234",
+		CustomerName:    "Joao",
+		CustomerPhone:   "554998887766",
+		AmountTotal:     1100,
+		AmountPaid:      250,
+		AmountDue:       850,
+		PaymentStatus:   "PARTIAL",
+	}
+
+	if err := notifier.NotifyPaymentConfirmed(context.Background(), payload); err != nil {
+		t.Fatalf("unexpected notify error: %v", err)
+	}
+	if gotMethod != http.MethodPost {
+		t.Fatalf("expected POST, got %s", gotMethod)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("expected application/json, got %s", gotContentType)
+	}
+	if gotPayload.BookingID != payload.BookingID || gotPayload.AmountDue != payload.AmountDue || gotPayload.PaymentStatus != payload.PaymentStatus {
+		t.Fatalf("unexpected payload: %+v", gotPayload)
 	}
 }

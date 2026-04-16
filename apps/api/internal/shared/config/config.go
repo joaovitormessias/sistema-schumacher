@@ -27,30 +27,32 @@ type Config struct {
 	// TODO(abacatepay-domain): Use hosted frontend URLs (not localhost) in production.
 	AbacatePayReturnURL string
 	// TODO(abacatepay-domain): Use hosted frontend URLs (not localhost) in production.
-	AbacatePayCompletionURL string
+	AbacatePayCompletionURL       string
+	PaymentNotificationWebhookURL string
 }
 
 func Load() (Config, error) {
 	cfg := Config{
-		AppEnv:                  getEnv("APP_ENV", "production"),
-		Port:                    getEnv("PORT", "8080"),
-		CORSOrigins:             os.Getenv("CORS_ORIGINS"),
-		DatabaseURL:             os.Getenv("DATABASE_URL"),
-		SupabaseURL:             os.Getenv("SUPABASE_URL"),
-		SupabaseAnonKey:         os.Getenv("SUPABASE_ANON_KEY"),
-		SupabaseJWKSURL:         os.Getenv("SUPABASE_JWKS_URL"),
-		SupabaseIssuer:          os.Getenv("SUPABASE_ISSUER"),
-		SupabaseAudience:        getEnv("SUPABASE_AUDIENCE", "authenticated"),
-		AuthDisabled:            parseBool(os.Getenv("AUTH_DISABLED")),
-		APIServiceTokens:        splitCSV(os.Getenv("API_SERVICE_TOKENS")),
-		PagarmeSecretKey:        os.Getenv("PAGARME_SECRET_KEY"),
-		PagarmeBaseURL:          os.Getenv("PAGARME_BASE_URL"),
-		AbacatePayAPIKey:        os.Getenv("ABACATEPAY_API_KEY"),
-		AbacatePayWebhookSecret: os.Getenv("ABACATEPAY_WEBHOOK_SECRET"),
-		AbacatePayBaseURL:       os.Getenv("ABACATEPAY_BASE_URL"),
-		AbacatePayPublicKey:     os.Getenv("ABACATEPAY_PUBLIC_KEY"),
-		AbacatePayReturnURL:     os.Getenv("ABACATEPAY_RETURN_URL"),
-		AbacatePayCompletionURL: os.Getenv("ABACATEPAY_COMPLETION_URL"),
+		AppEnv:                        getEnv("APP_ENV", "production"),
+		Port:                          getEnv("PORT", "8080"),
+		CORSOrigins:                   os.Getenv("CORS_ORIGINS"),
+		DatabaseURL:                   os.Getenv("DATABASE_URL"),
+		SupabaseURL:                   os.Getenv("SUPABASE_URL"),
+		SupabaseAnonKey:               os.Getenv("SUPABASE_ANON_KEY"),
+		SupabaseJWKSURL:               os.Getenv("SUPABASE_JWKS_URL"),
+		SupabaseIssuer:                os.Getenv("SUPABASE_ISSUER"),
+		SupabaseAudience:              getEnv("SUPABASE_AUDIENCE", "authenticated"),
+		AuthDisabled:                  parseBool(os.Getenv("AUTH_DISABLED")),
+		APIServiceTokens:              splitCSV(os.Getenv("API_SERVICE_TOKENS")),
+		PagarmeSecretKey:              os.Getenv("PAGARME_SECRET_KEY"),
+		PagarmeBaseURL:                os.Getenv("PAGARME_BASE_URL"),
+		AbacatePayAPIKey:              os.Getenv("ABACATEPAY_API_KEY"),
+		AbacatePayWebhookSecret:       os.Getenv("ABACATEPAY_WEBHOOK_SECRET"),
+		AbacatePayBaseURL:             os.Getenv("ABACATEPAY_BASE_URL"),
+		AbacatePayPublicKey:           os.Getenv("ABACATEPAY_PUBLIC_KEY"),
+		AbacatePayReturnURL:           os.Getenv("ABACATEPAY_RETURN_URL"),
+		AbacatePayCompletionURL:       os.Getenv("ABACATEPAY_COMPLETION_URL"),
+		PaymentNotificationWebhookURL: strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATION_WEBHOOK_URL")),
 	}
 
 	if cfg.DatabaseURL == "" {

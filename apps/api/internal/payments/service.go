@@ -7,20 +7,23 @@ import (
 	"log"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"schumacher-tur/api/internal/shared/config"
 )
 
 type Service struct {
-	repo   *Repository
-	client *Client
+	repo     *Repository
+	client   *Client
+	notifier paymentConfirmationNotifier
 }
 
 func NewService(repo *Repository, cfg config.Config) *Service {
 	return &Service{
-		repo:   repo,
-		client: NewClient(cfg.PagarmeBaseURL, cfg.PagarmeSecretKey),
+		repo:     repo,
+		client:   NewClient(cfg.PagarmeBaseURL, cfg.PagarmeSecretKey),
+		notifier: newPaymentConfirmationNotifier(cfg),
 	}
 }
 
@@ -94,7 +97,12 @@ func (s *Service) Create(ctx context.Context, input CreatePaymentInput) (Payment
 }
 
 func (s *Service) CreateManual(ctx context.Context, input ManualPaymentInput) (Payment, error) {
-	return s.repo.CreateManual(ctx, input.BookingID, input.Amount, input.Method, input.Notes)
+	payment, err := s.repo.CreateManual(ctx, input.BookingID, input.Amount, input.Method, input.Notes)
+	if err != nil {
+		return Payment{}, err
+	}
+	s.notifyPaymentConfirmed(ctx, payment)
+	return payment, nil
 }
 
 func (s *Service) GetStatus(ctx context.Context, id string) (PaymentStatusResponse, error) {
@@ -120,13 +128,16 @@ func (s *Service) HandleWebhook(ctx context.Context, event WebhookEvent) error {
 	if !event.IsPaidEvent() || event.ProviderRef == "" {
 		return nil
 	}
-	_, err := s.repo.MarkPaidAndConfirmBooking(ctx, event.ProviderRef, event.Raw)
+	payment, justMarkedPaid, err := s.repo.MarkPaidAndConfirmBooking(ctx, event.ProviderRef, event.Raw)
 	if err != nil {
 		if IsNotFound(err) {
 			_ = s.repo.AddEvent(ctx, nil, event.Type, event.Raw)
 			return nil
 		}
 		return err
+	}
+	if justMarkedPaid {
+		s.notifyPaymentConfirmed(ctx, payment)
 	}
 	return nil
 }
@@ -158,11 +169,14 @@ func (s *Service) Sync(ctx context.Context, paymentID string) (PaymentSyncRespon
 		providerRef = strings.TrimSpace(*payment.ProviderRef)
 	}
 	if isPaidOrderStatus(order) && providerRef != "" && payment.Status != "PAID" {
-		updated, err := s.repo.MarkPaidAndConfirmBooking(ctx, providerRef, raw)
+		updated, justMarkedPaid, err := s.repo.MarkPaidAndConfirmBooking(ctx, providerRef, raw)
 		if err != nil {
 			return PaymentSyncResponse{}, err
 		}
 		payment = updated
+		if justMarkedPaid {
+			s.notifyPaymentConfirmed(ctx, payment)
+		}
 	}
 
 	bookingStatus, err = s.repo.GetBookingStatus(ctx, payment.BookingID)
@@ -290,4 +304,42 @@ func isPaidOrderStatus(order OrderResponse) bool {
 		}
 	}
 	return false
+}
+
+func (s *Service) notifyPaymentConfirmed(ctx context.Context, payment Payment) {
+	if s == nil || s.notifier == nil || payment.BookingID == "" {
+		return
+	}
+
+	notification, err := s.repo.GetBookingNotificationContext(ctx, payment.BookingID)
+	if err != nil {
+		log.Printf("event=payment_notification_failed booking_id=%s payment_id=%s reason=booking_context error=%v", payment.BookingID, payment.ID, err)
+		return
+	}
+	if strings.TrimSpace(notification.CustomerPhone) == "" {
+		log.Printf("event=payment_notification_skipped booking_id=%s payment_id=%s reason=missing_phone", payment.BookingID, payment.ID)
+		return
+	}
+
+	payload := PaymentNotificationPayload{
+		Event:           "payment.confirmed",
+		SentAt:          time.Now().UTC(),
+		PaymentID:       payment.ID,
+		PaymentAmount:   payment.Amount,
+		PaymentMethod:   payment.Method,
+		BookingID:       notification.BookingID,
+		ReservationCode: notification.ReservationCode,
+		CustomerName:    notification.CustomerName,
+		CustomerPhone:   notification.CustomerPhone,
+		AmountTotal:     notification.AmountTotal,
+		AmountPaid:      notification.AmountPaid,
+		AmountDue:       notification.AmountDue,
+		PaymentStatus:   notification.PaymentStatus,
+	}
+
+	if err := s.notifier.NotifyPaymentConfirmed(ctx, payload); err != nil {
+		log.Printf("event=payment_notification_failed booking_id=%s reservation_code=%s payment_id=%s error=%v", notification.BookingID, notification.ReservationCode, payment.ID, err)
+		return
+	}
+	log.Printf("event=payment_notification_sent booking_id=%s reservation_code=%s payment_id=%s payment_status=%s amount_due=%.2f", notification.BookingID, notification.ReservationCode, payment.ID, notification.PaymentStatus, notification.AmountDue)
 }

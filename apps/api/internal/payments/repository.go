@@ -105,6 +105,43 @@ func (r *Repository) GetBookingPaymentContext(ctx context.Context, bookingID str
 	return item, nil
 }
 
+func (r *Repository) GetBookingNotificationContext(ctx context.Context, bookingID string) (PaymentNotificationContext, error) {
+	var item PaymentNotificationContext
+	row := r.pool.QueryRow(ctx, `
+        select
+            b.booking_id,
+            coalesce(b.reservation_code, ''),
+            coalesce(nullif(trim(b.customer_name), ''), p.full_name, ''),
+            coalesce(nullif(trim(b.customer_phone), ''), p.phone, ''),
+            coalesce(pd.amount_total, 0)::numeric as amount_total,
+            coalesce(pd.amount_paid, 0)::numeric as amount_paid,
+            coalesce(pd.amount_due, greatest(coalesce(pd.amount_total, 0) - coalesce(pd.amount_paid, 0), 0))::numeric as amount_due,
+            coalesce(pd.payment_status, '')
+        from bookings b
+        left join booking_payment_details pd on pd.booking_id = b.booking_id
+        left join lateral (
+            select coalesce(full_name, '') as full_name, coalesce(phone, '') as phone
+            from passengers p
+            where p.booking_id = b.booking_id
+            order by p.created_at asc
+            limit 1
+        ) p on true
+        where b.booking_id=$1`, bookingID)
+	if err := row.Scan(
+		&item.BookingID,
+		&item.ReservationCode,
+		&item.CustomerName,
+		&item.CustomerPhone,
+		&item.AmountTotal,
+		&item.AmountPaid,
+		&item.AmountDue,
+		&item.PaymentStatus,
+	); err != nil {
+		return item, err
+	}
+	return item, nil
+}
+
 func (r *Repository) List(ctx context.Context, filter PaymentListFilter) ([]Payment, error) {
 	query := `select id, booking_id, amount, method, status, provider, provider_ref, paid_at, metadata, created_at from payments`
 	args := []interface{}{}
@@ -183,29 +220,43 @@ func (r *Repository) AddEvent(ctx context.Context, paymentID *string, event stri
 	return err
 }
 
-func (r *Repository) MarkPaidAndConfirmBooking(ctx context.Context, providerRef string, payload json.RawMessage) (Payment, error) {
+func (r *Repository) MarkPaidAndConfirmBooking(ctx context.Context, providerRef string, payload json.RawMessage) (Payment, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return Payment{}, err
+		return Payment{}, false, err
 	}
 	defer tx.Rollback(ctx)
 
 	var payment Payment
 	row := tx.QueryRow(ctx,
-		`update payments set status='PAID', paid_at=now() where provider_ref=$1
-         returning id, booking_id, amount, method, status, provider, provider_ref, paid_at, metadata, created_at`,
+		`select id, booking_id, amount, method, status, provider, provider_ref, paid_at, metadata, created_at
+         from payments
+         where provider_ref=$1
+         for update`,
 		providerRef,
 	)
 	if err := row.Scan(&payment.ID, &payment.BookingID, &payment.Amount, &payment.Method, &payment.Status, &payment.Provider, &payment.ProviderRef, &payment.PaidAt, &payment.Metadata, &payment.CreatedAt); err != nil {
-		return Payment{}, err
+		return Payment{}, false, err
+	}
+
+	justMarkedPaid := payment.Status != "PAID"
+	if justMarkedPaid {
+		row = tx.QueryRow(ctx,
+			`update payments set status='PAID', paid_at=coalesce(paid_at, now()) where id=$1
+             returning id, booking_id, amount, method, status, provider, provider_ref, paid_at, metadata, created_at`,
+			payment.ID,
+		)
+		if err := row.Scan(&payment.ID, &payment.BookingID, &payment.Amount, &payment.Method, &payment.Status, &payment.Provider, &payment.ProviderRef, &payment.PaidAt, &payment.Metadata, &payment.CreatedAt); err != nil {
+			return Payment{}, false, err
+		}
 	}
 	if err := r.updateBookingStatusIfPaid(ctx, tx, payment.BookingID, payment.ID, "billing.paid", payload); err != nil {
-		return Payment{}, err
+		return Payment{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return Payment{}, err
+		return Payment{}, false, err
 	}
-	return payment, nil
+	return payment, justMarkedPaid, nil
 }
 
 func (r *Repository) updateBookingStatusIfPaid(ctx context.Context, tx pgx.Tx, bookingID string, paymentID string, event string, payload json.RawMessage) error {
