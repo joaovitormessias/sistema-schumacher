@@ -454,7 +454,8 @@ Validacoes e regras:
 
 - `trip_id`, `board_stop_id`, `alight_stop_id` e pelo menos um `passenger.name` sao obrigatorios
 - `passengers[]` e o contrato principal para grupos; `passenger` singular segue aceito como alias retrocompativel para um unico passageiro
-- cada passageiro pode informar `document_type` como `CPF` ou `RG`; quando omitido, a API infere `CPF` para documentos com 11 digitos numericos e `RG` nos demais casos
+- cada passageiro pode informar `document_type` como `CPF`, `RG`, `CNH` ou `CERTIDAO_NASCIMENTO`; aliases operacionais como `CERTIDAO`, `CERTIDAO_DE_NASCIMENTO` e `MATRICULA` sao normalizados para `CERTIDAO_NASCIMENTO`
+- quando `document_type` for omitido, a API preserva a compatibilidade anterior e infere `CPF` para documentos com 11 digitos numericos e `RG` nos demais casos
 - `idempotency_key` e opcional; quando enviado, a API o persiste junto ao booking para correlacao operacional
 - `seat_id` e opcional; quando omitido, a API tenta alocar automaticamente a primeira poltrona livre da viagem
 - quando `seat_id` e informado, ele so pode ser usado com um unico passageiro
@@ -532,7 +533,7 @@ Regras:
 
 - `POST /payments` aceita apenas metodos do provedor, como `PIX` e `CARD`.
 - `POST /payments/manual` aceita metodos manuais, como `CASH`, `TRANSFER`, `OTHER`.
-- `customer.document` em `POST /payments` continua sendo o documento fiscal do pagador (`CPF`/`CNPJ`); `RG` pode ser usado na reserva, mas nao deve ser reutilizado como `taxId` no provedor.
+- `customer.document` em `POST /payments` continua sendo o documento fiscal do pagador (`CPF`/`CNPJ`); `RG`, `CNH` e `CERTIDAO_NASCIMENTO` podem ser usados na reserva, mas nao devem ser reutilizados como `taxId` no provedor.
 - erro de configuracao de checkout retorna `503 CHECKOUT_NOT_CONFIGURED`.
 - `POST /payments` agora devolve `payment`, `provider_raw`, `checkout_url` e `pix_code` quando o provedor retornar esses dados.
 - `GET /payments/{paymentId}/status` retorna um resumo com `status`, `amount`, `provider`, `provider_ref`, `metadata`.

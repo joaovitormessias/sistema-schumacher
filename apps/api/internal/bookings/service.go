@@ -16,7 +16,7 @@ var (
 	ErrNegativeAmounts             = errors.New("amounts cannot be negative")
 	ErrMissingStops                = errors.New("board_stop_id and alight_stop_id are required")
 	ErrMissingFields               = errors.New("trip_id and at least one passenger.name are required")
-	ErrPassengerDocumentType       = errors.New("passenger document_type must be CPF or RG")
+	ErrPassengerDocumentType       = errors.New("passenger document_type must be CPF, RG, CNH or CERTIDAO_NASCIMENTO")
 	ErrPassengerNameRequired       = errors.New("every passenger must include name")
 	ErrSeatRequiresSinglePassenger = errors.New("seat_id can be used only with a single passenger")
 	ErrInitialPaymentRequired      = errors.New("initial_payment is required")
@@ -340,7 +340,7 @@ func isLapChildNotes(notes string) bool {
 }
 
 func normalizePassengerDocumentType(documentType, document string) string {
-	normalizedType := strings.ToUpper(strings.TrimSpace(documentType))
+	normalizedType := canonicalPassengerDocumentType(documentType)
 	if normalizedType != "" {
 		return normalizedType
 	}
@@ -356,11 +356,20 @@ func normalizePassengerDocumentType(documentType, document string) string {
 }
 
 func isSupportedPassengerDocumentType(documentType string) bool {
-	switch strings.ToUpper(strings.TrimSpace(documentType)) {
-	case "CPF", "RG":
-		return true
+	return canonicalPassengerDocumentType(documentType) != ""
+}
+
+func canonicalPassengerDocumentType(documentType string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(documentType))
+	normalized = strings.NewReplacer(" ", "_", "-", "_").Replace(normalized)
+
+	switch normalized {
+	case "CPF", "RG", "CNH":
+		return normalized
+	case "CERTIDAO", "CERTIDAO_NASCIMENTO", "CERTIDAO_DE_NASCIMENTO", "MATRICULA", "MATRICULA_CERTIDAO":
+		return "CERTIDAO_NASCIMENTO"
 	default:
-		return false
+		return ""
 	}
 }
 

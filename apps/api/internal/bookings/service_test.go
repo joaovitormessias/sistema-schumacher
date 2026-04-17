@@ -42,6 +42,8 @@ func TestNormalizePassengersPreservesExplicitDocumentType(t *testing.T) {
 		[]PassengerInput{
 			{Name: "Maria", Document: "06645648105", DocumentType: "cpf"},
 			{Name: "Joao", Document: "12.345.678-X", DocumentType: "rg"},
+			{Name: "Paulo", Document: "12345678901", DocumentType: "cnh"},
+			{Name: "Bebe", Document: "12345678901234567890123456789012", DocumentType: "matricula"},
 		},
 	)
 
@@ -50,6 +52,29 @@ func TestNormalizePassengersPreservesExplicitDocumentType(t *testing.T) {
 	}
 	if passengers[1].DocumentType != "RG" {
 		t.Fatalf("expected RG document type, got %+v", passengers[1])
+	}
+	if passengers[2].DocumentType != "CNH" {
+		t.Fatalf("expected CNH document type, got %+v", passengers[2])
+	}
+	if passengers[3].DocumentType != "CERTIDAO_NASCIMENTO" {
+		t.Fatalf("expected CERTIDAO_NASCIMENTO document type, got %+v", passengers[3])
+	}
+}
+
+func TestCanonicalPassengerDocumentTypeAcceptsCertidaoAliases(t *testing.T) {
+	tests := map[string]string{
+		"cpf":                    "CPF",
+		"rg":                     "RG",
+		"cnh":                    "CNH",
+		"certidao":               "CERTIDAO_NASCIMENTO",
+		"certidao de nascimento": "CERTIDAO_NASCIMENTO",
+		"matricula":              "CERTIDAO_NASCIMENTO",
+	}
+
+	for input, expected := range tests {
+		if got := canonicalPassengerDocumentType(input); got != expected {
+			t.Fatalf("expected %q for %q, got %q", expected, input, got)
+		}
 	}
 }
 
