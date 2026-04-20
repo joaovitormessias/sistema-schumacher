@@ -3,7 +3,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import InlineAlert from "../../components/InlineAlert";
 import PageHeader from "../../components/PageHeader";
 import StatusBadge from "../../components/StatusBadge";
-import { useBookings } from "../../hooks/useBookings";
+import { useBookings, useBookingDetail } from "../../hooks/useBookings";
+import Drawer from "../../components/overlay/Drawer";
 import { useRoutes } from "../../hooks/useRoutes";
 import { useTrips } from "../../hooks/useTrips";
 import { apiGet, apiPatch, apiPost } from "../../services/api";
@@ -164,6 +165,15 @@ export default function Bookings() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const [query, setQuery] = useState("");
+  const [selectedBookingId, setSelectedBookingId] = useState<string | null>(null);
+  const bookingDetailQuery = useBookingDetail(selectedBookingId);
+  const detailTripId = bookingDetailQuery.data?.booking.trip_id ?? null;
+  const [detailTripStops, setDetailTripStops] = useState<TripStop[]>([]);
+  useEffect(() => {
+    if (!detailTripId) { setDetailTripStops([]); return; }
+    apiGet<TripStop[]>(`/trips/${detailTripId}/stops`).then(setDetailTripStops).catch(() => {});
+  }, [detailTripId]);
+  const stopName = (stopId: string) => detailTripStops.find((s) => s.id === stopId)?.city ?? stopId;
   const pageSize = 50;
   const bookingsQuery = useBookings(pageSize, page * pageSize);
   const bookingsHistoryQuery = useBookings(500, 0);
@@ -794,7 +804,59 @@ export default function Bookings() {
         pageSize={pageSize}
         onPageChange={setPage}
         tripLabel={tripLabel}
+        onRowClick={(b) => setSelectedBookingId(b.id)}
+        selectedBookingId={selectedBookingId ?? undefined}
       />
+
+      <Drawer
+        open={!!selectedBookingId}
+        title="Detalhe da reserva"
+        description={selectedBookingId ? `Reserva ${formatShortId(selectedBookingId)}` : undefined}
+        onClose={() => setSelectedBookingId(null)}
+      >
+        {bookingDetailQuery.isLoading ? (
+          <div style={{ padding: "16px" }}>Carregando...</div>
+        ) : bookingDetailQuery.error ? (
+          <InlineAlert tone="error">Erro ao carregar reserva.</InlineAlert>
+        ) : bookingDetailQuery.data ? (() => {
+          const { booking, passengers } = bookingDetailQuery.data;
+          const passenger = passengers[0];
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              <div className="card">
+                <div className="section-title" style={{ marginBottom: "8px" }}>Situação</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" }}>
+                  <div><span style={{ opacity: 0.6 }}>Status</span><br />{booking.status}</div>
+                  <div><span style={{ opacity: 0.6 }}>Total</span><br />{formatCurrency(booking.total_amount)}</div>
+                  <div><span style={{ opacity: 0.6 }}>Pago</span><br />{formatCurrency(booking.deposit_amount)}</div>
+                  <div><span style={{ opacity: 0.6 }}>Pendente</span><br />{formatCurrency(booking.remainder_amount)}</div>
+                </div>
+              </div>
+              {passenger ? (
+                <div className="card">
+                  <div className="section-title" style={{ marginBottom: "8px" }}>Passageiro</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <div><span style={{ opacity: 0.6 }}>Nome</span>: {passenger.name}</div>
+                    <div><span style={{ opacity: 0.6 }}>Documento</span>: {passenger.document || "-"}</div>
+                    <div><span style={{ opacity: 0.6 }}>Telefone</span>: {passenger.phone || "-"}</div>
+                    <div><span style={{ opacity: 0.6 }}>E-mail</span>: {passenger.email || "-"}</div>
+                  </div>
+                </div>
+              ) : null}
+              {passengers.length > 0 ? (
+                <div className="card">
+                  <div className="section-title" style={{ marginBottom: "8px" }}>Viagem</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <div><span style={{ opacity: 0.6 }}>Viagem</span>: {tripLabel(booking.trip_id)}</div>
+                    <div><span style={{ opacity: 0.6 }}>Embarque</span>: {passenger?.board_stop_id ? stopName(passenger.board_stop_id) : "-"}</div>
+                    <div><span style={{ opacity: 0.6 }}>Desembarque</span>: {passenger?.alight_stop_id ? stopName(passenger.alight_stop_id) : "-"}</div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          );
+        })() : null}
+      </Drawer>
     </section>
   );
 }

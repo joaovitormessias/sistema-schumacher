@@ -12,7 +12,14 @@
       "Bash(test:*)",
       "Bash(go build:*)",
       "Bash(python -c:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(npx tsc *)",
+      "Bash(node_modules/.bin/tsc --noEmit)",
+      "Bash(curl -s http://localhost:8080/trips)",
+      "Bash(curl *)",
+      "Bash(go run *)",
+      "Bash(tasklist)",
+      "Bash(netstat -ano)"
     ]
   }
 }

@@ -36,6 +36,10 @@ func (s *Service) Get(ctx context.Context, id string) (Trip, error) {
 	return s.repo.Get(ctx, id)
 }
 
+func (s *Service) GetDetails(ctx context.Context, id string) (TripDetails, error) {
+	return s.repo.GetDetails(ctx, id)
+}
+
 func (s *Service) Create(ctx context.Context, input CreateTripInput) (Trip, error) {
 	missingRequirements, err := s.repo.ValidateRouteReadiness(ctx, input.RouteID)
 	if err != nil {

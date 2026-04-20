@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 type contextKey string
 
 const userIDKey contextKey = "user_id"
+const authBypassKey contextKey = "auth_bypass"
 
 // Authenticator validates Supabase JWTs using JWKS.
 type Authenticator struct {
@@ -22,12 +24,17 @@ type Authenticator struct {
 	issuer   string
 	audience string
 	services map[string]string
+	debugUID string
 	skip     bool
 }
 
 func NewAuthenticator(jwksURL, issuer, audience string, serviceTokens []string, skip bool) (*Authenticator, error) {
 	if skip {
-		return &Authenticator{skip: true}, nil
+		debugUID := strings.TrimSpace(os.Getenv("AUTH_DEBUG_USER_ID"))
+		if debugUID == "" {
+			debugUID = "00000000-0000-0000-0000-000000000001"
+		}
+		return &Authenticator{skip: true, debugUID: debugUID}, nil
 	}
 
 	services := make(map[string]string, len(serviceTokens))
@@ -54,7 +61,13 @@ func NewAuthenticator(jwksURL, issuer, audience string, serviceTokens []string, 
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.skip {
-			next.ServeHTTP(w, r)
+			uid := strings.TrimSpace(r.Header.Get("X-Debug-User-Id"))
+			if uid == "" {
+				uid = a.debugUID
+			}
+			ctx := context.WithValue(r.Context(), userIDKey, uid)
+			ctx = context.WithValue(ctx, authBypassKey, true)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -118,6 +131,12 @@ func UserIDFromContext(ctx context.Context) (string, bool) {
 	}
 	id, ok := v.(string)
 	return id, ok
+}
+
+func IsAuthBypass(ctx context.Context) bool {
+	v := ctx.Value(authBypassKey)
+	b, ok := v.(bool)
+	return ok && b
 }
 
 func audMatches(expected string, aud interface{}) bool {

@@ -13,6 +13,7 @@ type Config struct {
 	DatabaseURL             string
 	SupabaseURL             string
 	SupabaseAnonKey         string
+	SupabaseServiceRoleKey  string
 	SupabaseJWKSURL         string
 	SupabaseIssuer          string
 	SupabaseAudience        string
@@ -20,6 +21,10 @@ type Config struct {
 	APIServiceTokens        []string
 	PagarmeSecretKey        string
 	PagarmeBaseURL          string
+	PagarmeAPIBaseURL       string
+	PagarmeDebugRecipientID string
+	PagarmeWebhookBasicUser string
+	PagarmeWebhookBasicPass string
 	AbacatePayAPIKey        string
 	AbacatePayWebhookSecret string
 	AbacatePayBaseURL       string
@@ -39,6 +44,7 @@ func Load() (Config, error) {
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
 		SupabaseURL:                   os.Getenv("SUPABASE_URL"),
 		SupabaseAnonKey:               os.Getenv("SUPABASE_ANON_KEY"),
+		SupabaseServiceRoleKey:        os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
 		SupabaseJWKSURL:               os.Getenv("SUPABASE_JWKS_URL"),
 		SupabaseIssuer:                os.Getenv("SUPABASE_ISSUER"),
 		SupabaseAudience:              getEnv("SUPABASE_AUDIENCE", "authenticated"),
@@ -46,6 +52,10 @@ func Load() (Config, error) {
 		APIServiceTokens:              splitCSV(os.Getenv("API_SERVICE_TOKENS")),
 		PagarmeSecretKey:              os.Getenv("PAGARME_SECRET_KEY"),
 		PagarmeBaseURL:                os.Getenv("PAGARME_BASE_URL"),
+		PagarmeAPIBaseURL:             getEnv("PAGARME_API_BASE_URL", getEnv("PAGARME_BASE_URL", "https://api.pagar.me/core/v5")),
+		PagarmeDebugRecipientID:       strings.TrimSpace(os.Getenv("PAGARME_DEBUG_RECIPIENT_ID")),
+		PagarmeWebhookBasicUser:       os.Getenv("PAGARME_WEBHOOK_BASIC_USER"),
+		PagarmeWebhookBasicPass:       os.Getenv("PAGARME_WEBHOOK_BASIC_PASS"),
 		AbacatePayAPIKey:              os.Getenv("ABACATEPAY_API_KEY"),
 		AbacatePayWebhookSecret:       os.Getenv("ABACATEPAY_WEBHOOK_SECRET"),
 		AbacatePayBaseURL:             os.Getenv("ABACATEPAY_BASE_URL"),
