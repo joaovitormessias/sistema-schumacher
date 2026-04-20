@@ -53,18 +53,24 @@ type CreateTripStopInput struct {
 	DepartAt             *time.Time `json:"depart_at"`
 }
 
+type CreateTripScheduleStopInput struct {
+	RouteStopID string     `json:"route_stop_id"`
+	DepartAt    *time.Time `json:"depart_at"`
+}
+
 type CreateTripInput struct {
-	RouteID     string     `json:"route_id"`
-	BusID       string     `json:"bus_id"`
-	DriverID    *string    `json:"driver_id"`
-	FareID      *string    `json:"fare_id"`
-	RequestID   *string    `json:"request_id"`
-	DepartureAt time.Time  `json:"departure_at"`
-	ArrivalAt   *time.Time `json:"arrival_at"`
-	Status      *string    `json:"status"`
-	EstimatedKM *float64   `json:"estimated_km"`
-	PairTripID  *string    `json:"pair_trip_id"`
-	Notes       *string    `json:"notes"`
+	RouteID     string                        `json:"route_id"`
+	BusID       string                        `json:"bus_id"`
+	DriverID    *string                       `json:"driver_id"`
+	FareID      *string                       `json:"fare_id"`
+	RequestID   *string                       `json:"request_id"`
+	DepartureAt time.Time                     `json:"departure_at"`
+	ArrivalAt   *time.Time                    `json:"arrival_at"`
+	Status      *string                       `json:"status"`
+	EstimatedKM *float64                      `json:"estimated_km"`
+	PairTripID  *string                       `json:"pair_trip_id"`
+	Notes       *string                       `json:"notes"`
+	Stops       []CreateTripScheduleStopInput `json:"stops"`
 }
 
 type UpdateTripInput struct {
@@ -125,4 +131,48 @@ type UpsertTripSegmentPriceItem struct {
 
 type UpsertTripSegmentPricesInput struct {
 	Items []UpsertTripSegmentPriceItem `json:"items"`
+}
+
+type TripDetailsTotals struct {
+	PassengersCount int     `json:"passengers_count"`
+	TotalAmount     float64 `json:"total_amount"`
+	PaidAmount      float64 `json:"paid_amount"`
+	DueAmount       float64 `json:"due_amount"`
+}
+
+type TripDetailsSegmentSummary struct {
+	OriginStopID      string  `json:"origin_stop_id"`
+	OriginName        string  `json:"origin_name"`
+	DestinationStopID string  `json:"destination_stop_id"`
+	DestinationName   string  `json:"destination_name"`
+	PassengersCount   int     `json:"passengers_count"`
+	TotalAmount       float64 `json:"total_amount"`
+	PaidAmount        float64 `json:"paid_amount"`
+	DueAmount         float64 `json:"due_amount"`
+}
+
+type TripDetailsPassenger struct {
+	PassengerID       string  `json:"passenger_id"`
+	BookingID         string  `json:"booking_id"`
+	Name              string  `json:"name"`
+	Document          string  `json:"document"`
+	Phone             string  `json:"phone"`
+	SeatNumber        string  `json:"seat_number"`
+	OriginStopID      string  `json:"origin_stop_id"`
+	OriginName        string  `json:"origin_name"`
+	DestinationStopID string  `json:"destination_stop_id"`
+	DestinationName   string  `json:"destination_name"`
+	BookingStatus     string  `json:"booking_status"`
+	PaymentStatus     string  `json:"payment_status"`
+	IsLapChild        bool    `json:"is_lap_child"`
+	TotalAmount       float64 `json:"total_amount"`
+	PaidAmount        float64 `json:"paid_amount"`
+	DueAmount         float64 `json:"due_amount"`
+}
+
+type TripDetails struct {
+	Trip       Trip                        `json:"trip"`
+	Totals     TripDetailsTotals           `json:"totals"`
+	Segments   []TripDetailsSegmentSummary `json:"segments"`
+	Passengers []TripDetailsPassenger      `json:"passengers"`
 }

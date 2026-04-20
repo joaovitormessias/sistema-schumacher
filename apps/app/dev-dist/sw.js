@@ -79,7 +79,7 @@ define(['./workbox-166c5ad9'], (function (workbox) { 'use strict';
    */
   workbox.precacheAndRoute([{
     "url": "index.html",
-    "revision": "0.3jc88gpk1vo"
+    "revision": "0.vgimmvcuhvg"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("index.html"), {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -129,7 +130,122 @@ func (r *Repository) Get(ctx context.Context, id string) (Trip, error) {
 }
 
 func (r *Repository) Create(ctx context.Context, input CreateTripInput) (Trip, error) {
-	return Trip{}, ErrUnsupported
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Trip{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	routeID := strings.TrimSpace(input.RouteID)
+	busID := strings.TrimSpace(input.BusID)
+	if routeID == "" || busID == "" || input.DepartureAt.IsZero() {
+		return Trip{}, errors.New("route_id, bus_id and departure_at are required")
+	}
+
+	if err := r.ensureRouteExistsTx(ctx, tx, routeID); err != nil {
+		return Trip{}, err
+	}
+
+	tripDateSource := input.DepartureAt
+	if len(input.Stops) > 0 {
+		firstStopAt, err := earliestStopDateTime(input.Stops)
+		if err != nil {
+			return Trip{}, err
+		}
+		tripDateSource = firstStopAt
+	}
+	if tripDateSource.IsZero() {
+		return Trip{}, errors.New("departure_at is required")
+	}
+
+	tripDate := tripDateSource.In(time.UTC).Format("2006-01-02")
+	tripID, err := r.allocateTripIDTx(ctx, tx, routeID, tripDate)
+	if err != nil {
+		return Trip{}, err
+	}
+
+	seatsTotal, err := r.resolveRouteSeatCapacityTx(ctx, tx, routeID)
+	if err != nil {
+		return Trip{}, err
+	}
+	if seatsTotal < 0 {
+		seatsTotal = 0
+	}
+
+	status := "ATIVO"
+	if input.Status != nil {
+		normalized := strings.ToUpper(strings.TrimSpace(*input.Status))
+		if normalized != "" {
+			status = normalized
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+    insert into trips (
+      trip_id,
+      route_id,
+      trip_date,
+      bus_id,
+      default_price,
+      seats_total,
+      seats_available,
+      duration_hours,
+      status,
+      package_name,
+      created_at
+    ) values ($1, $2, $3::date, $4, 0, $5, $5, null, $6, null, now())
+  `, tripID, routeID, tripDate, busID, seatsTotal, status); err != nil {
+		return Trip{}, err
+	}
+
+	routeStops, err := r.listRouteTemplateStopsTx(ctx, tx, routeID)
+	if err != nil {
+		return Trip{}, err
+	}
+	if len(routeStops) < 2 {
+		return Trip{}, errors.New("route must have at least 2 active stops")
+	}
+
+	customDepartByRouteStopID := make(map[string]*time.Time, len(input.Stops))
+	if len(input.Stops) > 0 {
+		if len(input.Stops) != len(routeStops) {
+			return Trip{}, errors.New("stops schedule must include all route stops")
+		}
+		for _, stop := range input.Stops {
+			routeStopID := strings.TrimSpace(stop.RouteStopID)
+			if routeStopID == "" {
+				return Trip{}, errors.New("stops schedule contains empty route_stop_id")
+			}
+			if _, exists := customDepartByRouteStopID[routeStopID]; exists {
+				return Trip{}, errors.New("duplicate route_stop_id in stops schedule")
+			}
+			customDepartByRouteStopID[routeStopID] = stop.DepartAt
+		}
+	}
+
+	for _, routeStop := range routeStops {
+		departAt := routeStop.DepartAt
+		if len(customDepartByRouteStopID) > 0 {
+			customDepartAt, ok := customDepartByRouteStopID[routeStop.RouteStopID]
+			if !ok {
+				return Trip{}, errors.New("stops schedule is missing route stop: " + routeStop.RouteStopID)
+			}
+			departAt = customDepartAt
+		}
+		if err := r.insertTripStopTx(ctx, tx, tripID, routeStop.StopID, routeStop.StopOrder, departAt); err != nil {
+			return Trip{}, err
+		}
+	}
+
+	if err := r.refreshAvailableSegmentsForRouteTx(ctx, tx, routeID); err != nil {
+		return Trip{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Trip{}, err
+	}
+
+	return r.Get(ctx, tripID)
 }
 
 func (r *Repository) Update(ctx context.Context, id string, input UpdateTripInput) (Trip, error) {
@@ -210,6 +326,172 @@ func (r *Repository) ListStops(ctx context.Context, tripID string) ([]TripStop, 
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (r *Repository) GetDetails(ctx context.Context, tripID string) (TripDetails, error) {
+	trip, err := r.Get(ctx, tripID)
+	if err != nil {
+		return TripDetails{}, err
+	}
+
+	rows, err := r.pool.Query(ctx, `
+    with passenger_base as (
+      select
+        p.passenger_id,
+        p.booking_id,
+        p.full_name,
+        coalesce(p.document, '') as document,
+        coalesce(p.phone, '') as phone,
+        coalesce(p.seat_number, '') as seat_number,
+        coalesce(p.origin_stop_id, b.origin_stop_id, '') as origin_stop_id,
+        coalesce(origin_stop.display_name, p.origin_stop_id, b.origin_stop_id, '') as origin_name,
+        coalesce(p.destination_stop_id, b.destination_stop_id, '') as destination_stop_id,
+        coalesce(destination_stop.display_name, p.destination_stop_id, b.destination_stop_id, '') as destination_name,
+        upper(coalesce(b.status, 'PENDING')) as booking_status,
+        upper(coalesce(pay.payment_status, b.status::text, 'PENDING')) as payment_status,
+        case when position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) > 0 then true else false end as is_lap_child,
+        coalesce(pay.amount_total, 0)::numeric as booking_total_amount,
+        coalesce(pay.amount_paid, 0)::numeric as booking_paid_amount,
+        coalesce(pay.amount_due, greatest(coalesce(pay.amount_total, 0) - coalesce(pay.amount_paid, 0), 0))::numeric as booking_due_amount,
+        greatest(
+          count(*) filter (
+            where position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) = 0
+          ) over (partition by p.booking_id),
+          1
+        )::numeric as chargeable_passengers
+      from passengers p
+      join bookings b on b.booking_id = p.booking_id
+      left join booking_payment_details pay on pay.booking_id = b.booking_id
+      left join stops origin_stop on origin_stop.stop_id = coalesce(p.origin_stop_id, b.origin_stop_id)
+      left join stops destination_stop on destination_stop.stop_id = coalesce(p.destination_stop_id, b.destination_stop_id)
+      where p.trip_id = $1
+        and upper(coalesce(b.status, '')) not in ('CANCELLED', 'EXPIRED')
+    )
+    select
+      passenger_id,
+      booking_id,
+      full_name,
+      document,
+      phone,
+      seat_number,
+      origin_stop_id,
+      origin_name,
+      destination_stop_id,
+      destination_name,
+      booking_status,
+      payment_status,
+      is_lap_child,
+      case
+        when is_lap_child then 0::numeric
+        else booking_total_amount / chargeable_passengers
+      end as passenger_total_amount,
+      case
+        when is_lap_child then 0::numeric
+        else booking_paid_amount / chargeable_passengers
+      end as passenger_paid_amount,
+      case
+        when is_lap_child then 0::numeric
+        else booking_due_amount / chargeable_passengers
+      end as passenger_due_amount
+    from passenger_base
+    order by origin_name asc, destination_name asc, full_name asc
+  `, tripID)
+	if err != nil {
+		return TripDetails{}, err
+	}
+	defer rows.Close()
+
+	passengers := make([]TripDetailsPassenger, 0)
+	totals := TripDetailsTotals{}
+
+	type segmentAccumulator struct {
+		OriginStopID      string
+		OriginName        string
+		DestinationStopID string
+		DestinationName   string
+		PassengersCount   int
+		TotalAmount       float64
+		PaidAmount        float64
+		DueAmount         float64
+	}
+
+	segments := make(map[string]*segmentAccumulator)
+
+	for rows.Next() {
+		var item TripDetailsPassenger
+		if err := rows.Scan(
+			&item.PassengerID,
+			&item.BookingID,
+			&item.Name,
+			&item.Document,
+			&item.Phone,
+			&item.SeatNumber,
+			&item.OriginStopID,
+			&item.OriginName,
+			&item.DestinationStopID,
+			&item.DestinationName,
+			&item.BookingStatus,
+			&item.PaymentStatus,
+			&item.IsLapChild,
+			&item.TotalAmount,
+			&item.PaidAmount,
+			&item.DueAmount,
+		); err != nil {
+			return TripDetails{}, err
+		}
+
+		passengers = append(passengers, item)
+		totals.PassengersCount++
+		totals.TotalAmount += item.TotalAmount
+		totals.PaidAmount += item.PaidAmount
+		totals.DueAmount += item.DueAmount
+
+		segmentKey := item.OriginStopID + "->" + item.DestinationStopID
+		acc := segments[segmentKey]
+		if acc == nil {
+			acc = &segmentAccumulator{
+				OriginStopID:      item.OriginStopID,
+				OriginName:        item.OriginName,
+				DestinationStopID: item.DestinationStopID,
+				DestinationName:   item.DestinationName,
+			}
+			segments[segmentKey] = acc
+		}
+		acc.PassengersCount++
+		acc.TotalAmount += item.TotalAmount
+		acc.PaidAmount += item.PaidAmount
+		acc.DueAmount += item.DueAmount
+	}
+	if err := rows.Err(); err != nil {
+		return TripDetails{}, err
+	}
+
+	segmentItems := make([]TripDetailsSegmentSummary, 0, len(segments))
+	for _, acc := range segments {
+		segmentItems = append(segmentItems, TripDetailsSegmentSummary{
+			OriginStopID:      acc.OriginStopID,
+			OriginName:        acc.OriginName,
+			DestinationStopID: acc.DestinationStopID,
+			DestinationName:   acc.DestinationName,
+			PassengersCount:   acc.PassengersCount,
+			TotalAmount:       acc.TotalAmount,
+			PaidAmount:        acc.PaidAmount,
+			DueAmount:         acc.DueAmount,
+		})
+	}
+	sort.Slice(segmentItems, func(i, j int) bool {
+		if segmentItems[i].OriginName == segmentItems[j].OriginName {
+			return segmentItems[i].DestinationName < segmentItems[j].DestinationName
+		}
+		return segmentItems[i].OriginName < segmentItems[j].OriginName
+	})
+
+	return TripDetails{
+		Trip:       trip,
+		Totals:     totals,
+		Segments:   segmentItems,
+		Passengers: passengers,
+	}, nil
 }
 
 func (r *Repository) CreateStop(ctx context.Context, tripID string, input CreateTripStopInput) (TripStop, error) {
@@ -416,7 +698,204 @@ func (r *Repository) EnsureTripStopsFromRoute(ctx context.Context, tripID string
 }
 
 func (r *Repository) ValidateRouteReadiness(ctx context.Context, routeID string) ([]string, error) {
-	return []string{}, nil
+	trimmedRouteID := strings.TrimSpace(routeID)
+	if trimmedRouteID == "" {
+		return []string{"route_missing"}, nil
+	}
+
+	var routeExists bool
+	var routeActive bool
+	if err := r.pool.QueryRow(ctx, `
+    select true, coalesce(is_active, false)
+    from routes
+    where route_id = $1
+    limit 1
+  `, trimmedRouteID).Scan(&routeExists, &routeActive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, pgx.ErrNoRows
+		}
+		return nil, err
+	}
+
+	missing := make([]string, 0, 4)
+	if !routeExists {
+		missing = append(missing, "route_missing")
+		return missing, nil
+	}
+	if !routeActive {
+		missing = append(missing, "route_inactive")
+	}
+
+	var stopCount int
+	if err := r.pool.QueryRow(ctx, `
+    with source_trip as (
+      select trip_id
+      from trips
+      where route_id = $1
+      order by
+        case when upper(coalesce(status, '')) = 'TEMPLATE' then 0 else 1 end,
+        trip_date desc,
+        created_at desc
+      limit 1
+    )
+    select count(*)
+    from source_trip st
+    join trip_stops ts on ts.trip_id = st.trip_id
+    where ts.is_active = true
+  `, trimmedRouteID).Scan(&stopCount); err != nil {
+		return nil, err
+	}
+	if stopCount < 2 {
+		missing = append(missing, "route_stops_minimum")
+	}
+
+	var activeSegmentPrices int
+	if err := r.pool.QueryRow(ctx, `
+    select count(*)
+    from route_segment_prices
+    where route_id = $1
+      and upper(coalesce(status, 'ACTIVE')) = 'ACTIVE'
+  `, trimmedRouteID).Scan(&activeSegmentPrices); err != nil {
+		return nil, err
+	}
+	if activeSegmentPrices == 0 {
+		missing = append(missing, "segment_prices_missing")
+	}
+
+	return missing, nil
+}
+
+type routeTemplateStop struct {
+	RouteStopID string
+	StopID      string
+	StopOrder   int
+	DepartAt    *time.Time
+}
+
+func (r *Repository) listRouteTemplateStopsTx(ctx context.Context, tx pgx.Tx, routeID string) ([]routeTemplateStop, error) {
+	rows, err := tx.Query(ctx, `
+    with source_trip as (
+      select trip_id
+      from trips
+      where route_id = $1
+      order by trip_date desc, created_at desc
+      limit 1
+    )
+    select
+      ts.trip_stop_id,
+      ts.stop_id,
+      ts.stop_sequence,
+      (ts.depart_time::timestamp) as depart_at
+    from source_trip st
+    join trip_stops ts on ts.trip_id = st.trip_id
+    where ts.is_active = true
+    order by ts.stop_sequence asc
+  `, routeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]routeTemplateStop, 0)
+	for rows.Next() {
+		var item routeTemplateStop
+		if err := rows.Scan(&item.RouteStopID, &item.StopID, &item.StopOrder, &item.DepartAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *Repository) resolveRouteSeatCapacityTx(ctx context.Context, tx pgx.Tx, routeID string) (int, error) {
+	var seatsTotal int
+	if err := tx.QueryRow(ctx, `
+    select coalesce(seats_total, 46)
+    from trips
+    where route_id = $1
+      and upper(coalesce(status, '')) <> 'TEMPLATE'
+    order by trip_date desc, created_at desc
+    limit 1
+  `, routeID).Scan(&seatsTotal); err == nil {
+		return seatsTotal, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+	return 46, nil
+}
+
+func (r *Repository) ensureRouteExistsTx(ctx context.Context, tx pgx.Tx, routeID string) error {
+	var exists bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from routes where route_id = $1)`, routeID).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (r *Repository) allocateTripIDTx(ctx context.Context, tx pgx.Tx, routeID string, tripDate string) (string, error) {
+	base := strings.ToLower(strings.ReplaceAll(routeID, "_", "-")) + "-" + tripDate
+	for attempt := 0; attempt < 100; attempt++ {
+		candidate := base
+		if attempt > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, attempt+1)
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx, `select exists(select 1 from trips where trip_id = $1)`, candidate).Scan(&exists); err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("could not allocate trip_id")
+}
+
+func (r *Repository) insertTripStopTx(ctx context.Context, tx pgx.Tx, tripID string, stopID string, stopOrder int, departAt *time.Time) error {
+	for attempt := 0; attempt < 16; attempt++ {
+		tripStopID := fmt.Sprintf("%s_%s_%d", tripID, strings.ToLower(stopID), time.Now().UnixNano()+int64(attempt))
+		_, err := tx.Exec(ctx, `
+      insert into trip_stops (
+        trip_stop_id,
+        trip_id,
+        stop_id,
+        stop_sequence,
+        depart_time,
+        is_active,
+        created_at
+      ) values ($1, $2, $3, $4, $5, true, now())
+    `, tripStopID, tripID, stopID, stopOrder, departAt)
+		if err == nil {
+			return nil
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			continue
+		}
+		return err
+	}
+	return errors.New("could not insert trip stop after retries")
+}
+
+func earliestStopDateTime(stops []CreateTripScheduleStopInput) (time.Time, error) {
+	var earliest time.Time
+	for _, stop := range stops {
+		if stop.DepartAt == nil {
+			return time.Time{}, errors.New("depart_at is required for all stops")
+		}
+		if earliest.IsZero() || stop.DepartAt.Before(earliest) {
+			earliest = *stop.DepartAt
+		}
+	}
+	if earliest.IsZero() {
+		return time.Time{}, errors.New("stops schedule must contain valid depart_at values")
+	}
+	return earliest, nil
 }
 
 func (r *Repository) getTripRouteID(ctx context.Context, tripID string) (string, error) {

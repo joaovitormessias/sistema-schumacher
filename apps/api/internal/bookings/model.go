@@ -9,6 +9,7 @@ type Booking struct {
 	ID              string     `json:"id"`
 	TripID          string     `json:"trip_id"`
 	Status          string     `json:"status"`
+	ReservationCode string     `json:"reservation_code"`
 	Source          string     `json:"source"`
 	TotalAmount     float64    `json:"total_amount"`
 	DepositAmount   float64    `json:"deposit_amount"`
@@ -18,38 +19,45 @@ type Booking struct {
 }
 
 type BookingListItem struct {
-	ID              string    `json:"id"`
-	TripID          string    `json:"trip_id"`
-	Status          string    `json:"status"`
-	TotalAmount     float64   `json:"total_amount"`
-	DepositAmount   float64   `json:"deposit_amount"`
-	RemainderAmount float64   `json:"remainder_amount"`
-	PassengerName   string    `json:"passenger_name"`
-	PassengerPhone  string    `json:"passenger_phone"`
-	PassengerEmail  string    `json:"passenger_email"`
-	SeatNumber      int       `json:"seat_number"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID              string     `json:"id"`
+	TripID          string     `json:"trip_id"`
+	Status          string     `json:"status"`
+	ReservationCode string     `json:"reservation_code"`
+	TotalAmount     float64    `json:"total_amount"`
+	DepositAmount   float64    `json:"deposit_amount"`
+	RemainderAmount float64    `json:"remainder_amount"`
+	PassengerName   string     `json:"passenger_name"`
+	PassengerPhone  string     `json:"passenger_phone"`
+	PassengerEmail  string     `json:"passenger_email"`
+	SeatNumber      int        `json:"seat_number"`
+	ExpiresAt       *time.Time `json:"expires_at"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 type PassengerInput struct {
-	Name     string `json:"name"`
-	Document string `json:"document"`
-	Phone    string `json:"phone"`
-	Email    string `json:"email"`
+	Name         string `json:"name"`
+	Document     string `json:"document"`
+	DocumentType string `json:"document_type"`
+	Phone        string `json:"phone"`
+	Email        string `json:"email"`
+	Notes        string `json:"notes"`
+	IsLapChild   bool   `json:"is_lap_child"`
 }
 
 type CreateBookingInput struct {
-	TripID          string         `json:"trip_id"`
-	SeatID          string         `json:"seat_id"`
-	BoardStopID     string         `json:"board_stop_id"`
-	AlightStopID    string         `json:"alight_stop_id"`
-	FareMode        *string        `json:"fare_mode"`
-	FareAmountFinal *float64       `json:"fare_amount_final"`
-	Passenger       PassengerInput `json:"passenger"`
-	Source          *string        `json:"source"`
-	TotalAmount     float64        `json:"total_amount"`
-	DepositAmount   float64        `json:"deposit_amount"`
-	RemainderAmount float64        `json:"remainder_amount"`
+	TripID          string           `json:"trip_id"`
+	SeatID          string           `json:"seat_id"`
+	BoardStopID     string           `json:"board_stop_id"`
+	AlightStopID    string           `json:"alight_stop_id"`
+	FareMode        *string          `json:"fare_mode"`
+	FareAmountFinal *float64         `json:"fare_amount_final"`
+	Passenger       PassengerInput   `json:"passenger"`
+	Passengers      []PassengerInput `json:"passengers"`
+	IdempotencyKey  string           `json:"idempotency_key"`
+	Source          *string          `json:"source"`
+	TotalAmount     float64          `json:"total_amount"`
+	DepositAmount   float64          `json:"deposit_amount"`
+	RemainderAmount float64          `json:"remainder_amount"`
 }
 
 type CheckoutCustomerInput struct {
@@ -75,6 +83,8 @@ type CheckoutBookingInput struct {
 	FareMode        *string              `json:"fare_mode"`
 	FareAmountFinal *float64             `json:"fare_amount_final"`
 	Passenger       PassengerInput       `json:"passenger"`
+	Passengers      []PassengerInput     `json:"passengers"`
+	IdempotencyKey  string               `json:"idempotency_key"`
 	Source          *string              `json:"source"`
 	TotalAmount     float64              `json:"total_amount"`
 	DepositAmount   float64              `json:"deposit_amount"`
@@ -87,8 +97,12 @@ type UpdateBookingInput struct {
 }
 
 type ListFilter struct {
-	Limit  int
-	Offset int
+	Limit           int
+	Offset          int
+	BookingID       string
+	ReservationCode string
+	TripID          string
+	Status          string
 }
 
 type BookingPassenger struct {
@@ -97,8 +111,11 @@ type BookingPassenger struct {
 	TripID          string    `json:"trip_id"`
 	Name            string    `json:"name"`
 	Document        string    `json:"document"`
+	DocumentType    string    `json:"document_type"`
 	Phone           string    `json:"phone"`
 	Email           string    `json:"email"`
+	Notes           string    `json:"notes"`
+	IsLapChild      bool      `json:"is_lap_child"`
 	SeatID          string    `json:"seat_id"`
 	BoardStopID     string    `json:"board_stop_id"`
 	AlightStopID    string    `json:"alight_stop_id"`
@@ -112,8 +129,9 @@ type BookingPassenger struct {
 }
 
 type BookingDetails struct {
-	Booking   Booking          `json:"booking"`
-	Passenger BookingPassenger `json:"passenger"`
+	Booking    Booking            `json:"booking"`
+	Passenger  BookingPassenger   `json:"passenger"`
+	Passengers []BookingPassenger `json:"passengers"`
 }
 
 type CheckoutPayment struct {
@@ -138,19 +156,22 @@ type CheckoutResponse struct {
 }
 
 type CreateBookingData struct {
-	TripID          string
-	SeatID          string
-	BoardStopID     string
-	AlightStopID    string
-	BoardStopOrder  int
-	AlightStopOrder int
-	FareMode        string
-	FareAmountCalc  float64
-	FareAmountFinal float64
-	FareSnapshot    []byte
-	Passenger       PassengerInput
-	Source          *string
-	TotalAmount     float64
-	DepositAmount   float64
-	RemainderAmount float64
+	TripID            string
+	SeatID            string
+	BoardStopID       string
+	AlightStopID      string
+	OriginStopID      string
+	DestinationStopID string
+	BoardStopOrder    int
+	AlightStopOrder   int
+	FareMode          string
+	FareAmountCalc    float64
+	FareAmountFinal   float64
+	FareSnapshot      []byte
+	Passengers        []PassengerInput
+	IdempotencyKey    string
+	Source            *string
+	TotalAmount       float64
+	DepositAmount     float64
+	RemainderAmount   float64
 }

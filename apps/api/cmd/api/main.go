@@ -13,7 +13,9 @@ import (
 	"github.com/joho/godotenv"
 
 	"schumacher-tur/api/internal/advance_returns"
+	"schumacher-tur/api/internal/affiliate"
 	"schumacher-tur/api/internal/auth"
+	"schumacher-tur/api/internal/availability"
 	"schumacher-tur/api/internal/bookings"
 	"schumacher-tur/api/internal/buses"
 	"schumacher-tur/api/internal/driver_cards"
@@ -58,7 +60,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	authMiddleware, err := auth.NewAuthenticator(cfg.SupabaseJWKSURL, cfg.SupabaseIssuer, cfg.SupabaseAudience, cfg.AuthDisabled)
+	authMiddleware, err := auth.NewAuthenticator(cfg.SupabaseJWKSURL, cfg.SupabaseIssuer, cfg.SupabaseAudience, cfg.APIServiceTokens, cfg.AuthDisabled)
 	if err != nil {
 		log.Fatalf("auth error: %v", err)
 	}
@@ -83,8 +85,11 @@ func main() {
 	})
 
 	paymentsSvc := payments.NewService(payments.NewRepository(pool), cfg)
-	paymentsHandler := payments.NewHandler(paymentsSvc, cfg.AbacatePayPublicKey, cfg.AbacatePayWebhookSecret)
+	paymentsHandler := payments.NewHandler(paymentsSvc, cfg.PagarmeSecretKey)
 	paymentsHandler.RegisterWebhooks(r)
+	affiliateSvc := affiliate.NewService(affiliate.NewRepository(pool), cfg)
+	affiliateHandler := affiliate.NewHandler(affiliateSvc)
+	affiliateHandler.RegisterWebhooks(r)
 
 	r.Group(func(pr chi.Router) {
 		pr.Use(authMiddleware.Middleware)
@@ -94,6 +99,7 @@ func main() {
 		driversHandler := drivers.NewHandler(drivers.NewService(drivers.NewRepository(pool)))
 		tripsHandler := trips.NewHandler(trips.NewService(trips.NewRepository(pool)))
 		tripOperationsHandler := trip_operations.NewHandler(trip_operations.NewService(trip_operations.NewRepository(pool)))
+		availabilityHandler := availability.NewHandler(availability.NewService(availability.NewRepository(pool)))
 		pricingSvc := pricing.NewService(pricing.NewRepository(pool))
 		bookingsHandler := bookings.NewHandler(bookings.NewService(bookings.NewRepository(pool), pricingSvc, paymentsSvc))
 		reportsHandler := reports.NewHandler(reports.NewService(reports.NewRepository(pool)))
@@ -104,8 +110,10 @@ func main() {
 		driversHandler.RegisterRoutes(pr)
 		tripsHandler.RegisterRoutes(pr)
 		tripOperationsHandler.RegisterRoutes(pr)
+		availabilityHandler.RegisterRoutes(pr)
 		bookingsHandler.RegisterRoutes(pr)
 		paymentsHandler.RegisterRoutes(pr)
+		affiliateHandler.RegisterRoutes(pr)
 		reportsHandler.RegisterRoutes(pr)
 		pricingHandler.RegisterRoutes(pr)
 
@@ -152,7 +160,7 @@ func main() {
 		importsXLSXHandler := imports_xlsx.NewHandler(imports_xlsx.NewService(imports_xlsx.NewRepository(pool)))
 		importsXLSXHandler.RegisterRoutes(pr)
 
-		users.NewHandler().RegisterRoutes(pr)
+		users.NewHandler(pool, cfg).RegisterRoutes(pr)
 	})
 
 	addr := fmt.Sprintf(":%s", cfg.Port)

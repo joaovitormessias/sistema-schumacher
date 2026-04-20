@@ -1,5 +1,5 @@
 import { useMemo, type CSSProperties } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Bus, Calendar, Ticket } from "lucide-react";
 import InlineAlert from "../../components/InlineAlert";
 import PageHeader from "../../components/PageHeader";
@@ -41,6 +41,7 @@ function StatCard({ title, value, helper, icon }: StatCardProps) {
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const tripsQuery = useTrips(500, 0);
   const routesQuery = useRoutes(500, 0);
   const bookingsQuery = useBookings(500, 0);
@@ -156,7 +157,12 @@ export default function Dashboard() {
               <div className="table-cell">Saida</div>
             </div>
             {tripsToday.map((trip) => (
-              <div key={trip.id} className="table-row">
+              <div
+                key={trip.id}
+                className="table-row"
+                style={{ cursor: "pointer" }}
+                onClick={() => navigate("/trips")}
+              >
                 <div className="table-cell" data-label="Rota">
                   {routeLabel(trip.route_id)}
                 </div>
@@ -197,7 +203,12 @@ export default function Dashboard() {
               <div className="table-cell">Saldo</div>
             </div>
             {latestBookings.map((booking) => (
-              <div className="table-row" key={booking.id}>
+              <div
+                className="table-row"
+                key={booking.id}
+                style={{ cursor: "pointer" }}
+                onClick={() => navigate("/bookings")}
+              >
                 <div className="table-cell" data-label="Passageiro">
                   {booking.passenger_name}
                 </div>

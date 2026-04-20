@@ -21,7 +21,7 @@ type Payment struct {
 type CreatePaymentInput struct {
 	BookingID   string         `json:"booking_id"`
 	Amount      float64        `json:"amount"`
-	Method      string         `json:"method"` // PIX or CARD
+	Method      string         `json:"method"`
 	Description string         `json:"description"`
 	Customer    *CustomerInput `json:"customer"`
 }
@@ -36,7 +36,7 @@ type CustomerInput struct {
 type ManualPaymentInput struct {
 	BookingID string  `json:"booking_id"`
 	Amount    float64 `json:"amount"`
-	Method    string  `json:"method"` // CASH, TRANSFER, OTHER
+	Method    string  `json:"method"`
 	Notes     string  `json:"notes"`
 }
 
@@ -47,6 +47,13 @@ type PaymentStatusResponse struct {
 	Provider    *string         `json:"provider"`
 	ProviderRef *string         `json:"provider_ref"`
 	Metadata    json.RawMessage `json:"metadata"`
+}
+
+type CreatePaymentResponse struct {
+	Payment     Payment     `json:"payment"`
+	ProviderRaw interface{} `json:"provider_raw,omitempty"`
+	CheckoutURL *string     `json:"checkout_url"`
+	PixCode     *string     `json:"pix_code"`
 }
 
 type PaymentSyncResponse struct {
@@ -64,4 +71,31 @@ type PaymentListFilter struct {
 	PaidUntil *time.Time
 	Limit     int
 	Offset    int
+}
+
+type PaymentNotificationContext struct {
+	BookingID       string  `json:"booking_id"`
+	ReservationCode string  `json:"reservation_code"`
+	CustomerName    string  `json:"customer_name"`
+	CustomerPhone   string  `json:"customer_phone"`
+	AmountTotal     float64 `json:"amount_total"`
+	AmountPaid      float64 `json:"amount_paid"`
+	AmountDue       float64 `json:"amount_due"`
+	PaymentStatus   string  `json:"payment_status"`
+}
+
+type PaymentNotificationPayload struct {
+	Event           string    `json:"event"`
+	SentAt          time.Time `json:"sent_at"`
+	PaymentID       string    `json:"payment_id"`
+	PaymentAmount   float64   `json:"payment_amount"`
+	PaymentMethod   string    `json:"payment_method"`
+	BookingID       string    `json:"booking_id"`
+	ReservationCode string    `json:"reservation_code"`
+	CustomerName    string    `json:"customer_name"`
+	CustomerPhone   string    `json:"customer_phone"`
+	AmountTotal     float64   `json:"amount_total"`
+	AmountPaid      float64   `json:"amount_paid"`
+	AmountDue       float64   `json:"amount_due"`
+	PaymentStatus   string    `json:"payment_status"`
 }

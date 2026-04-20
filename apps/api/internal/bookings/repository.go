@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrSeatNotInTrip = errors.New("seat does not belong to trip bus")
+var (
+	ErrSeatNotInTrip    = errors.New("seat does not belong to trip bus")
+	ErrNoSeatsAvailable = errors.New("no seats available for segment")
+)
 
 // Repository handles booking persistence.
 type Repository struct {
@@ -31,11 +35,12 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
 		offset = 0
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	query := `
     select
       b.booking_id as id,
       b.trip_id,
       b.status,
+      coalesce(b.reservation_code, '') as reservation_code,
       coalesce(pd.amount_total, 0)::numeric as total_amount,
       coalesce(pd.amount_paid, 0)::numeric as deposit_amount,
       coalesce(pd.amount_due, greatest(coalesce(pd.amount_total, 0) - coalesce(pd.amount_paid, 0), 0))::numeric as remainder_amount,
@@ -43,6 +48,7 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
       coalesce(p.phone, b.customer_phone) as passenger_phone,
       ''::text as passenger_email,
       case when coalesce(p.seat_number, '') ~ '^[0-9]+$' then p.seat_number::int else 0 end as seat_number,
+      b.reserved_until,
       b.created_at
     from bookings b
     left join booking_payment_details pd on pd.booking_id = b.booking_id
@@ -52,10 +58,39 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
       where p.booking_id = b.booking_id
       order by p.created_at asc
       limit 1
-    ) p on true
-    order by b.created_at desc
-    limit $1 offset $2
-  `, limit, offset)
+    ) p on true`
+
+	args := []interface{}{}
+	clauses := []string{}
+
+	if filter.BookingID != "" && filter.ReservationCode != "" {
+		args = append(args, filter.BookingID, filter.ReservationCode)
+		clauses = append(clauses, fmt.Sprintf("(b.booking_id = $%d or b.reservation_code = $%d)", len(args)-1, len(args)))
+	} else if filter.BookingID != "" {
+		args = append(args, filter.BookingID)
+		clauses = append(clauses, fmt.Sprintf("b.booking_id = $%d", len(args)))
+	} else if filter.ReservationCode != "" {
+		args = append(args, filter.ReservationCode)
+		clauses = append(clauses, fmt.Sprintf("b.reservation_code = $%d", len(args)))
+	}
+	if filter.TripID != "" {
+		args = append(args, filter.TripID)
+		clauses = append(clauses, fmt.Sprintf("b.trip_id = $%d", len(args)))
+	}
+	if filter.Status != "" {
+		args = append(args, filter.Status)
+		clauses = append(clauses, fmt.Sprintf("b.status = $%d", len(args)))
+	}
+	if len(clauses) > 0 {
+		query += "\n    where " + strings.Join(clauses, " and ")
+	}
+
+	args = append(args, limit)
+	query += fmt.Sprintf("\n    order by b.created_at desc\n    limit $%d", len(args))
+	args = append(args, offset)
+	query += fmt.Sprintf(" offset $%d", len(args))
+
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -68,6 +103,7 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
 			&item.ID,
 			&item.TripID,
 			&item.Status,
+			&item.ReservationCode,
 			&item.TotalAmount,
 			&item.DepositAmount,
 			&item.RemainderAmount,
@@ -75,6 +111,7 @@ func (r *Repository) List(ctx context.Context, filter ListFilter) ([]BookingList
 			&item.PassengerPhone,
 			&item.PassengerEmail,
 			&item.SeatNumber,
+			&item.ExpiresAt,
 			&item.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -101,13 +138,12 @@ func (r *Repository) Create(ctx context.Context, input CreateBookingData) (Booki
 	}
 
 	seatID := strings.TrimSpace(input.SeatID)
-	if seatID == "" {
-		return BookingDetails{}, ErrSeatNotInTrip
-	}
-	if seatsTotal > 0 {
-		var seatNum int
-		if _, err := fmt.Sscanf(seatID, "%d", &seatNum); err != nil || seatNum <= 0 || seatNum > seatsTotal {
-			return BookingDetails{}, ErrSeatNotInTrip
+	if seatID != "" {
+		if seatsTotal > 0 {
+			var seatNum int
+			if _, err := fmt.Sscanf(seatID, "%d", &seatNum); err != nil || seatNum <= 0 || seatNum > seatsTotal {
+				return BookingDetails{}, ErrSeatNotInTrip
+			}
 		}
 	}
 
@@ -118,19 +154,19 @@ func (r *Repository) Create(ctx context.Context, input CreateBookingData) (Booki
     )
     insert into bookings (
       booking_id, trip_id, origin_stop_id, destination_stop_id,
-      passenger_qty, customer_name, customer_phone, status, reservation_code, row_type, idempotency_key,
+      passenger_qty, customer_name, customer_phone, status, reservation_code, reserved_until, row_type, idempotency_key,
       created_at, updated_at
     )
     select
       g.booking_id,
       $1, $2, $3,
-      1, $4, $5, 'PENDING',
-      right(g.booking_id, 8), 'booking', nullif($6, ''),
+      $4, $5, $6, 'PENDING',
+      right(g.booking_id, 8), now() + interval '50 minutes', 'booking', nullif($7, ''),
       now(), now()
     from generated g
-    returning booking_id, trip_id, status, created_at
-  `, input.TripID, input.BoardStopID, input.AlightStopID, input.Passenger.Name, input.Passenger.Phone, input.SeatID)
-	if err := row.Scan(&booking.ID, &booking.TripID, &booking.Status, &booking.CreatedAt); err != nil {
+    returning booking_id, trip_id, status, reservation_code, reserved_until, created_at
+	  `, input.TripID, input.OriginStopID, input.DestinationStopID, len(input.Passengers), firstPassengerName(input.Passengers), firstPassengerPhone(input.Passengers), input.IdempotencyKey)
+	if err := row.Scan(&booking.ID, &booking.TripID, &booking.Status, &booking.ReservationCode, &booking.ExpiresAt, &booking.CreatedAt); err != nil {
 		return BookingDetails{}, err
 	}
 	booking.Source = "WHATSAPP"
@@ -138,32 +174,52 @@ func (r *Repository) Create(ctx context.Context, input CreateBookingData) (Booki
 	booking.DepositAmount = input.DepositAmount
 	booking.RemainderAmount = input.RemainderAmount
 
-	var passenger BookingPassenger
-	row = tx.QueryRow(ctx, `
+	passengers := make([]BookingPassenger, 0, len(input.Passengers))
+	for _, inputPassenger := range input.Passengers {
+		passengerSeatID := seatID
+		if passengerSeatID == "" {
+			passengerSeatID, err = r.findAvailableSeat(ctx, tx, input.TripID, seatsTotal)
+			if err != nil {
+				return BookingDetails{}, err
+			}
+		}
+
+		var passenger BookingPassenger
+		row = tx.QueryRow(ctx, `
     with generated as (
       select 'PS-' || upper(replace(gen_random_uuid()::text, '-', '')) as passenger_id
     )
     insert into passengers (
-      passenger_id, booking_id, trip_id, full_name, document, seat_number,
+      passenger_id, booking_id, trip_id, full_name, document, document_type, seat_number,
       origin_stop_id, destination_stop_id, phone, notes, status, row_type, created_at, updated_at
     )
     select
       g.passenger_id,
-      $1, $2, $3, nullif($4, ''), $5,
-      $6, $7, nullif($8, ''), null, 'RESERVED', 'passenger', now(), now()
+      $1, $2, $3, nullif($4, ''), nullif($5, ''), $6,
+      $7, $8, nullif($9, ''), nullif($10, ''), 'RESERVED', 'passenger', now(), now()
     from generated g
-    returning passenger_id, booking_id, trip_id, full_name, coalesce(document, ''), coalesce(phone, ''), coalesce(seat_number, ''), status, created_at
-  `, booking.ID, input.TripID, input.Passenger.Name, input.Passenger.Document, seatID, input.BoardStopID, input.AlightStopID, input.Passenger.Phone)
-	var seatNumber string
-	if err := row.Scan(&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.Phone, &seatNumber, &passenger.Status, &passenger.CreatedAt); err != nil {
-		return BookingDetails{}, err
+    returning passenger_id, booking_id, trip_id, full_name, coalesce(document, ''), coalesce(document_type, ''), coalesce(phone, ''), coalesce(notes, ''), coalesce(seat_number, ''), status, created_at
+	  `, booking.ID, input.TripID, inputPassenger.Name, inputPassenger.Document, inputPassenger.DocumentType, passengerSeatID, input.OriginStopID, input.DestinationStopID, inputPassenger.Phone, inputPassenger.Notes)
+		var seatNumber string
+		if err := row.Scan(&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.DocumentType, &passenger.Phone, &passenger.Notes, &seatNumber, &passenger.Status, &passenger.CreatedAt); err != nil {
+			return BookingDetails{}, err
+		}
+		passenger.IsLapChild = isLapChildNotes(passenger.Notes)
+		passenger.SeatID = seatNumber
+		passenger.Email = inputPassenger.Email
+		passenger.BoardStopID = input.BoardStopID
+		passenger.AlightStopID = input.AlightStopID
+		passenger.FareMode = input.FareMode
+		if passenger.IsLapChild {
+			passenger.FareAmountCalc = 0
+			passenger.FareAmountFinal = 0
+		} else {
+			passenger.FareAmountCalc = input.FareAmountCalc
+			passenger.FareAmountFinal = input.FareAmountFinal
+		}
+
+		passengers = append(passengers, passenger)
 	}
-	passenger.SeatID = seatNumber
-	passenger.BoardStopID = input.BoardStopID
-	passenger.AlightStopID = input.AlightStopID
-	passenger.FareMode = input.FareMode
-	passenger.FareAmountCalc = input.FareAmountCalc
-	passenger.FareAmountFinal = input.FareAmountFinal
 
 	if _, err := tx.Exec(ctx, `
     insert into booking_payment_details (
@@ -181,14 +237,45 @@ func (r *Repository) Create(ctx context.Context, input CreateBookingData) (Booki
 		return BookingDetails{}, err
 	}
 
-	return BookingDetails{Booking: booking, Passenger: passenger}, nil
+	return bookingDetailsWithPassengers(booking, passengers), nil
+}
+
+func (r *Repository) findAvailableSeat(ctx context.Context, tx pgx.Tx, tripID string, seatsTotal int) (string, error) {
+	limit := seatsTotal
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var seatID string
+	row := tx.QueryRow(ctx, `
+    select gs::text as seat_number
+    from generate_series(1, $2) as gs
+    where not exists (
+      select 1
+      from passengers p
+      join bookings b on b.booking_id = p.booking_id
+      where p.trip_id = $1
+        and p.seat_number = gs::text
+        and upper(coalesce(b.status, '')) not in ('CANCELLED', 'EXPIRED')
+    )
+    order by gs asc
+    limit 1
+  `, tripID, limit)
+	if err := row.Scan(&seatID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNoSeatsAvailable
+		}
+		return "", err
+	}
+
+	return seatID, nil
 }
 
 func (r *Repository) Get(ctx context.Context, id string) (BookingDetails, error) {
 	var booking Booking
 	row := r.pool.QueryRow(ctx, `
     select
-      b.booking_id, b.trip_id, b.status,
+      b.booking_id, b.trip_id, b.status, coalesce(b.reservation_code, ''),
       coalesce(pd.amount_total, 0)::numeric as total_amount,
       coalesce(pd.amount_paid, 0)::numeric as deposit_amount,
       coalesce(pd.amount_due, greatest(coalesce(pd.amount_total, 0) - coalesce(pd.amount_paid, 0), 0))::numeric as remainder_amount,
@@ -198,40 +285,66 @@ func (r *Repository) Get(ctx context.Context, id string) (BookingDetails, error)
     left join booking_payment_details pd on pd.booking_id = b.booking_id
     where b.booking_id=$1
   `, id)
-	if err := row.Scan(&booking.ID, &booking.TripID, &booking.Status, &booking.TotalAmount, &booking.DepositAmount, &booking.RemainderAmount, &booking.ExpiresAt, &booking.CreatedAt); err != nil {
+	if err := row.Scan(&booking.ID, &booking.TripID, &booking.Status, &booking.ReservationCode, &booking.TotalAmount, &booking.DepositAmount, &booking.RemainderAmount, &booking.ExpiresAt, &booking.CreatedAt); err != nil {
 		return BookingDetails{}, err
 	}
 	booking.Source = "WHATSAPP"
 
-	var passenger BookingPassenger
-	row = r.pool.QueryRow(ctx, `
+	rows, err := r.pool.Query(ctx, `
     select
-      p.passenger_id, p.booking_id, p.trip_id, p.full_name, coalesce(p.document, ''), coalesce(p.phone, ''),
+      p.passenger_id, p.booking_id, p.trip_id, p.full_name, coalesce(p.document, ''), coalesce(p.document_type, ''), coalesce(p.phone, ''),
       ''::text as email,
+      coalesce(p.notes, '') as notes,
+      case when position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) > 0 then true else false end as is_lap_child,
       coalesce(p.seat_number, '') as seat_id,
       coalesce(p.origin_stop_id, ''),
       coalesce(p.destination_stop_id, ''),
       0::int as board_stop_order,
       0::int as alight_stop_order,
       'AUTO'::text as fare_mode,
-      coalesce(pd.amount_total, 0)::numeric as fare_amount_calc,
-      coalesce(pd.amount_total, 0)::numeric as fare_amount_final,
+      case
+        when position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) > 0 then 0::numeric
+        else (coalesce(pd.amount_total, 0) / greatest(coalesce(pc.chargeable_count, 0), 1))::numeric
+      end as fare_amount_calc,
+      case
+        when position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(p.notes, ''))) > 0 then 0::numeric
+        else (coalesce(pd.amount_total, 0) / greatest(coalesce(pc.chargeable_count, 0), 1))::numeric
+      end as fare_amount_final,
       p.status,
       p.created_at
     from passengers p
+    join bookings b on b.booking_id = p.booking_id
     left join booking_payment_details pd on pd.booking_id = p.booking_id
+    left join lateral (
+      select count(*)::numeric as chargeable_count
+      from passengers px
+      where px.booking_id = p.booking_id
+        and position('CRIANCA_DE_COLO_ATE_5_ANOS' in upper(coalesce(px.notes, ''))) = 0
+    ) pc on true
     where p.booking_id=$1
-    order by p.created_at asc
-    limit 1`, id)
-	if err := row.Scan(
-		&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.Phone, &passenger.Email, &passenger.SeatID,
-		&passenger.BoardStopID, &passenger.AlightStopID, &passenger.BoardStopOrder, &passenger.AlightStopOrder,
-		&passenger.FareMode, &passenger.FareAmountCalc, &passenger.FareAmountFinal, &passenger.Status, &passenger.CreatedAt,
-	); err != nil {
+    order by p.created_at asc`, id)
+	if err != nil {
+		return BookingDetails{}, err
+	}
+	defer rows.Close()
+
+	passengers := []BookingPassenger{}
+	for rows.Next() {
+		var passenger BookingPassenger
+		if err := rows.Scan(
+			&passenger.ID, &passenger.BookingID, &passenger.TripID, &passenger.Name, &passenger.Document, &passenger.DocumentType, &passenger.Phone, &passenger.Email, &passenger.Notes, &passenger.IsLapChild, &passenger.SeatID,
+			&passenger.BoardStopID, &passenger.AlightStopID, &passenger.BoardStopOrder, &passenger.AlightStopOrder,
+			&passenger.FareMode, &passenger.FareAmountCalc, &passenger.FareAmountFinal, &passenger.Status, &passenger.CreatedAt,
+		); err != nil {
+			return BookingDetails{}, err
+		}
+		passengers = append(passengers, passenger)
+	}
+	if err := rows.Err(); err != nil {
 		return BookingDetails{}, err
 	}
 
-	return BookingDetails{Booking: booking, Passenger: passenger}, nil
+	return bookingDetailsWithPassengers(booking, passengers), nil
 }
 
 func (r *Repository) UpdateStatus(ctx context.Context, id string, status string) (BookingDetails, error) {
@@ -274,3 +387,27 @@ func IsUniqueViolation(err error) bool {
 	return pgErr.Code == "23505" || pgErr.Code == "23P01"
 }
 
+func bookingDetailsWithPassengers(booking Booking, passengers []BookingPassenger) BookingDetails {
+	details := BookingDetails{
+		Booking:    booking,
+		Passengers: passengers,
+	}
+	if len(passengers) > 0 {
+		details.Passenger = passengers[0]
+	}
+	return details
+}
+
+func firstPassengerName(passengers []PassengerInput) string {
+	if len(passengers) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(passengers[0].Name)
+}
+
+func firstPassengerPhone(passengers []PassengerInput) string {
+	if len(passengers) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(passengers[0].Phone)
+}

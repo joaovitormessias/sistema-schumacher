@@ -2,6 +2,7 @@ import { getSupabaseClient } from "./supabase";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8080";
 const DEV_TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
+const DEBUG_USER_ID = import.meta.env.VITE_DEBUG_USER_ID ?? "";
 
 type RequestOptions = {
   method?: string;
@@ -47,6 +48,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     headers: {
       "Content-Type": "application/json",
       ...(authHeader ? { Authorization: authHeader } : {}),
+      ...(DEBUG_USER_ID ? { "X-Debug-User-Id": DEBUG_USER_ID } : {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });

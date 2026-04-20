@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"schumacher-tur/api/internal/pricing"
@@ -29,7 +30,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	filter, err := parseListFilter(r)
 	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "INVALID_PAGINATION", "invalid pagination parameters", nil)
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_PAGINATION", "invalid query parameters", nil)
 		return
 	}
 	items, err := h.svc.List(r.Context(), filter)
@@ -46,8 +47,8 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
 		return
 	}
-	if input.TripID == "" || input.SeatID == "" || input.Passenger.Name == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "trip_id, seat_id and passenger.name are required", nil)
+	if input.TripID == "" || len(normalizePassengers(input.Passenger, input.Passengers)) == 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "trip_id and at least one passenger.name are required", nil)
 		return
 	}
 	if input.BoardStopID == "" || input.AlightStopID == "" {
@@ -61,12 +62,16 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 	item, err := h.svc.Create(r.Context(), input)
 	if err != nil {
-		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) {
+		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrPassengerNameRequired) || errors.Is(err, ErrPassengerDocumentType) || errors.Is(err, ErrSeatRequiresSinglePassenger) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) {
 			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 			return
 		}
 		if errors.Is(err, ErrSeatNotInTrip) {
 			httpx.WriteError(w, http.StatusBadRequest, "SEAT_INVALID", "seat does not belong to trip bus", nil)
+			return
+		}
+		if errors.Is(err, ErrNoSeatsAvailable) {
+			httpx.WriteError(w, http.StatusConflict, "SEAT_TAKEN", "no seats available for the selected segment", nil)
 			return
 		}
 		if errors.Is(err, pricing.ErrTripNotFound) || errors.Is(err, pricing.ErrStopNotFound) {
@@ -105,8 +110,8 @@ func (h *Handler) checkout(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
 		return
 	}
-	if input.TripID == "" || input.SeatID == "" || input.Passenger.Name == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "trip_id, seat_id and passenger.name are required", nil)
+	if input.TripID == "" || len(normalizePassengers(input.Passenger, input.Passengers)) == 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "trip_id and at least one passenger.name are required", nil)
 		return
 	}
 	if input.BoardStopID == "" || input.AlightStopID == "" {
@@ -116,12 +121,16 @@ func (h *Handler) checkout(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.svc.Checkout(r.Context(), input)
 	if err != nil {
-		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) || errors.Is(err, ErrInvalidInitialPayment) || errors.Is(err, ErrInitialPaymentBelowMinimum) {
+		if errors.Is(err, ErrMissingFields) || errors.Is(err, ErrPassengerNameRequired) || errors.Is(err, ErrPassengerDocumentType) || errors.Is(err, ErrSeatRequiresSinglePassenger) || errors.Is(err, ErrMissingStops) || errors.Is(err, ErrNegativeAmounts) || errors.Is(err, ErrInvalidAmounts) || errors.Is(err, ErrInvalidInitialPayment) || errors.Is(err, ErrInitialPaymentBelowMinimum) {
 			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 			return
 		}
 		if errors.Is(err, ErrSeatNotInTrip) {
 			httpx.WriteError(w, http.StatusBadRequest, "SEAT_INVALID", "seat does not belong to trip bus", nil)
+			return
+		}
+		if errors.Is(err, ErrNoSeatsAvailable) {
+			httpx.WriteError(w, http.StatusConflict, "SEAT_TAKEN", "no seats available for the selected segment", nil)
 			return
 		}
 		if errors.Is(err, pricing.ErrTripNotFound) || errors.Is(err, pricing.ErrStopNotFound) {
@@ -213,6 +222,13 @@ func isValidBookingStatus(status string) bool {
 func parseListFilter(r *http.Request) (ListFilter, error) {
 	filter := ListFilter{}
 	q := r.URL.Query()
+	filter.BookingID = strings.TrimSpace(q.Get("booking_id"))
+	filter.ReservationCode = strings.TrimSpace(q.Get("reservation_code"))
+	filter.TripID = strings.TrimSpace(q.Get("trip_id"))
+	filter.Status = strings.ToUpper(strings.TrimSpace(q.Get("status")))
+	if filter.Status != "" && !isValidBookingStatus(filter.Status) {
+		return filter, errors.New("invalid status")
+	}
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {

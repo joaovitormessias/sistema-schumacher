@@ -27,6 +27,8 @@ type BookingListProps = {
   pageSize: number;
   onPageChange: (page: number) => void;
   tripLabel: (tripId: string) => string;
+  onRowClick?: (booking: BookingItem) => void;
+  selectedBookingId?: string;
 };
 
 const statusTone = (status: string): StatusTone => {
@@ -45,6 +47,8 @@ export default function BookingList({
   pageSize,
   onPageChange,
   tripLabel,
+  onRowClick,
+  selectedBookingId,
 }: BookingListProps) {
   const isMobile = useMediaQuery("(max-width: 900px)");
   const columns: DataTableColumn<BookingItem>[] = [
@@ -69,30 +73,28 @@ export default function BookingList({
       width: "120px",
     },
   ];
+  const emptyState = (
+    <EmptyState
+      title="Nenhuma reserva encontrada"
+      description="Tente ajustar a busca ou crie uma nova reserva."
+    />
+  );
   const shouldVirtualize = !isMobile && bookings.length > 100;
   const tableElement = shouldVirtualize ? (
     <VirtualDataTable
       columns={columns}
       rows={bookings}
       rowKey={(booking) => booking.id}
-      emptyState={
-        <EmptyState
-          title="Nenhuma reserva encontrada"
-          description="Tente ajustar a busca ou crie uma nova reserva."
-        />
-      }
+      emptyState={emptyState}
     />
   ) : (
     <DataTable
       columns={columns}
       rows={bookings}
       rowKey={(booking) => booking.id}
-      emptyState={
-        <EmptyState
-          title="Nenhuma reserva encontrada"
-          description="Tente ajustar a busca ou crie uma nova reserva."
-        />
-      }
+      onRowClick={onRowClick}
+      selectedRowKey={selectedBookingId}
+      emptyState={emptyState}
     />
   );
 

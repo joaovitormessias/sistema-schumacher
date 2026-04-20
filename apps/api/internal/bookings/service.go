@@ -12,14 +12,19 @@ import (
 )
 
 var (
-	ErrInvalidAmounts             = errors.New("deposit + remainder must equal total_amount")
-	ErrNegativeAmounts            = errors.New("amounts cannot be negative")
-	ErrMissingStops               = errors.New("board_stop_id and alight_stop_id are required")
-	ErrMissingFields              = errors.New("trip_id, seat_id and passenger.name are required")
-	ErrInitialPaymentRequired     = errors.New("initial_payment is required")
-	ErrInvalidInitialPayment      = errors.New("initial payment method or amount is invalid")
-	ErrInitialPaymentBelowMinimum = errors.New("initial_payment.amount must be at least 30% of total_amount")
+	ErrInvalidAmounts              = errors.New("deposit + remainder must equal total_amount")
+	ErrNegativeAmounts             = errors.New("amounts cannot be negative")
+	ErrMissingStops                = errors.New("board_stop_id and alight_stop_id are required")
+	ErrMissingFields               = errors.New("trip_id and at least one passenger.name are required")
+	ErrPassengerDocumentType       = errors.New("passenger document_type must be CPF, RG, CNH or CERTIDAO_NASCIMENTO")
+	ErrPassengerNameRequired       = errors.New("every passenger must include name")
+	ErrSeatRequiresSinglePassenger = errors.New("seat_id can be used only with a single passenger")
+	ErrInitialPaymentRequired      = errors.New("initial_payment is required")
+	ErrInvalidInitialPayment       = errors.New("initial payment method or amount is invalid")
+	ErrInitialPaymentBelowMinimum  = errors.New("initial_payment.amount must be at least 30% of total_amount")
 )
+
+const lapChildPassengerNote = "CRIANCA_DE_COLO_ATE_5_ANOS"
 
 type Service struct {
 	repo     *Repository
@@ -36,8 +41,20 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]BookingListIte
 }
 
 func (s *Service) Create(ctx context.Context, input CreateBookingInput) (BookingDetails, error) {
-	if input.TripID == "" || input.SeatID == "" || input.Passenger.Name == "" {
+	passengers := normalizePassengers(input.Passenger, input.Passengers)
+	if input.TripID == "" || len(passengers) == 0 {
 		return BookingDetails{}, ErrMissingFields
+	}
+	for _, passenger := range passengers {
+		if strings.TrimSpace(passenger.Name) == "" {
+			return BookingDetails{}, ErrPassengerNameRequired
+		}
+		if passenger.DocumentType != "" && !isSupportedPassengerDocumentType(passenger.DocumentType) {
+			return BookingDetails{}, ErrPassengerDocumentType
+		}
+	}
+	if strings.TrimSpace(input.SeatID) != "" && len(passengers) > 1 {
+		return BookingDetails{}, ErrSeatRequiresSinglePassenger
 	}
 	if input.BoardStopID == "" || input.AlightStopID == "" {
 		return BookingDetails{}, ErrMissingStops
@@ -62,7 +79,7 @@ func (s *Service) Create(ctx context.Context, input CreateBookingInput) (Booking
 		return BookingDetails{}, err
 	}
 
-	total := quote.FinalAmount
+	total := roundTo2(quote.FinalAmount * float64(countChargeablePassengers(passengers)))
 	deposit := input.DepositAmount
 	remainder := input.RemainderAmount
 	if deposit == 0 && remainder == 0 {
@@ -76,21 +93,24 @@ func (s *Service) Create(ctx context.Context, input CreateBookingInput) (Booking
 	}
 
 	data := CreateBookingData{
-		TripID:          input.TripID,
-		SeatID:          input.SeatID,
-		BoardStopID:     input.BoardStopID,
-		AlightStopID:    input.AlightStopID,
-		BoardStopOrder:  quote.BoardStopOrder,
-		AlightStopOrder: quote.AlightStopOrder,
-		FareMode:        quote.FareMode,
-		FareAmountCalc:  quote.CalcAmount,
-		FareAmountFinal: quote.FinalAmount,
-		FareSnapshot:    quote.Snapshot,
-		Passenger:       input.Passenger,
-		Source:          input.Source,
-		TotalAmount:     total,
-		DepositAmount:   deposit,
-		RemainderAmount: remainder,
+		TripID:            input.TripID,
+		SeatID:            input.SeatID,
+		BoardStopID:       input.BoardStopID,
+		AlightStopID:      input.AlightStopID,
+		OriginStopID:      quote.OriginStopID,
+		DestinationStopID: quote.DestinationStopID,
+		BoardStopOrder:    quote.BoardStopOrder,
+		AlightStopOrder:   quote.AlightStopOrder,
+		FareMode:          quote.FareMode,
+		FareAmountCalc:    quote.CalcAmount,
+		FareAmountFinal:   quote.FinalAmount,
+		FareSnapshot:      quote.Snapshot,
+		Passengers:        passengers,
+		IdempotencyKey:    strings.TrimSpace(input.IdempotencyKey),
+		Source:            input.Source,
+		TotalAmount:       total,
+		DepositAmount:     deposit,
+		RemainderAmount:   remainder,
 	}
 
 	return s.repo.Create(ctx, data)
@@ -127,6 +147,8 @@ func (s *Service) Checkout(ctx context.Context, input CheckoutBookingInput) (Che
 		FareMode:        input.FareMode,
 		FareAmountFinal: input.FareAmountFinal,
 		Passenger:       input.Passenger,
+		Passengers:      input.Passengers,
+		IdempotencyKey:  input.IdempotencyKey,
 		Source:          input.Source,
 		TotalAmount:     input.TotalAmount,
 		DepositAmount:   deposit,
@@ -247,4 +269,120 @@ func isCheckoutPaymentMethod(method string) bool {
 
 func roundTo2(value float64) float64 {
 	return math.Round(value*100) / 100
+}
+
+func normalizePassengers(primary PassengerInput, list []PassengerInput) []PassengerInput {
+	if len(list) > 0 {
+		passengers := make([]PassengerInput, 0, len(list))
+		for _, passenger := range list {
+			passengers = append(passengers, PassengerInput{
+				Name:         strings.TrimSpace(passenger.Name),
+				Document:     strings.TrimSpace(passenger.Document),
+				DocumentType: normalizePassengerDocumentType(passenger.DocumentType, passenger.Document),
+				Phone:        strings.TrimSpace(passenger.Phone),
+				Email:        strings.TrimSpace(passenger.Email),
+				Notes:        mergePassengerNotes(passenger.Notes, passenger.IsLapChild),
+				IsLapChild:   passenger.IsLapChild,
+			})
+		}
+		return passengers
+	}
+	if !hasPassengerPayload(primary) {
+		return nil
+	}
+	return []PassengerInput{{
+		Name:         strings.TrimSpace(primary.Name),
+		Document:     strings.TrimSpace(primary.Document),
+		DocumentType: normalizePassengerDocumentType(primary.DocumentType, primary.Document),
+		Phone:        strings.TrimSpace(primary.Phone),
+		Email:        strings.TrimSpace(primary.Email),
+		Notes:        mergePassengerNotes(primary.Notes, primary.IsLapChild),
+		IsLapChild:   primary.IsLapChild,
+	}}
+}
+
+func hasPassengerPayload(passenger PassengerInput) bool {
+	return strings.TrimSpace(passenger.Name) != "" ||
+		strings.TrimSpace(passenger.Document) != "" ||
+		strings.TrimSpace(passenger.DocumentType) != "" ||
+		strings.TrimSpace(passenger.Phone) != "" ||
+		strings.TrimSpace(passenger.Email) != "" ||
+		passenger.IsLapChild
+}
+
+func countChargeablePassengers(passengers []PassengerInput) int {
+	count := 0
+	for _, passenger := range passengers {
+		if passenger.IsLapChild {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func mergePassengerNotes(notes string, isLapChild bool) string {
+	notes = strings.TrimSpace(notes)
+	if !isLapChild {
+		return notes
+	}
+	if notes == "" {
+		return lapChildPassengerNote
+	}
+	if strings.Contains(strings.ToUpper(notes), lapChildPassengerNote) {
+		return notes
+	}
+	return notes + " | " + lapChildPassengerNote
+}
+
+func isLapChildNotes(notes string) bool {
+	return strings.Contains(strings.ToUpper(strings.TrimSpace(notes)), lapChildPassengerNote)
+}
+
+func normalizePassengerDocumentType(documentType, document string) string {
+	normalizedType := canonicalPassengerDocumentType(documentType)
+	if normalizedType != "" {
+		return normalizedType
+	}
+
+	trimmedDocument := strings.TrimSpace(document)
+	if trimmedDocument == "" {
+		return ""
+	}
+	if isCPFDocument(trimmedDocument) {
+		return "CPF"
+	}
+	return "RG"
+}
+
+func isSupportedPassengerDocumentType(documentType string) bool {
+	return canonicalPassengerDocumentType(documentType) != ""
+}
+
+func canonicalPassengerDocumentType(documentType string) string {
+	normalized := strings.ToUpper(strings.TrimSpace(documentType))
+	normalized = strings.NewReplacer(" ", "_", "-", "_").Replace(normalized)
+
+	switch normalized {
+	case "CPF", "RG", "CNH":
+		return normalized
+	case "CERTIDAO", "CERTIDAO_NASCIMENTO", "CERTIDAO_DE_NASCIMENTO", "MATRICULA", "MATRICULA_CERTIDAO":
+		return "CERTIDAO_NASCIMENTO"
+	default:
+		return ""
+	}
+}
+
+func isCPFDocument(document string) bool {
+	digits := 0
+	for _, r := range strings.TrimSpace(document) {
+		if r < '0' || r > '9' {
+			if r == '.' || r == '-' || r == '/' || r == ' ' {
+				continue
+			}
+			return false
+		}
+		digits++
+	}
+	return digits == 11
 }
