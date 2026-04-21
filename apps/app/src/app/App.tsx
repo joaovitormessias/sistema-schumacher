@@ -5,6 +5,7 @@ import Layout from "./Layout";
 
 const Dashboard = lazy(() => import("../pages/Dashboard"));
 const Trips = lazy(() => import("../pages/Trips"));
+const TripDetailsPage = lazy(() => import("../pages/Trips/TripDetailsPage"));
 const RoutesPage = lazy(() => import("../pages/Routes"));
 const Bookings = lazy(() => import("../pages/Bookings"));
 const TripOperations = lazy(() => import("../pages/TripOperations"));
@@ -15,6 +16,8 @@ const Reports = lazy(() => import("../pages/Reports"));
 const Pricing = lazy(() => import("../pages/Pricing"));
 const Financial = lazy(() => import("../pages/Financial"));
 const Warehouse = lazy(() => import("../pages/Warehouse"));
+const Saldo = lazy(() => import("../pages/Saldo"));
+const Users = lazy(() => import("../pages/Users"));
 
 export default function App() {
   const legacyMode = (import.meta.env.VITE_LEGACY_MODE ?? "false").toLowerCase() === "true";
@@ -32,8 +35,11 @@ export default function App() {
           <Route path="/" element={<Navigate to="/bookings" replace />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/trips" element={<Trips />} />
+          <Route path="/trips/:tripId" element={<TripDetailsPage />} />
           <Route path="/routes" element={<RoutesPage />} />
           <Route path="/bookings" element={<Bookings />} />
+          <Route path="/saldo" element={<Saldo />} />
+          <Route path="/users" element={<Users />} />
           {legacyMode ? (
             <>
               <Route path="/trips/:tripId/operations" element={<TripOperations />} />

@@ -2,7 +2,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { useBookings } from "../../../hooks/useBookings";
+import { useBookingDetail, useBookings } from "../../../hooks/useBookings";
 import { useRoutes } from "../../../hooks/useRoutes";
 import { useTrips } from "../../../hooks/useTrips";
 import { apiGet, apiPost } from "../../../services/api";
@@ -18,6 +18,7 @@ vi.mock("../../../hooks/useRoutes", () => ({
 }));
 
 vi.mock("../../../hooks/useBookings", () => ({
+  useBookingDetail: vi.fn(),
   useBookings: vi.fn(),
 }));
 
@@ -109,6 +110,12 @@ describe("Bookings shortcuts", () => {
         error: null,
       } as any;
     });
+
+    vi.mocked(useBookingDetail).mockReturnValue({
+      data: null,
+      isLoading: false,
+      error: null,
+    } as any);
 
     vi.mocked(apiGet).mockImplementation(async (path: string) => {
       if (path.startsWith("/trips/trip-1/stops")) {

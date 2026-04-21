@@ -16,6 +16,43 @@ export type BookingItem = {
   remainder_amount: number;
 };
 
+export type BookingPassenger = {
+  id: string;
+  booking_id: string;
+  trip_id: string;
+  name: string;
+  document: string;
+  document_type: string;
+  phone: string;
+  email: string;
+  notes: string;
+  is_lap_child: boolean;
+  seat_id: string;
+  board_stop_id: string;
+  alight_stop_id: string;
+  board_stop_order: number;
+  alight_stop_order: number;
+  fare_mode: string;
+  fare_amount_calc: number;
+  fare_amount_final: number;
+  status: string;
+  created_at: string;
+};
+
+export type BookingDetail = {
+  booking: BookingItem;
+  passenger: BookingPassenger;
+  passengers: BookingPassenger[];
+};
+
+export function useBookingDetail(bookingId: string | null) {
+  return useQuery({
+    queryKey: ["booking", bookingId],
+    queryFn: () => apiGet<BookingDetail>(`/bookings/${bookingId}`),
+    enabled: !!bookingId,
+  });
+}
+
 type UseBookingsOptions = {
   search?: string;
   status?: string;

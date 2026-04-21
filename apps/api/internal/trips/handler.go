@@ -18,17 +18,16 @@ type Handler struct {
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
-	r.Route("/trips", func(r chi.Router) {
-		r.Get("/", h.list)
-		r.Post("/", h.create)
-		r.Patch("/{tripId}", h.update)
-		r.Get("/{tripId}", h.get)
-		r.Get("/{tripId}/seats", h.listSeats)
-		r.Get("/{tripId}/stops", h.listStops)
-		r.Get("/{tripId}/segment-prices", h.listSegmentPrices)
-		r.Put("/{tripId}/segment-prices", h.upsertSegmentPrices)
-		r.Post("/{tripId}/stops", h.createStop)
-	})
+	r.Get("/trips", h.list)
+	r.Post("/trips", h.create)
+	r.Patch("/trips/{tripId}", h.update)
+	r.Get("/trips/{tripId}", h.get)
+	r.Get("/trips/{tripId}/details", h.getDetails)
+	r.Get("/trips/{tripId}/seats", h.listSeats)
+	r.Get("/trips/{tripId}/stops", h.listStops)
+	r.Get("/trips/{tripId}/segment-prices", h.listSegmentPrices)
+	r.Put("/trips/{tripId}/segment-prices", h.upsertSegmentPrices)
+	r.Post("/trips/{tripId}/stops", h.createStop)
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
@@ -63,19 +62,49 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, item)
 }
 
+func (h *Handler) getDetails(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(chi.URLParam(r, "tripId"))
+	if id == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid trip id", nil)
+		return
+	}
+	item, err := h.svc.GetDetails(r.Context(), id)
+	if err != nil {
+		if IsNotFound(err) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "trip not found", nil)
+			return
+		}
+		httpx.WriteError(w, http.StatusInternalServerError, "TRIP_DETAILS_ERROR", "could not get trip details", err.Error())
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	var input CreateTripInput
 	if err := httpx.DecodeJSON(r, &input); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
 		return
 	}
-	if input.RouteID == "" || input.BusID == "" || input.DepartureAt.IsZero() {
-		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "route_id, bus_id and departure_at are required", nil)
+	if input.RouteID == "" || input.BusID == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "route_id and bus_id are required", nil)
+		return
+	}
+	if input.DepartureAt.IsZero() && len(input.Stops) == 0 {
+		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "departure_at is required when stops are not provided", nil)
 		return
 	}
 	if input.EstimatedKM != nil && *input.EstimatedKM < 0 {
 		httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "estimated_km must be >= 0", nil)
 		return
+	}
+	for index, stop := range input.Stops {
+		if strings.TrimSpace(stop.RouteStopID) == "" {
+			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", "each stop requires route_stop_id", map[string]any{
+				"index": index,
+			})
+			return
+		}
 	}
 
 	item, err := h.svc.Create(r.Context(), input)

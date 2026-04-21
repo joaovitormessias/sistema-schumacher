@@ -14,6 +14,8 @@ type DataTableProps<T> = {
   rows: T[];
   rowKey: (item: T) => string;
   actions?: (item: T) => ReactNode;
+  onRowClick?: (item: T) => void;
+  selectedRowKey?: string;
   density?: "comfortable" | "compact";
   emptyState?: ReactNode;
   className?: string;
@@ -24,6 +26,8 @@ export default function DataTable<T>({
   rows,
   rowKey,
   actions,
+  onRowClick,
+  selectedRowKey,
   density = "comfortable",
   emptyState,
   className,
@@ -50,7 +54,12 @@ export default function DataTable<T>({
         {actions ? <div className="data-table-cell">Ações</div> : null}
       </div>
       {rows.map((item) => (
-        <div className="data-table-row" key={rowKey(item)}>
+        <div
+          className={`data-table-row${onRowClick ? " clickable" : ""}${selectedRowKey === rowKey(item) ? " selected" : ""}`}
+          key={rowKey(item)}
+          onClick={onRowClick ? () => onRowClick(item) : undefined}
+          style={onRowClick ? { cursor: "pointer" } : undefined}
+        >
           {columns.map((column) => {
             const content = column.render?.(item) ?? column.accessor?.(item) ?? "-";
             const justify =
