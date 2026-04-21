@@ -303,10 +303,14 @@ func (r *Repository) ListStops(ctx context.Context, tripID string) ([]TripStop, 
       0::numeric as leg_distance_km,
       0::numeric as cumulative_distance_km,
       null::timestamp as arrive_at,
-      (ts.depart_time::timestamp) as depart_at,
+      case
+        when ts.depart_time is null then null::timestamp
+        else (t.trip_date::timestamp + ts.depart_time)
+      end as depart_at,
       ts.created_at,
       ts.created_at as updated_at
     from trip_stops ts
+    join trips t on t.trip_id = ts.trip_id
     join stops s on s.stop_id = ts.stop_id
     where ts.trip_id = $1
       and ts.is_active = true
@@ -785,8 +789,12 @@ func (r *Repository) listRouteTemplateStopsTx(ctx context.Context, tx pgx.Tx, ro
       ts.trip_stop_id,
       ts.stop_id,
       ts.stop_sequence,
-      (ts.depart_time::timestamp) as depart_at
+      case
+        when ts.depart_time is null then null::timestamp
+        else (t.trip_date::timestamp + ts.depart_time)
+      end as depart_at
     from source_trip st
+    join trips t on t.trip_id = st.trip_id
     join trip_stops ts on ts.trip_id = st.trip_id
     where ts.is_active = true
     order by ts.stop_sequence asc
