@@ -1,4 +1,5 @@
 name: Publish API to GHCR
+# Operational note: keep a tracked diff available when a manual rerun via push is needed.
 
 on:
   push:
