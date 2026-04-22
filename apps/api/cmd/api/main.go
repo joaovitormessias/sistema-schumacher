@@ -15,9 +15,11 @@ import (
 	"schumacher-tur/api/internal/advance_returns"
 	"schumacher-tur/api/internal/affiliate"
 	"schumacher-tur/api/internal/auth"
+	"schumacher-tur/api/internal/automation"
 	"schumacher-tur/api/internal/availability"
 	"schumacher-tur/api/internal/bookings"
 	"schumacher-tur/api/internal/buses"
+	"schumacher-tur/api/internal/chat"
 	"schumacher-tur/api/internal/driver_cards"
 	"schumacher-tur/api/internal/drivers"
 	"schumacher-tur/api/internal/fiscal_documents"
@@ -84,12 +86,26 @@ func main() {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
-	paymentsSvc := payments.NewService(payments.NewRepository(pool), cfg)
+	paymentsRepo := payments.NewRepository(pool)
+	paymentsSvc := payments.NewService(paymentsRepo, cfg)
 	paymentsHandler := payments.NewHandler(paymentsSvc, cfg.PagarmeSecretKey)
 	paymentsHandler.RegisterWebhooks(r)
 	affiliateSvc := affiliate.NewService(affiliate.NewRepository(pool), cfg)
 	affiliateHandler := affiliate.NewHandler(affiliateSvc)
 	affiliateHandler.RegisterWebhooks(r)
+	availabilitySvc := availability.NewService(availability.NewRepository(pool))
+	pricingSvc := pricing.NewService(pricing.NewRepository(pool))
+	bookingsSvc := bookings.NewService(bookings.NewRepository(pool), pricingSvc, paymentsSvc)
+	evolutionSender := automation.NewEvolutionSender(cfg)
+	openAIRunner := chat.NewOpenAIRunner(cfg)
+	availabilityTool := chat.NewAvailabilityTool(availabilitySvc)
+	pricingQuoteTool := chat.NewPricingQuoteTool(pricingSvc)
+	bookingLookupTool := chat.NewBookingLookupTool(bookingsSvc)
+	paymentStatusTool := chat.NewPaymentStatusTool(paymentsSvc)
+	chatSvc := chat.NewService(chat.NewRepository(pool), cfg, evolutionSender, openAIRunner, availabilityTool, pricingQuoteTool, bookingLookupTool, paymentStatusTool)
+	chatHandler := chat.NewHandler(chatSvc)
+	automationHandler := automation.NewHandler(automation.NewService(automation.NewRepository(pool), chatSvc, cfg, paymentsRepo, bookingsSvc))
+	automationHandler.RegisterWebhooks(r)
 
 	r.Group(func(pr chi.Router) {
 		pr.Use(authMiddleware.Middleware)
@@ -99,9 +115,8 @@ func main() {
 		driversHandler := drivers.NewHandler(drivers.NewService(drivers.NewRepository(pool)))
 		tripsHandler := trips.NewHandler(trips.NewService(trips.NewRepository(pool)))
 		tripOperationsHandler := trip_operations.NewHandler(trip_operations.NewService(trip_operations.NewRepository(pool)))
-		availabilityHandler := availability.NewHandler(availability.NewService(availability.NewRepository(pool)))
-		pricingSvc := pricing.NewService(pricing.NewRepository(pool))
-		bookingsHandler := bookings.NewHandler(bookings.NewService(bookings.NewRepository(pool), pricingSvc, paymentsSvc))
+		availabilityHandler := availability.NewHandler(availabilitySvc)
+		bookingsHandler := bookings.NewHandler(bookingsSvc)
 		reportsHandler := reports.NewHandler(reports.NewService(reports.NewRepository(pool)))
 		pricingHandler := pricing.NewHandler(pricingSvc)
 
@@ -114,6 +129,8 @@ func main() {
 		bookingsHandler.RegisterRoutes(pr)
 		paymentsHandler.RegisterRoutes(pr)
 		affiliateHandler.RegisterRoutes(pr)
+		chatHandler.RegisterRoutes(pr)
+		automationHandler.RegisterRoutes(pr)
 		reportsHandler.RegisterRoutes(pr)
 		pricingHandler.RegisterRoutes(pr)
 

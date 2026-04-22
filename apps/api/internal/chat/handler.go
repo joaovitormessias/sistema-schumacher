@@ -1,0 +1,348 @@
+package chat
+
+import (
+	"errors"
+	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
+
+	httpx "schumacher-tur/api/internal/shared/http"
+)
+
+type Handler struct {
+	svc *Service
+}
+
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+func (h *Handler) RegisterRoutes(r chi.Router) {
+	r.Route("/chat", func(r chi.Router) {
+		r.Post("/messages/ingest", h.ingestMessage)
+		r.Get("/sessions", h.listSessions)
+		r.Get("/sessions/summary", h.getSessionsSummary)
+		r.Route("/sessions/{sessionId}", func(r chi.Router) {
+			r.Get("/", h.getSession)
+			r.Get("/draft", h.getCurrentDraft)
+			r.Get("/messages", h.listMessages)
+			r.Post("/handoff", h.requestHandoff)
+			r.Post("/resume", h.resumeSession)
+			r.Post("/reply", h.reply)
+			r.Post("/reprocess", h.reprocess)
+		})
+	})
+}
+
+func (h *Handler) ingestMessage(w http.ResponseWriter, r *http.Request) {
+	var input IngestMessageInput
+	if err := httpx.DecodeJSON(r, &input); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
+		return
+	}
+
+	result, err := h.svc.Ingest(r.Context(), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrContactKeyRequired), errors.Is(err, ErrDirectionRequired), errors.Is(err, ErrInvalidDirection):
+			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_INGEST_ERROR", "could not ingest chat message", err.Error())
+		}
+		return
+	}
+
+	status := http.StatusCreated
+	if result.Idempotent {
+		status = http.StatusOK
+	}
+	httpx.WriteJSON(w, status, result)
+}
+
+func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request) {
+	filter, err := parseListSessionsFilter(r)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_PAGINATION", "invalid query parameters", nil)
+		return
+	}
+
+	items, err := h.svc.ListSessions(r.Context(), filter)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "CHAT_LIST_ERROR", "could not list chat sessions", err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, items)
+}
+
+func (h *Handler) getSessionsSummary(w http.ResponseWriter, r *http.Request) {
+	filter, err := parseListSessionsFilter(r)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_PAGINATION", "invalid query parameters", nil)
+		return
+	}
+
+	item, err := h.svc.GetSessionsSummary(r.Context(), filter)
+	if err != nil {
+		httpx.WriteError(w, http.StatusInternalServerError, "CHAT_SUMMARY_ERROR", "could not summarize chat sessions", err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) getSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	item, err := h.svc.GetSession(r.Context(), sessionID.String())
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+			return
+		}
+		httpx.WriteError(w, http.StatusInternalServerError, "CHAT_GET_ERROR", "could not load chat session", err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) getCurrentDraft(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	item, err := h.svc.GetCurrentDraft(r.Context(), sessionID.String())
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+		case errors.Is(err, ErrDraftNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "DRAFT_NOT_FOUND", "chat session has no automation draft", nil)
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_DRAFT_GET_ERROR", "could not load current draft", err.Error())
+		}
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	filter, err := parseListMessagesFilter(r)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_PAGINATION", "invalid query parameters", nil)
+		return
+	}
+
+	items, err := h.svc.ListMessages(r.Context(), sessionID.String(), filter)
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+			return
+		}
+		httpx.WriteError(w, http.StatusInternalServerError, "CHAT_MESSAGES_LIST_ERROR", "could not list chat messages", err.Error())
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, items)
+}
+
+func (h *Handler) requestHandoff(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	var input RequestHandoffInput
+	if err := httpx.DecodeJSON(r, &input); err != nil && !errors.Is(err, http.ErrBodyNotAllowed) {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
+		return
+	}
+	input.SessionID = sessionID.String()
+
+	result, err := h.svc.RequestHandoff(r.Context(), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+		case errors.Is(err, ErrInvalidAssignedUser):
+			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+		case errors.Is(err, ErrHandoffAlreadyActive):
+			httpx.WriteError(w, http.StatusConflict, "HANDOFF_ALREADY_ACTIVE", err.Error(), nil)
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_HANDOFF_ERROR", "could not request handoff", err.Error())
+		}
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusCreated, result)
+}
+
+func (h *Handler) resumeSession(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	var input ResumeSessionInput
+	if err := httpx.DecodeJSON(r, &input); err != nil && !errors.Is(err, http.ErrBodyNotAllowed) {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
+		return
+	}
+	input.SessionID = sessionID.String()
+
+	result, err := h.svc.ResumeSession(r.Context(), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+		case errors.Is(err, ErrNoActiveHandoff):
+			httpx.WriteError(w, http.StatusConflict, "NO_ACTIVE_HANDOFF", err.Error(), nil)
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_RESUME_ERROR", "could not resume chat session", err.Error())
+		}
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, result)
+}
+
+func (h *Handler) reply(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	var input ReplyInput
+	if err := httpx.DecodeJSON(r, &input); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
+		return
+	}
+	input.SessionID = sessionID.String()
+
+	result, err := h.svc.Reply(r.Context(), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+		case errors.Is(err, ErrReplyBodyRequired), errors.Is(err, ErrReplyOwnerRequired), errors.Is(err, ErrInvalidReplyOwner), errors.Is(err, ErrInvalidReplyDraft):
+			httpx.WriteError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+		case errors.Is(err, ErrReplyRequiresHuman), errors.Is(err, ErrReplyOwnerMismatch), errors.Is(err, ErrReplyDraftNotAllowed):
+			httpx.WriteError(w, http.StatusConflict, "REPLY_NOT_ALLOWED", err.Error(), nil)
+		case errors.Is(err, ErrReplyDeliveryFailed):
+			httpx.WriteError(w, http.StatusBadGateway, "CHAT_REPLY_DELIVERY_ERROR", "could not deliver assisted reply", err.Error())
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_REPLY_ERROR", "could not create assisted reply", err.Error())
+		}
+		return
+	}
+
+	status := http.StatusCreated
+	if result.Idempotent {
+		status = http.StatusOK
+	}
+	httpx.WriteJSON(w, status, result)
+}
+
+func (h *Handler) reprocess(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	var input ReprocessInput
+	if err := httpx.DecodeJSON(r, &input); err != nil && !errors.Is(err, http.ErrBodyNotAllowed) {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
+		return
+	}
+	input.SessionID = sessionID.String()
+
+	result, err := h.svc.Reprocess(r.Context(), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+		case errors.Is(err, ErrReprocessRequiresBot), errors.Is(err, ErrReprocessNoMessages):
+			httpx.WriteError(w, http.StatusConflict, "REPROCESS_NOT_ALLOWED", err.Error(), nil)
+		case errors.Is(err, ErrAgentToolFailed):
+			httpx.WriteError(w, http.StatusBadGateway, "CHAT_AGENT_TOOL_ERROR", "could not resolve agent tool context", err.Error())
+		case errors.Is(err, ErrAgentRunFailed):
+			httpx.WriteError(w, http.StatusBadGateway, "CHAT_AGENT_RUN_ERROR", "could not generate agent draft", err.Error())
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_REPROCESS_ERROR", "could not reprocess chat session", err.Error())
+		}
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, result)
+}
+
+func parseListSessionsFilter(r *http.Request) (ListSessionsFilter, error) {
+	filter := ListSessionsFilter{
+		Channel:           r.URL.Query().Get("channel"),
+		Status:            r.URL.Query().Get("status"),
+		HandoffStatus:     r.URL.Query().Get("handoff_status"),
+		ContactKey:        r.URL.Query().Get("contact_key"),
+		AgentStatus:       r.URL.Query().Get("agent_status"),
+		DraftReviewStatus: r.URL.Query().Get("draft_review_status"),
+		OrderBy:           r.URL.Query().Get("order_by"),
+	}
+
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		value, err := strconv.Atoi(limit)
+		if err != nil {
+			return ListSessionsFilter{}, err
+		}
+		filter.Limit = value
+	}
+
+	if offset := r.URL.Query().Get("offset"); offset != "" {
+		value, err := strconv.Atoi(offset)
+		if err != nil {
+			return ListSessionsFilter{}, err
+		}
+		filter.Offset = value
+	}
+
+	return filter, nil
+}
+
+func parseListMessagesFilter(r *http.Request) (ListMessagesFilter, error) {
+	filter := ListMessagesFilter{}
+
+	if limit := r.URL.Query().Get("limit"); limit != "" {
+		value, err := strconv.Atoi(limit)
+		if err != nil {
+			return ListMessagesFilter{}, err
+		}
+		filter.Limit = value
+	}
+
+	if offset := r.URL.Query().Get("offset"); offset != "" {
+		value, err := strconv.Atoi(offset)
+		if err != nil {
+			return ListMessagesFilter{}, err
+		}
+		filter.Offset = value
+	}
+
+	return filter, nil
+}

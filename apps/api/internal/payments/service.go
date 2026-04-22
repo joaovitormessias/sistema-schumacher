@@ -6,11 +6,10 @@ import (
 	"errors"
 	"log"
 	"math"
+	"schumacher-tur/api/internal/shared/config"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
-	"schumacher-tur/api/internal/shared/config"
 )
 
 type Service struct {
@@ -307,7 +306,8 @@ func isPaidOrderStatus(order OrderResponse) bool {
 }
 
 func (s *Service) notifyPaymentConfirmed(ctx context.Context, payment Payment) {
-	if s == nil || s.notifier == nil || payment.BookingID == "" {
+	_ = ctx
+	if s == nil || payment.BookingID == "" {
 		return
 	}
 
@@ -321,25 +321,5 @@ func (s *Service) notifyPaymentConfirmed(ctx context.Context, payment Payment) {
 		return
 	}
 
-	payload := PaymentNotificationPayload{
-		Event:           "payment.confirmed",
-		SentAt:          time.Now().UTC(),
-		PaymentID:       payment.ID,
-		PaymentAmount:   payment.Amount,
-		PaymentMethod:   payment.Method,
-		BookingID:       notification.BookingID,
-		ReservationCode: notification.ReservationCode,
-		CustomerName:    notification.CustomerName,
-		CustomerPhone:   notification.CustomerPhone,
-		AmountTotal:     notification.AmountTotal,
-		AmountPaid:      notification.AmountPaid,
-		AmountDue:       notification.AmountDue,
-		PaymentStatus:   notification.PaymentStatus,
-	}
-
-	if err := s.notifier.NotifyPaymentConfirmed(ctx, payload); err != nil {
-		log.Printf("event=payment_notification_failed booking_id=%s reservation_code=%s payment_id=%s error=%v", notification.BookingID, notification.ReservationCode, payment.ID, err)
-		return
-	}
-	log.Printf("event=payment_notification_sent booking_id=%s reservation_code=%s payment_id=%s payment_status=%s amount_due=%.2f", notification.BookingID, notification.ReservationCode, payment.ID, notification.PaymentStatus, notification.AmountDue)
+	log.Printf("event=payment_notification_pending_automation_job booking_id=%s reservation_code=%s payment_id=%s payment_status=%s amount_due=%.2f customer_phone=%s", notification.BookingID, notification.ReservationCode, payment.ID, notification.PaymentStatus, notification.AmountDue, notification.CustomerPhone)
 }

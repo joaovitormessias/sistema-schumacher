@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -34,6 +35,20 @@ type Config struct {
 	// TODO(abacatepay-domain): Use hosted frontend URLs (not localhost) in production.
 	AbacatePayCompletionURL       string
 	PaymentNotificationWebhookURL string
+	ChatReviewAlertWebhookURL     string
+	OpenAIAPIKey                  string
+	OpenAIModel                   string
+	OpenAIVisionModel             string
+	OpenAITranscriptionModel      string
+	EvolutionBaseURL              string
+	EvolutionAPIKey               string
+	EvolutionInstance             string
+	EvolutionWebhookSecret        string
+	ChatDebounceWindowMS          int
+	ChatReviewSLAMinutes          int
+	ChatDefaultHandoffMode        string
+	GoogleSheetsSpreadsheetID     string
+	GoogleServiceAccountJSON      string
 }
 
 func Load() (Config, error) {
@@ -63,6 +78,20 @@ func Load() (Config, error) {
 		AbacatePayReturnURL:           os.Getenv("ABACATEPAY_RETURN_URL"),
 		AbacatePayCompletionURL:       os.Getenv("ABACATEPAY_COMPLETION_URL"),
 		PaymentNotificationWebhookURL: strings.TrimSpace(os.Getenv("PAYMENT_NOTIFICATION_WEBHOOK_URL")),
+		ChatReviewAlertWebhookURL:     strings.TrimSpace(os.Getenv("CHAT_REVIEW_ALERT_WEBHOOK_URL")),
+		OpenAIAPIKey:                  strings.TrimSpace(os.Getenv("OPENAI_API_KEY")),
+		OpenAIModel:                   strings.TrimSpace(os.Getenv("OPENAI_MODEL")),
+		OpenAIVisionModel:             strings.TrimSpace(os.Getenv("OPENAI_VISION_MODEL")),
+		OpenAITranscriptionModel:      strings.TrimSpace(os.Getenv("OPENAI_TRANSCRIPTION_MODEL")),
+		EvolutionBaseURL:              strings.TrimSpace(os.Getenv("EVOLUTION_BASE_URL")),
+		EvolutionAPIKey:               strings.TrimSpace(os.Getenv("EVOLUTION_API_KEY")),
+		EvolutionInstance:             strings.TrimSpace(os.Getenv("EVOLUTION_INSTANCE")),
+		EvolutionWebhookSecret:        strings.TrimSpace(os.Getenv("EVOLUTION_WEBHOOK_SECRET")),
+		ChatDebounceWindowMS:          getEnvAsInt("CHAT_DEBOUNCE_WINDOW_MS", 1500),
+		ChatReviewSLAMinutes:          getEnvAsInt("CHAT_REVIEW_SLA_MINUTES", 15),
+		ChatDefaultHandoffMode:        getEnv("CHAT_DEFAULT_HANDOFF_MODE", "BOT"),
+		GoogleSheetsSpreadsheetID:     strings.TrimSpace(os.Getenv("GOOGLE_SHEETS_SPREADSHEET_ID")),
+		GoogleServiceAccountJSON:      strings.TrimSpace(os.Getenv("GOOGLE_SERVICE_ACCOUNT_JSON")),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -108,4 +137,17 @@ func splitCSV(val string) []string {
 		return nil
 	}
 	return out
+}
+
+func getEnvAsInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
