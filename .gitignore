@@ -28,3 +28,9 @@ dist-ssr
 .turbo
 backup-*
 nul
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env*.example
