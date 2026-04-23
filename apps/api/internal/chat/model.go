@@ -34,6 +34,8 @@ type Session struct {
 	DraftPendingAgeSeconds  int                    `json:"draft_pending_age_seconds,omitempty"`
 	DraftPendingAgeBucket   string                 `json:"draft_pending_age_bucket,omitempty"`
 	DraftReviewPriority     string                 `json:"draft_review_priority,omitempty"`
+	DraftAutoSendStatus     string                 `json:"draft_auto_send_status,omitempty"`
+	DraftAutoSendReasons    []string               `json:"draft_auto_send_reasons,omitempty"`
 	DraftReviewAlertActive  bool                   `json:"draft_review_alert_active,omitempty"`
 	DraftReviewAlertLevel   string                 `json:"draft_review_alert_level,omitempty"`
 	DraftReviewAlertCode    string                 `json:"draft_review_alert_code,omitempty"`
@@ -138,16 +140,17 @@ type QueueAutomationDraftResult struct {
 }
 
 type ListSessionsFilter struct {
-	Limit             int
-	Offset            int
-	Channel           string
-	Status            string
-	HandoffStatus     string
-	ContactKey        string
-	AgentStatus       string
-	DraftReviewStatus string
-	OrderBy           string
-	ReviewSLASeconds  int
+	Limit               int
+	Offset              int
+	Channel             string
+	Status              string
+	HandoffStatus       string
+	ContactKey          string
+	AgentStatus         string
+	DraftReviewStatus   string
+	DraftAutoSendStatus string
+	OrderBy             string
+	ReviewSLASeconds    int
 }
 
 type SessionsSummary struct {
@@ -163,6 +166,9 @@ type SessionsSummary struct {
 	MediumPriorityReviewCount int    `json:"medium_priority_review_count"`
 	LowPriorityReviewCount    int    `json:"low_priority_review_count"`
 	OldestPendingAgeSeconds   int    `json:"oldest_pending_age_seconds"`
+	AutoSendRetryPendingCount int    `json:"auto_send_retry_pending_count"`
+	AutoSendBlockedHumanCount int    `json:"auto_send_blocked_human_count"`
+	AutoSendIssueCount        int    `json:"auto_send_issue_count"`
 	ReviewSLASeconds          int    `json:"review_sla_seconds"`
 	HasReviewAlert            bool   `json:"has_review_alert"`
 	ReviewAlertLevel          string `json:"review_alert_level,omitempty"`
@@ -259,6 +265,23 @@ type ReplyInput struct {
 	Metadata       map[string]interface{} `json:"metadata"`
 }
 
+type CreateAutomationReplyInput struct {
+	SessionID      string
+	DraftMessageID string
+	IdempotencyKey string
+	SenderName     string
+	Metadata       map[string]interface{}
+}
+
+type UpdateDraftAutoSendStateInput struct {
+	SessionID       string
+	DraftMessageID  string
+	AutoSendStatus  string
+	AutoSendReasons []string
+	Payload         map[string]interface{}
+	Agent           map[string]interface{}
+}
+
 type ReplyResult struct {
 	Session    Session       `json:"session"`
 	Message    Message       `json:"message"`
@@ -284,25 +307,56 @@ type ReprocessResult struct {
 	Idempotent bool                   `json:"idempotent,omitempty"`
 }
 
+type RetryDraftAutoSendInput struct {
+	SessionID   string                 `json:"-"`
+	RequestedBy string                 `json:"requested_by"`
+	Reason      string                 `json:"reason"`
+	Metadata    map[string]interface{} `json:"metadata"`
+}
+
+type RetryDraftAutoSendResult struct {
+	Session    Session        `json:"session"`
+	Status     string         `json:"status"`
+	Reason     string         `json:"reason,omitempty"`
+	Draft      *Message       `json:"draft,omitempty"`
+	Message    *Message       `json:"message,omitempty"`
+	Outbound   *ReplyOutbound `json:"outbound,omitempty"`
+	Idempotent bool           `json:"idempotent,omitempty"`
+}
+
 type CurrentDraftResult struct {
-	Session               Session                  `json:"session"`
-	Draft                 Message                  `json:"draft"`
-	LinkedReply           *Message                 `json:"linked_reply,omitempty"`
-	DraftStatus           string                   `json:"draft_status"`
-	AgentStatus           string                   `json:"agent_status,omitempty"`
-	DraftIdempotencyKey   string                   `json:"draft_idempotency_key,omitempty"`
-	GeneratedAt           *time.Time               `json:"generated_at,omitempty"`
-	ReviewedAt            *time.Time               `json:"reviewed_at,omitempty"`
-	ReviewedByUserID      string                   `json:"reviewed_by_user_id,omitempty"`
-	ReviewMode            string                   `json:"review_mode,omitempty"`
-	ReviewAction          string                   `json:"review_action,omitempty"`
-	Model                 string                   `json:"model,omitempty"`
-	ProviderResponseID    string                   `json:"provider_response_id,omitempty"`
-	CurrentTurnMessageIDs []string                 `json:"current_turn_message_ids,omitempty"`
-	ToolNames             []string                 `json:"tool_names,omitempty"`
-	ToolCallCount         int                      `json:"tool_call_count,omitempty"`
-	ToolCalls             []map[string]interface{} `json:"tool_calls,omitempty"`
-	ToolContext           map[string]interface{}   `json:"tool_context,omitempty"`
+	Session                    Session                  `json:"session"`
+	Draft                      Message                  `json:"draft"`
+	LinkedReply                *Message                 `json:"linked_reply,omitempty"`
+	DraftStatus                string                   `json:"draft_status"`
+	AgentStatus                string                   `json:"agent_status,omitempty"`
+	DraftIdempotencyKey        string                   `json:"draft_idempotency_key,omitempty"`
+	GeneratedAt                *time.Time               `json:"generated_at,omitempty"`
+	ReviewedAt                 *time.Time               `json:"reviewed_at,omitempty"`
+	ReviewedByUserID           string                   `json:"reviewed_by_user_id,omitempty"`
+	ReviewMode                 string                   `json:"review_mode,omitempty"`
+	ReviewAction               string                   `json:"review_action,omitempty"`
+	Model                      string                   `json:"model,omitempty"`
+	ProviderResponseID         string                   `json:"provider_response_id,omitempty"`
+	AutoSendStatus             string                   `json:"auto_send_status,omitempty"`
+	AutoSendReasons            []string                 `json:"auto_send_reasons,omitempty"`
+	AutoSendIssueActive        bool                     `json:"auto_send_issue_active,omitempty"`
+	AutoSendLastAttemptAt      *time.Time               `json:"auto_send_last_attempt_at,omitempty"`
+	AutoSendRetryAt            *time.Time               `json:"auto_send_retry_at,omitempty"`
+	AutoSendRetryRequestedAt   *time.Time               `json:"auto_send_retry_requested_at,omitempty"`
+	AutoSendRetryRequestedBy   string                   `json:"auto_send_retry_requested_by,omitempty"`
+	AutoSendRetryRequestCount  int                      `json:"auto_send_retry_request_count,omitempty"`
+	AutoSendRetryRequestReason string                   `json:"auto_send_retry_request_reason,omitempty"`
+	AutoSendBlockedAt          *time.Time               `json:"auto_send_blocked_at,omitempty"`
+	AutoSendLastErrorText      string                   `json:"auto_send_last_error_text,omitempty"`
+	AutoSendBlockReason        string                   `json:"auto_send_block_reason,omitempty"`
+	AutoSendLastReplyID        string                   `json:"auto_send_last_reply_message_id,omitempty"`
+	AutoSendLastOutboundID     string                   `json:"auto_send_last_outbound_id,omitempty"`
+	CurrentTurnMessageIDs      []string                 `json:"current_turn_message_ids,omitempty"`
+	ToolNames                  []string                 `json:"tool_names,omitempty"`
+	ToolCallCount              int                      `json:"tool_call_count,omitempty"`
+	ToolCalls                  []map[string]interface{} `json:"tool_calls,omitempty"`
+	ToolContext                map[string]interface{}   `json:"tool_context,omitempty"`
 }
 
 type SaveReprocessSnapshotInput struct {
@@ -522,6 +576,125 @@ type BookingLookupItem struct {
 	CreatedAt       time.Time  `json:"created_at"`
 }
 
+type BookingCreator interface {
+	Enabled() bool
+	Create(ctx context.Context, input BookingCreateInput) (BookingCreateResult, error)
+}
+
+type BookingCreateInput struct {
+	SelectedOptionIndex    int
+	TripID                 string
+	BoardStopID            string
+	AlightStopID           string
+	OriginDisplayName      string
+	DestinationDisplayName string
+	TripDate               string
+	DepartureTime          string
+	Qty                    int
+	CustomerName           string
+	CustomerPhone          string
+	IdempotencyKey         string
+	Passengers             []BookingCreatePassengerInput
+}
+
+type BookingCreatePassengerInput struct {
+	Name         string `json:"name"`
+	Document     string `json:"document"`
+	DocumentType string `json:"document_type"`
+	Phone        string `json:"phone,omitempty"`
+	Email        string `json:"email,omitempty"`
+	Notes        string `json:"notes,omitempty"`
+	IsLapChild   bool   `json:"is_lap_child,omitempty"`
+}
+
+type BookingCreateResult struct {
+	Filter          BookingCreateInput             `json:"filter"`
+	Mode            string                         `json:"mode"`
+	BookingID       string                         `json:"booking_id,omitempty"`
+	ReservationCode string                         `json:"reservation_code,omitempty"`
+	Status          string                         `json:"status,omitempty"`
+	ReservedUntil   *time.Time                     `json:"reserved_until,omitempty"`
+	TotalAmount     float64                        `json:"total_amount,omitempty"`
+	DepositAmount   float64                        `json:"deposit_amount,omitempty"`
+	RemainderAmount float64                        `json:"remainder_amount,omitempty"`
+	Passengers      []BookingCreatePassengerResult `json:"passengers,omitempty"`
+	Errors          []string                       `json:"errors,omitempty"`
+	MessageForAgent string                         `json:"message_for_agent,omitempty"`
+}
+
+type BookingCreatePassengerResult struct {
+	Name         string `json:"name"`
+	Document     string `json:"document,omitempty"`
+	DocumentType string `json:"document_type,omitempty"`
+	Phone        string `json:"phone,omitempty"`
+	SeatID       string `json:"seat_id,omitempty"`
+	IsLapChild   bool   `json:"is_lap_child,omitempty"`
+}
+
+type RescheduleAssistSearcher interface {
+	Enabled() bool
+	Search(ctx context.Context, input RescheduleAssistInput) (RescheduleAssistResult, error)
+}
+
+type RescheduleAssistInput struct {
+	BookingID            string
+	ReservationCode      string
+	RequestedTripDate    *time.Time
+	RequestedOrigin      string
+	RequestedDestination string
+	RequestedQty         int
+}
+
+type RescheduleAssistResult struct {
+	Filter                            RescheduleAssistInput
+	Mode                              string                   `json:"mode"`
+	Booking                           *RescheduleAssistBooking `json:"booking,omitempty"`
+	Current                           RescheduleAssistRoute    `json:"current,omitempty"`
+	Requested                         RescheduleAssistRequest  `json:"requested,omitempty"`
+	Options                           []RescheduleAssistOption `json:"options,omitempty"`
+	Errors                            []string                 `json:"errors,omitempty"`
+	NextStep                          string                   `json:"next_step,omitempty"`
+	HumanReviewRequired               bool                     `json:"human_review_required"`
+	CanAutoReschedule                 bool                     `json:"can_auto_reschedule"`
+	FieldsRequiredForManualCompletion []string                 `json:"fields_required_for_manual_completion,omitempty"`
+	MessageForAgent                   string                   `json:"message_for_agent,omitempty"`
+}
+
+type RescheduleAssistBooking struct {
+	ID              string `json:"id"`
+	TripID          string `json:"trip_id,omitempty"`
+	Status          string `json:"status,omitempty"`
+	ReservationCode string `json:"reservation_code,omitempty"`
+}
+
+type RescheduleAssistRoute struct {
+	Origin         string `json:"origin,omitempty"`
+	Destination    string `json:"destination,omitempty"`
+	TripDate       string `json:"trip_date,omitempty"`
+	PassengerCount int    `json:"passenger_count,omitempty"`
+}
+
+type RescheduleAssistRequest struct {
+	Origin      string `json:"origin,omitempty"`
+	Destination string `json:"destination,omitempty"`
+	TripDate    string `json:"trip_date,omitempty"`
+	Qty         int    `json:"qtd_passagens,omitempty"`
+}
+
+type RescheduleAssistOption struct {
+	TripID         string  `json:"trip_id,omitempty"`
+	TripDate       string  `json:"trip_date,omitempty"`
+	DepartureTime  string  `json:"hora,omitempty"`
+	Origin         string  `json:"origin,omitempty"`
+	Destination    string  `json:"destination,omitempty"`
+	BoardStopID    string  `json:"board_stop_id,omitempty"`
+	AlightStopID   string  `json:"alight_stop_id,omitempty"`
+	SeatsAvailable int     `json:"seats_available,omitempty"`
+	Price          float64 `json:"price,omitempty"`
+	Currency       string  `json:"currency,omitempty"`
+	PackageName    string  `json:"package_name,omitempty"`
+}
+
 type PaymentStatusSearcher interface {
 	Enabled() bool
 	Search(ctx context.Context, input PaymentStatusInput) (PaymentStatusResult, error)
@@ -548,6 +721,74 @@ type PaymentStatusItem struct {
 	ProviderRef string     `json:"provider_ref,omitempty"`
 	PaidAt      *time.Time `json:"paid_at,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
+}
+
+type PaymentCreator interface {
+	Enabled() bool
+	Create(ctx context.Context, input PaymentCreateInput) (PaymentCreateResult, error)
+}
+
+type PaymentCreateInput struct {
+	BookingID        string
+	ReservationCode  string
+	PaymentType      string
+	ConfirmPaid      bool
+	PaidAmount       float64
+	DepositPerPerson float64
+	CustomerName     string
+	CustomerPhone    string
+	CustomerDocument string
+	CustomerEmail    string
+	Note             string
+}
+
+type PaymentCreateResult struct {
+	Filter          PaymentCreateInput `json:"filter"`
+	Mode            string             `json:"mode"`
+	BookingID       string             `json:"booking_id,omitempty"`
+	ReservationCode string             `json:"reservation_code,omitempty"`
+	BookingStatus   string             `json:"booking_status,omitempty"`
+	PaymentType     string             `json:"payment_type,omitempty"`
+	Stage           string             `json:"stage,omitempty"`
+	AmountTotal     float64            `json:"amount_total,omitempty"`
+	AmountPaid      float64            `json:"amount_paid,omitempty"`
+	AmountDue       float64            `json:"amount_due,omitempty"`
+	PaymentID       string             `json:"payment_id,omitempty"`
+	PaymentStatus   string             `json:"payment_status,omitempty"`
+	Provider        string             `json:"provider,omitempty"`
+	ProviderRef     string             `json:"provider_ref,omitempty"`
+	PixCode         string             `json:"pix_code,omitempty"`
+	CheckoutURL     string             `json:"checkout_url,omitempty"`
+	Errors          []string           `json:"errors,omitempty"`
+	MessageForAgent string             `json:"message_for_agent,omitempty"`
+}
+
+type BookingCanceler interface {
+	Enabled() bool
+	Cancel(ctx context.Context, input BookingCancelInput) (BookingCancelResult, error)
+}
+
+type BookingCancelInput struct {
+	BookingID       string
+	ReservationCode string
+	Reason          string
+	Actor           string
+}
+
+type BookingCancelResult struct {
+	Filter          BookingCancelInput `json:"filter"`
+	Mode            string             `json:"mode"`
+	BookingID       string             `json:"booking_id,omitempty"`
+	ReservationCode string             `json:"reservation_code,omitempty"`
+	TripID          string             `json:"trip_id,omitempty"`
+	BookingStatus   string             `json:"booking_status,omitempty"`
+	PreviousStatus  string             `json:"previous_status,omitempty"`
+	Reason          string             `json:"reason,omitempty"`
+	Actor           string             `json:"actor,omitempty"`
+	PassengerCount  int                `json:"passenger_count,omitempty"`
+	Idempotent      bool               `json:"idempotent,omitempty"`
+	Errors          []string           `json:"errors,omitempty"`
+	MessageForAgent string             `json:"message_for_agent,omitempty"`
 }
 
 type ApplyPresenceSignalInput struct {

@@ -23,8 +23,10 @@ type Store interface {
 	ResumeSession(ctx context.Context, input ResumeSessionInput) (ResumeSessionResult, error)
 	FindReplyByIdempotency(ctx context.Context, sessionID string, idempotencyKey string) (*ReplyResult, error)
 	CreateReply(ctx context.Context, input ReplyInput, debounceWindow time.Duration) (ReplyResult, error)
+	CreateAutomationReply(ctx context.Context, input CreateAutomationReplyInput, debounceWindow time.Duration) (ReplyResult, error)
 	MarkReplyDeliverySent(ctx context.Context, input MarkReplyDeliverySentInput) (ReplyResult, error)
 	MarkReplyDeliveryFailure(ctx context.Context, input MarkReplyDeliveryFailureInput) (ReplyResult, error)
+	UpdateDraftAutoSendState(ctx context.Context, input UpdateDraftAutoSendStateInput) (SaveAgentDraftResult, error)
 	SaveReprocessSnapshot(ctx context.Context, input SaveReprocessSnapshotInput) (SaveReprocessSnapshotResult, error)
 	SaveAgentDraft(ctx context.Context, input SaveAgentDraftInput) (SaveAgentDraftResult, error)
 	ListSessions(ctx context.Context, filter ListSessionsFilter) ([]Session, error)
@@ -635,6 +637,9 @@ func (r *Repository) CreateReply(ctx context.Context, input ReplyInput, debounce
 	if err != nil {
 		return ReplyResult{}, err
 	}
+	if session.HandoffStatus != "BOT" || strings.TrimSpace(session.CurrentOwnerUserID) != "" {
+		return ReplyResult{}, ErrReprocessRequiresBot
+	}
 
 	recordedAt := time.Now().UTC()
 	replyBody := strings.TrimSpace(input.Body)
@@ -927,6 +932,386 @@ func (r *Repository) CreateReply(ctx context.Context, input ReplyInput, debounce
 	}, nil
 }
 
+func (r *Repository) CreateAutomationReply(ctx context.Context, input CreateAutomationReplyInput, debounceWindow time.Duration) (ReplyResult, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return ReplyResult{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	sessionRow := tx.QueryRow(ctx, `
+		select
+			id::text,
+			channel,
+			contact_key,
+			coalesce(customer_phone, ''),
+			coalesce(customer_name, ''),
+			status,
+			handoff_status,
+			coalesce(current_owner_user_id::text, ''),
+			last_message_at,
+			last_inbound_at,
+			last_outbound_at,
+			metadata,
+			created_at,
+			updated_at
+		from chat_sessions
+		where id = $1::uuid
+		for update
+	`, input.SessionID)
+
+	session, err := scanSession(sessionRow)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	draftRow := tx.QueryRow(ctx, `
+		select
+			id::text,
+			session_id::text,
+			direction,
+			kind,
+			coalesce(provider_message_id, ''),
+			coalesce(idempotency_key, ''),
+			coalesce(sender_name, ''),
+			coalesce(sender_phone, ''),
+			coalesce(body, ''),
+			payload,
+			normalized_payload,
+			processing_status,
+			received_at,
+			sent_at,
+			created_at
+		from chat_messages
+		where id = $1::uuid
+		for update
+	`, input.DraftMessageID)
+
+	draft, err := scanMessage(draftRow)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ReplyResult{}, ErrReplyDraftNotAllowed
+		}
+		return ReplyResult{}, err
+	}
+	if draft.SessionID != input.SessionID || draft.Direction != "OUTBOUND" || !strings.EqualFold(strings.TrimSpace(draft.ProcessingStatus), messageStatusAutomationDraft) {
+		return ReplyResult{}, ErrReplyDraftNotAllowed
+	}
+
+	replyBody := strings.TrimSpace(draft.Body)
+	if replyBody == "" {
+		return ReplyResult{}, ErrReplyBodyRequired
+	}
+	senderName := strings.TrimSpace(input.SenderName)
+	if senderName == "" {
+		senderName = firstNonEmpty(strings.TrimSpace(draft.SenderName), "SHABAS")
+	}
+	recordedAt := time.Now().UTC()
+
+	replyPayload := map[string]interface{}{
+		"mode":             "BOT_AUTO_REPLY",
+		"draft_message_id": draft.ID,
+		"draft_auto_sent":  true,
+		"sender_name":      senderName,
+		"session_channel":  session.Channel,
+		"contact_key":      session.ContactKey,
+		"auto_send_status": firstNonEmpty(asString(draft.NormalizedPayload["auto_send_status"]), asString(draft.Payload["auto_send_status"]), draftAutoSendStatusEligible),
+	}
+	if reasons := firstNonEmptyStringSlice(asStringSlice(draft.NormalizedPayload["auto_send_reasons"]), asStringSlice(draft.Payload["auto_send_reasons"])); len(reasons) > 0 {
+		replyPayload["auto_send_reasons"] = reasons
+	}
+	for key, value := range input.Metadata {
+		replyPayload[key] = value
+	}
+
+	messagePayload, err := encodeMap(replyPayload)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	messageRow := tx.QueryRow(ctx, `
+		insert into chat_messages (
+			session_id,
+			direction,
+			kind,
+			idempotency_key,
+			sender_name,
+			body,
+			payload,
+			normalized_payload,
+			processing_status,
+			received_at
+		) values (
+			$1::uuid,
+			'OUTBOUND',
+			'TEXT',
+			$2,
+			nullif($3, ''),
+			nullif($4, ''),
+			$5::jsonb,
+			$5::jsonb,
+			'AUTOMATION_PENDING',
+			$6
+		)
+		returning
+			id::text,
+			session_id::text,
+			direction,
+			kind,
+			coalesce(provider_message_id, ''),
+			coalesce(idempotency_key, ''),
+			coalesce(sender_name, ''),
+			coalesce(sender_phone, ''),
+			coalesce(body, ''),
+			payload,
+			normalized_payload,
+			processing_status,
+			received_at,
+			sent_at,
+			created_at
+	`, input.SessionID, input.IdempotencyKey, senderName, replyBody, messagePayload, recordedAt)
+
+	message, err := scanMessage(messageRow)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	sessionMetadata := session.Metadata
+	if sessionMetadata == nil {
+		sessionMetadata = map[string]interface{}{}
+	}
+	updatedMetadata := make(map[string]interface{}, len(sessionMetadata))
+	for key, value := range sessionMetadata {
+		updatedMetadata[key] = value
+	}
+	updatedMetadata["buffer"] = buildBufferState(session.Metadata, message, debounceWindow)
+
+	metadataPayload, err := encodeMap(updatedMetadata)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	sessionRow = tx.QueryRow(ctx, `
+		update chat_sessions
+		set last_message_at = $2,
+				last_outbound_at = $2,
+				metadata = $3::jsonb,
+				updated_at = now()
+		where id = $1::uuid
+		returning
+			id::text,
+			channel,
+			contact_key,
+			coalesce(customer_phone, ''),
+			coalesce(customer_name, ''),
+			status,
+			handoff_status,
+			coalesce(current_owner_user_id::text, ''),
+			last_message_at,
+			last_inbound_at,
+			last_outbound_at,
+			metadata,
+			created_at,
+			updated_at
+	`, input.SessionID, recordedAt, metadataPayload)
+
+	session, err = scanSession(sessionRow)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	outboundPayload := map[string]interface{}{
+		"mode":             "BOT_AUTO_REPLY",
+		"body":             replyBody,
+		"draft_message_id": draft.ID,
+		"draft_auto_sent":  true,
+		"sender_name":      senderName,
+		"message_id":       message.ID,
+		"auto_send_status": replyPayload["auto_send_status"],
+	}
+	if reasons, ok := replyPayload["auto_send_reasons"]; ok {
+		outboundPayload["auto_send_reasons"] = reasons
+	}
+	for key, value := range input.Metadata {
+		outboundPayload[key] = value
+	}
+
+	outboundPayloadBytes, err := encodeMap(outboundPayload)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	outboundRow := tx.QueryRow(ctx, `
+		insert into outbound_messages (
+			session_id,
+			channel,
+			recipient,
+			payload,
+			provider,
+			idempotency_key,
+			status,
+			created_at,
+			updated_at
+		) values (
+			$1::uuid,
+			$2,
+			$3,
+			$4::jsonb,
+			'EVOLUTION',
+			$5,
+			'AUTOMATION_PENDING',
+			now(),
+			now()
+		)
+		returning
+			id::text,
+			coalesce(session_id::text, ''),
+			channel,
+			recipient,
+			payload,
+			provider,
+			coalesce(provider_message_id, ''),
+			idempotency_key,
+			status,
+			sent_at,
+			delivered_at,
+			created_at,
+			updated_at
+	`, input.SessionID, session.Channel, session.ContactKey, outboundPayloadBytes, input.IdempotencyKey)
+
+	outbound, err := scanReplyOutbound(outboundRow)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return ReplyResult{}, err
+	}
+
+	return ReplyResult{
+		Session:  session,
+		Message:  message,
+		Outbound: outbound,
+		Draft:    &draft,
+	}, nil
+}
+
+func (r *Repository) UpdateDraftAutoSendState(ctx context.Context, input UpdateDraftAutoSendStateInput) (SaveAgentDraftResult, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return SaveAgentDraftResult{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	session, err := r.scanSessionByID(ctx, tx, input.SessionID)
+	if err != nil {
+		return SaveAgentDraftResult{}, err
+	}
+
+	draft, err := r.scanMessageByID(ctx, tx, input.DraftMessageID)
+	if err != nil {
+		return SaveAgentDraftResult{}, err
+	}
+	if draft.SessionID != input.SessionID || draft.Direction != "OUTBOUND" || !isAutomationDraftStatus(draft.ProcessingStatus) {
+		return SaveAgentDraftResult{}, ErrReplyDraftNotAllowed
+	}
+
+	payload := map[string]interface{}{}
+	for key, value := range input.Payload {
+		payload[key] = value
+	}
+	payload["auto_send_status"] = strings.TrimSpace(input.AutoSendStatus)
+	if reasons := mergeDistinctStrings(readDraftAutoSendReasons(draft), input.AutoSendReasons...); len(reasons) > 0 {
+		payload["auto_send_reasons"] = reasons
+	}
+	payloadBytes, err := encodeMap(payload)
+	if err != nil {
+		return SaveAgentDraftResult{}, err
+	}
+
+	draftRow := tx.QueryRow(ctx, `
+		update chat_messages
+		set payload = coalesce(payload, '{}'::jsonb) || $2::jsonb,
+				normalized_payload = coalesce(normalized_payload, '{}'::jsonb) || $2::jsonb
+		where id = $1::uuid
+		returning
+			id::text,
+			session_id::text,
+			direction,
+			kind,
+			coalesce(provider_message_id, ''),
+			coalesce(idempotency_key, ''),
+			coalesce(sender_name, ''),
+			coalesce(sender_phone, ''),
+			coalesce(body, ''),
+			payload,
+			normalized_payload,
+			processing_status,
+			received_at,
+			sent_at,
+			created_at
+	`, input.DraftMessageID, payloadBytes)
+
+	updatedDraft, err := scanMessage(draftRow)
+	if err != nil {
+		return SaveAgentDraftResult{}, err
+	}
+
+	if len(input.Agent) > 0 {
+		sessionMetadata := session.Metadata
+		if sessionMetadata == nil {
+			sessionMetadata = map[string]interface{}{}
+		}
+		updatedMetadata := make(map[string]interface{}, len(sessionMetadata)+1)
+		for key, value := range sessionMetadata {
+			updatedMetadata[key] = value
+		}
+		updatedMetadata["agent"] = input.Agent
+		metadataPayload, encodeErr := encodeMap(updatedMetadata)
+		if encodeErr != nil {
+			return SaveAgentDraftResult{}, encodeErr
+		}
+		sessionRow := tx.QueryRow(ctx, `
+			update chat_sessions
+			set metadata = $2::jsonb,
+					updated_at = now()
+			where id = $1::uuid
+			returning
+				id::text,
+				channel,
+				contact_key,
+				coalesce(customer_phone, ''),
+				coalesce(customer_name, ''),
+				status,
+				handoff_status,
+				coalesce(current_owner_user_id::text, ''),
+				last_message_at,
+				last_inbound_at,
+				last_outbound_at,
+				metadata,
+				created_at,
+				updated_at
+		`, input.SessionID, metadataPayload)
+		session, err = scanSession(sessionRow)
+		if err != nil {
+			return SaveAgentDraftResult{}, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return SaveAgentDraftResult{}, err
+	}
+
+	return SaveAgentDraftResult{
+		Session: session,
+		Message: updatedDraft,
+	}, nil
+}
+
 func (r *Repository) MarkReplyDeliverySent(ctx context.Context, input MarkReplyDeliverySentInput) (ReplyResult, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -936,8 +1321,14 @@ func (r *Repository) MarkReplyDeliverySent(ctx context.Context, input MarkReplyD
 		_ = tx.Rollback(ctx)
 	}()
 
+	messageBefore, err := r.scanMessageByID(ctx, tx, input.MessageID)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
+	deliveryMode := deliveryModeForPayload(messageBefore.Payload)
 	payload := map[string]interface{}{
-		"delivery_mode":        "MANUAL_CONTROLLED",
+		"delivery_mode":        deliveryMode,
 		"delivery_recorded_at": input.SentAt.UTC().Format(time.RFC3339Nano),
 		"provider_status":      input.ProviderStatus,
 	}
@@ -1010,6 +1401,81 @@ func (r *Repository) MarkReplyDeliverySent(ctx context.Context, input MarkReplyD
 		return ReplyResult{}, err
 	}
 
+	var updatedDraft *Message
+	if strings.EqualFold(asString(message.Payload["mode"]), "BOT_AUTO_REPLY") {
+		draftID := strings.TrimSpace(firstNonEmpty(asString(message.Payload["draft_message_id"]), asString(message.NormalizedPayload["draft_message_id"])))
+		if draftID != "" {
+			draftPayload := map[string]interface{}{
+				"auto_send_status":              draftAutoSendStatusEligible,
+				"auto_sent":                     true,
+				"auto_sent_at":                  input.SentAt.UTC().Format(time.RFC3339Nano),
+				"auto_sent_message_id":          message.ID,
+				"auto_sent_outbound_id":         outbound.ID,
+				"auto_sent_provider_message_id": strings.TrimSpace(input.ProviderMessageID),
+				"auto_send_last_error_text":     nil,
+				"auto_send_retry_pending_at":    nil,
+			}
+			draftPayloadBytes, encodeErr := encodeMap(draftPayload)
+			if encodeErr != nil {
+				return ReplyResult{}, encodeErr
+			}
+			draftRow := tx.QueryRow(ctx, `
+				update chat_messages
+				set payload = coalesce(payload, '{}'::jsonb) || $2::jsonb,
+						normalized_payload = coalesce(normalized_payload, '{}'::jsonb) || $2::jsonb,
+						processing_status = $3
+				where id = $1::uuid
+				returning
+					id::text,
+					session_id::text,
+					direction,
+					kind,
+					coalesce(provider_message_id, ''),
+					coalesce(idempotency_key, ''),
+					coalesce(sender_name, ''),
+					coalesce(sender_phone, ''),
+					coalesce(body, ''),
+					payload,
+					normalized_payload,
+					processing_status,
+					received_at,
+					sent_at,
+					created_at
+			`, draftID, draftPayloadBytes, messageStatusAutomationSent)
+			draft, scanErr := scanMessage(draftRow)
+			if scanErr != nil {
+				return ReplyResult{}, scanErr
+			}
+			updatedDraft = &draft
+
+			session, sessionErr := r.scanSessionByID(ctx, tx, input.SessionID)
+			if sessionErr != nil {
+				return ReplyResult{}, sessionErr
+			}
+			sessionMetadata := session.Metadata
+			if sessionMetadata == nil {
+				sessionMetadata = map[string]interface{}{}
+			}
+			newMetadata := make(map[string]interface{}, len(sessionMetadata))
+			for key, value := range sessionMetadata {
+				newMetadata[key] = value
+			}
+			newMetadata["agent"] = buildDraftAutoSentAgentState(session.Metadata, draft, message, outbound, input.SentAt.UTC())
+			metadataPayload, encodeErr := encodeMap(newMetadata)
+			if encodeErr != nil {
+				return ReplyResult{}, encodeErr
+			}
+			if _, execErr := tx.Exec(ctx, `
+				update chat_sessions
+				set metadata = $2::jsonb,
+						updated_at = now()
+				where id = $1::uuid
+			`, input.SessionID, metadataPayload); execErr != nil {
+				return ReplyResult{}, execErr
+			}
+		}
+	}
+
 	session, err := r.scanSessionByID(ctx, tx, input.SessionID)
 	if err != nil {
 		return ReplyResult{}, err
@@ -1023,6 +1489,7 @@ func (r *Repository) MarkReplyDeliverySent(ctx context.Context, input MarkReplyD
 		Session:  session,
 		Message:  message,
 		Outbound: outbound,
+		Draft:    updatedDraft,
 	}, nil
 }
 
@@ -1035,8 +1502,13 @@ func (r *Repository) MarkReplyDeliveryFailure(ctx context.Context, input MarkRep
 		_ = tx.Rollback(ctx)
 	}()
 
+	messageBefore, err := r.scanMessageByID(ctx, tx, input.MessageID)
+	if err != nil {
+		return ReplyResult{}, err
+	}
+
 	payloadBytes, err := encodeMap(map[string]interface{}{
-		"delivery_mode":       "MANUAL_CONTROLLED",
+		"delivery_mode":       deliveryModeForPayload(messageBefore.Payload),
 		"delivery_failed":     true,
 		"delivery_failed_at":  time.Now().UTC().Format(time.RFC3339Nano),
 		"delivery_error_text": strings.TrimSpace(input.ErrorText),
@@ -1106,6 +1578,97 @@ func (r *Repository) MarkReplyDeliveryFailure(ctx context.Context, input MarkRep
 		return ReplyResult{}, err
 	}
 
+	var updatedDraft *Message
+	if strings.EqualFold(asString(message.Payload["mode"]), "BOT_AUTO_REPLY") {
+		draftID := strings.TrimSpace(firstNonEmpty(asString(message.Payload["draft_message_id"]), asString(message.NormalizedPayload["draft_message_id"])))
+		if draftID != "" {
+			draft, draftErr := r.scanMessageByID(ctx, tx, draftID)
+			if draftErr != nil {
+				return ReplyResult{}, draftErr
+			}
+			observedAt := time.Now().UTC()
+			draftPayload := map[string]interface{}{
+				"auto_send_status":                draftAutoSendStatusRetryPending,
+				"auto_send_reasons":               mergeDistinctStrings(readDraftAutoSendReasons(draft), draftAutoSendReasonDeliveryFail),
+				"auto_send_last_attempt_at":       observedAt.Format(time.RFC3339Nano),
+				"auto_send_retry_pending_at":      observedAt.Format(time.RFC3339Nano),
+				"auto_send_last_error_text":       strings.TrimSpace(input.ErrorText),
+				"auto_send_last_reply_message_id": message.ID,
+				"auto_send_last_outbound_id":      outbound.ID,
+			}
+			draftPayloadBytes, encodeErr := encodeMap(draftPayload)
+			if encodeErr != nil {
+				return ReplyResult{}, encodeErr
+			}
+			draftRow := tx.QueryRow(ctx, `
+				update chat_messages
+				set payload = coalesce(payload, '{}'::jsonb) || $2::jsonb,
+						normalized_payload = coalesce(normalized_payload, '{}'::jsonb) || $2::jsonb
+				where id = $1::uuid
+				returning
+					id::text,
+					session_id::text,
+					direction,
+					kind,
+					coalesce(provider_message_id, ''),
+					coalesce(idempotency_key, ''),
+					coalesce(sender_name, ''),
+					coalesce(sender_phone, ''),
+					coalesce(body, ''),
+					payload,
+					normalized_payload,
+					processing_status,
+					received_at,
+					sent_at,
+					created_at
+			`, draftID, draftPayloadBytes)
+			updated, scanErr := scanMessage(draftRow)
+			if scanErr != nil {
+				return ReplyResult{}, scanErr
+			}
+			updatedDraft = &updated
+
+			sessionMetadata := session.Metadata
+			if sessionMetadata == nil {
+				sessionMetadata = map[string]interface{}{}
+			}
+			updatedMetadata := make(map[string]interface{}, len(sessionMetadata)+1)
+			for key, value := range sessionMetadata {
+				updatedMetadata[key] = value
+			}
+			updatedMetadata["agent"] = buildDraftAutoSendRetryPendingAgentState(session.Metadata, updated, message, outbound, input.ErrorText, observedAt)
+			metadataPayload, encodeErr := encodeMap(updatedMetadata)
+			if encodeErr != nil {
+				return ReplyResult{}, encodeErr
+			}
+			sessionRow := tx.QueryRow(ctx, `
+				update chat_sessions
+				set metadata = $2::jsonb,
+						updated_at = now()
+				where id = $1::uuid
+				returning
+					id::text,
+					channel,
+					contact_key,
+					coalesce(customer_phone, ''),
+					coalesce(customer_name, ''),
+					status,
+					handoff_status,
+					coalesce(current_owner_user_id::text, ''),
+					last_message_at,
+					last_inbound_at,
+					last_outbound_at,
+					metadata,
+					created_at,
+					updated_at
+			`, input.SessionID, metadataPayload)
+			session, err = scanSession(sessionRow)
+			if err != nil {
+				return ReplyResult{}, err
+			}
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return ReplyResult{}, err
 	}
@@ -1114,6 +1677,7 @@ func (r *Repository) MarkReplyDeliveryFailure(ctx context.Context, input MarkRep
 		Session:  session,
 		Message:  message,
 		Outbound: outbound,
+		Draft:    updatedDraft,
 	}, nil
 }
 
@@ -1389,6 +1953,10 @@ func (r *Repository) ListSessions(ctx context.Context, filter ListSessionsFilter
 		args = append(args, filter.AgentStatus)
 		clauses = append(clauses, fmt.Sprintf("upper(coalesce(metadata->'agent'->>'status', '')) = $%d", len(args)))
 	}
+	if filter.DraftAutoSendStatus != "" {
+		args = append(args, filter.DraftAutoSendStatus)
+		clauses = append(clauses, fmt.Sprintf("upper(coalesce(metadata->'agent'->>'auto_send_status', '')) = $%d", len(args)))
+	}
 	switch filter.DraftReviewStatus {
 	case "PENDING_REVIEW":
 		clauses = append(clauses, "upper(coalesce(metadata->'agent'->>'status', '')) = 'DRAFT_GENERATED'")
@@ -1493,7 +2061,10 @@ func (r *Repository) CountSessionsSummary(ctx context.Context, filter ListSessio
 				when upper(coalesce(metadata->'agent'->>'status', '')) = 'DRAFT_GENERATED'
 				 and coalesce(metadata->'agent'->>'draft_generated_at', metadata->'agent'->>'requested_at', '') != ''
 				then extract(epoch from (now() - coalesce(nullif(metadata->'agent'->>'draft_generated_at', '')::timestamptz, nullif(metadata->'agent'->>'requested_at', '')::timestamptz)))::int
-				else 0 end), 0)::int as oldest_pending_age_seconds
+				else 0 end), 0)::int as oldest_pending_age_seconds,
+			coalesce(sum(case when upper(coalesce(metadata->'agent'->>'auto_send_status', '')) = 'AUTO_SEND_RETRY_PENDING' then 1 else 0 end), 0)::int as auto_send_retry_pending_count,
+			coalesce(sum(case when upper(coalesce(metadata->'agent'->>'auto_send_status', '')) = 'AUTO_SEND_BLOCKED_HUMAN' then 1 else 0 end), 0)::int as auto_send_blocked_human_count,
+			coalesce(sum(case when upper(coalesce(metadata->'agent'->>'auto_send_status', '')) in ('AUTO_SEND_RETRY_PENDING', 'AUTO_SEND_BLOCKED_HUMAN') then 1 else 0 end), 0)::int as auto_send_issue_count
 		from chat_sessions`
 
 	args := make([]interface{}, 0, 5)
@@ -1533,6 +2104,9 @@ func (r *Repository) CountSessionsSummary(ctx context.Context, filter ListSessio
 		&summary.MediumPriorityReviewCount,
 		&summary.LowPriorityReviewCount,
 		&summary.OldestPendingAgeSeconds,
+		&summary.AutoSendRetryPendingCount,
+		&summary.AutoSendBlockedHumanCount,
+		&summary.AutoSendIssueCount,
 	)
 	return summary, err
 }
@@ -1585,6 +2159,39 @@ func (r *Repository) scanSessionByID(ctx context.Context, querier interface {
 	`, id)
 
 	return scanSession(row)
+}
+
+func (r *Repository) scanMessageByID(ctx context.Context, querier interface {
+	QueryRow(context.Context, string, ...interface{}) pgx.Row
+}, id string) (Message, error) {
+	row := querier.QueryRow(ctx, `
+		select
+			id::text,
+			session_id::text,
+			direction,
+			kind,
+			coalesce(provider_message_id, ''),
+			coalesce(idempotency_key, ''),
+			coalesce(sender_name, ''),
+			coalesce(sender_phone, ''),
+			coalesce(body, ''),
+			payload,
+			normalized_payload,
+			processing_status,
+			received_at,
+			sent_at,
+			created_at
+		from chat_messages
+		where id = $1::uuid
+	`, id)
+	return scanMessage(row)
+}
+
+func deliveryModeForPayload(payload map[string]interface{}) string {
+	if strings.EqualFold(strings.TrimSpace(asString(payload["mode"])), "BOT_AUTO_REPLY") {
+		return "BOT_AUTO_SEND"
+	}
+	return "MANUAL_CONTROLLED"
 }
 
 func (r *Repository) ListMessages(ctx context.Context, sessionID string, filter ListMessagesFilter) ([]Message, error) {

@@ -3,6 +3,8 @@ package automation
 import (
 	"encoding/json"
 	"time"
+
+	"schumacher-tur/api/internal/chat"
 )
 
 type JobRun struct {
@@ -31,6 +33,32 @@ type ListJobRunsResult struct {
 	Filter  ListJobRunsInput `json:"filter"`
 	Count   int              `json:"count"`
 	Runs    []JobRun         `json:"runs"`
+}
+
+type CutoverReadinessCheck struct {
+	Key      string `json:"key"`
+	Status   string `json:"status"`
+	Message  string `json:"message"`
+	Critical bool   `json:"critical"`
+}
+
+type CutoverReadinessJob struct {
+	JobName       string     `json:"job_name"`
+	Status        string     `json:"status"`
+	JobRunID      string     `json:"job_run_id,omitempty"`
+	TriggerSource string     `json:"trigger_source,omitempty"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	ErrorText     string     `json:"error_text,omitempty"`
+}
+
+type CutoverReadinessResult struct {
+	Status          string                  `json:"status"`
+	CheckedAt       time.Time               `json:"checked_at"`
+	Issues          []string                `json:"issues,omitempty"`
+	Checks          []CutoverReadinessCheck `json:"checks"`
+	SessionsSummary chat.SessionsSummary    `json:"sessions_summary"`
+	LatestJobs      []CutoverReadinessJob   `json:"latest_jobs"`
 }
 
 type OutboundMessage struct {
@@ -75,6 +103,73 @@ type RunChatReviewAlertsResult struct {
 type RunBookingsExpireInput struct {
 	Limit       int `json:"limit"`
 	HoldMinutes int `json:"hold_minutes"`
+}
+
+type RunChatBufferFlushInput struct {
+	Limit         int    `json:"limit"`
+	Channel       string `json:"channel"`
+	Status        string `json:"status"`
+	HandoffStatus string `json:"handoff_status"`
+}
+
+type RunChatAutoSendRetryInput struct {
+	Limit           int    `json:"limit"`
+	CooldownSeconds int    `json:"cooldown_seconds"`
+	Channel         string `json:"channel"`
+	Status          string `json:"status"`
+	HandoffStatus   string `json:"handoff_status"`
+}
+
+type ChatBufferFlushSessionResult struct {
+	SessionID      string     `json:"session_id"`
+	ContactKey     string     `json:"contact_key,omitempty"`
+	PendingUntil   *time.Time `json:"pending_until,omitempty"`
+	Status         string     `json:"status"`
+	Reason         string     `json:"reason,omitempty"`
+	Idempotent     bool       `json:"idempotent"`
+	DraftMessageID string     `json:"draft_message_id,omitempty"`
+	ErrorText      string     `json:"error_text,omitempty"`
+}
+
+type RunChatBufferFlushResult struct {
+	Status          string                         `json:"status"`
+	Reason          string                         `json:"reason,omitempty"`
+	ObservedAt      time.Time                      `json:"observed_at"`
+	JobRunID        string                         `json:"job_run_id,omitempty"`
+	Filter          RunChatBufferFlushInput        `json:"filter"`
+	CheckedCount    int                            `json:"checked_count"`
+	DueCount        int                            `json:"due_count"`
+	FlushedCount    int                            `json:"flushed_count"`
+	FailedCount     int                            `json:"failed_count"`
+	FlushedSessions []ChatBufferFlushSessionResult `json:"flushed_sessions,omitempty"`
+}
+
+type ChatAutoSendRetrySessionResult struct {
+	SessionID        string     `json:"session_id"`
+	ContactKey       string     `json:"contact_key,omitempty"`
+	LastAttemptAt    *time.Time `json:"last_attempt_at,omitempty"`
+	RetryRequestedAt *time.Time `json:"retry_requested_at,omitempty"`
+	Status           string     `json:"status"`
+	Reason           string     `json:"reason,omitempty"`
+	Idempotent       bool       `json:"idempotent"`
+	DraftMessageID   string     `json:"draft_message_id,omitempty"`
+	OutboundID       string     `json:"outbound_id,omitempty"`
+	ErrorText        string     `json:"error_text,omitempty"`
+}
+
+type RunChatAutoSendRetryResult struct {
+	Status          string                           `json:"status"`
+	Reason          string                           `json:"reason,omitempty"`
+	ObservedAt      time.Time                        `json:"observed_at"`
+	JobRunID        string                           `json:"job_run_id,omitempty"`
+	Filter          RunChatAutoSendRetryInput        `json:"filter"`
+	CheckedCount    int                              `json:"checked_count"`
+	DueCount        int                              `json:"due_count"`
+	RetriedCount    int                              `json:"retried_count"`
+	BlockedCount    int                              `json:"blocked_count"`
+	SkippedCount    int                              `json:"skipped_count"`
+	FailedCount     int                              `json:"failed_count"`
+	RetriedSessions []ChatAutoSendRetrySessionResult `json:"retried_sessions,omitempty"`
 }
 
 type ExpiredBookingResult struct {

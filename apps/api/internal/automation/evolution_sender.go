@@ -116,7 +116,7 @@ func (s *EvolutionSender) SendReply(ctx context.Context, input chat.SendReplyInp
 		ProviderMessageID: providerMessageID,
 		ProviderStatus:    strings.ToUpper(strings.TrimSpace(asString(payload["status"]))),
 		Payload: map[string]interface{}{
-			"delivery_mode":     "MANUAL_CONTROLLED",
+			"delivery_mode":     deliveryModeForOutbound(input.Outbound.Payload),
 			"provider":          "EVOLUTION",
 			"provider_request":  requestPayload,
 			"provider_response": payload,
@@ -168,4 +168,11 @@ func asString(value interface{}) string {
 	default:
 		return ""
 	}
+}
+
+func deliveryModeForOutbound(payload map[string]interface{}) string {
+	if strings.EqualFold(strings.TrimSpace(asString(payload["mode"])), "BOT_AUTO_REPLY") {
+		return "BOT_AUTO_SEND"
+	}
+	return "MANUAL_CONTROLLED"
 }

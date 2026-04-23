@@ -60,6 +60,159 @@ func TestHandleEvolutionMessagesAcceptsDirectPayload(t *testing.T) {
 	}
 }
 
+func TestHandleEvolutionMessagesRejectsMissingWebhookSecret(t *testing.T) {
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{
+		EvolutionWebhookSecret: "cutover-secret",
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554988709047@s.whatsapp.net","fromMe":false,"id":"MSG-SEC-1"},
+			"message":{"conversation":"oi"},
+			"messageType":"conversation"
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected status %d, got %d", http.StatusUnauthorized, rec.Code)
+	}
+	if chatSvc.calls != 0 {
+		t.Fatalf("expected chat ingest not to be called, got %d", chatSvc.calls)
+	}
+}
+
+func TestHandleEvolutionMessagesAcceptsWebhookSecretHeader(t *testing.T) {
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{
+		EvolutionWebhookSecret: "cutover-secret",
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554988709047@s.whatsapp.net","fromMe":false,"id":"MSG-SEC-2"},
+			"message":{"conversation":"oi"},
+			"messageType":"conversation"
+		}
+	}`))
+	req.Header.Set("X-Evolution-Webhook-Secret", "cutover-secret")
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+	if chatSvc.calls != 1 {
+		t.Fatalf("expected one chat ingest call, got %d", chatSvc.calls)
+	}
+}
+
+func TestHandleEvolutionMessagesEndpointDispatchesStatusEvent(t *testing.T) {
+	store := &fakeAutomationStore{
+		result: RecordEvolutionStatusResult{MatchedChatMessages: 1, MatchedOutboundMessages: 1},
+	}
+	handler := NewHandler(NewService(store, &fakeChatIngestor{}, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.update",
+		"data":{
+			"key":{"id":"MSG-MULTI-STATUS-1"},
+			"status":"DELIVERED",
+			"messageType":"conversation",
+			"messageTimestamp":1772544357
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+	if store.lastStatus.ProviderMessageID != "MSG-MULTI-STATUS-1" {
+		t.Fatalf("unexpected provider message id: %s", store.lastStatus.ProviderMessageID)
+	}
+	if store.lastStatus.ProviderStatus != "DELIVERED" {
+		t.Fatalf("unexpected provider status: %s", store.lastStatus.ProviderStatus)
+	}
+}
+
+func TestHandleEvolutionMessagesEndpointDispatchesPresenceEvent(t *testing.T) {
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"presence.update",
+		"data":{
+			"id":"554998208115@s.whatsapp.net",
+			"presences":{
+				"554998208115@s.whatsapp.net":{"lastKnownPresence":"typing"}
+			}
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+	if chatSvc.presenceCalls != 1 {
+		t.Fatalf("expected one presence call, got %d", chatSvc.presenceCalls)
+	}
+	if chatSvc.lastPresenceInput.PresenceStatus != "TYPING" {
+		t.Fatalf("unexpected presence status: %s", chatSvc.lastPresenceInput.PresenceStatus)
+	}
+}
+
+func TestHandleEvolutionEventAliasesAcceptWebhookByEventsPaths(t *testing.T) {
+	store := &fakeAutomationStore{
+		result: RecordEvolutionStatusResult{MatchedChatMessages: 1, MatchedOutboundMessages: 1},
+	}
+	handler := NewHandler(NewService(store, &fakeChatIngestor{}, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages-update", bytes.NewBufferString(`{
+		"event":"messages.update",
+		"data":{
+			"key":{"id":"MSG-ALIAS-1"},
+			"status":"READ",
+			"messageType":"conversation",
+			"messageTimestamp":1772544357
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+	if store.lastStatus.ProviderMessageID != "MSG-ALIAS-1" {
+		t.Fatalf("unexpected provider message id: %s", store.lastStatus.ProviderMessageID)
+	}
+}
+
 func TestHandleEvolutionMessagesAcceptsN8NEnvelope(t *testing.T) {
 	chatSvc := &fakeChatIngestor{}
 	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{}))
@@ -157,6 +310,610 @@ func TestRunBookingsExpireRejectsInvalidInput(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestRunChatBufferFlushRejectsInvalidInput(t *testing.T) {
+	handler := NewHandler(NewService(&fakeAutomationStore{}, &fakeChatIngestor{}, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/automation/jobs/chat-buffer-flush/run", bytes.NewBufferString(`{"limit":-1}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestRunChatBufferFlushProcessesDueBuffers(t *testing.T) {
+	store := &fakeAutomationStore{}
+	now := time.Now().UTC()
+	dueAt := now.Add(-2 * time.Minute)
+	futureAt := now.Add(2 * time.Minute)
+	chatSvc := &fakeChatIngestor{
+		sessions: []chat.Session{
+			{
+				ID:            "session-due",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554998887766@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"buffer": map[string]interface{}{
+						"status":        "PENDING",
+						"pending_until": dueAt.Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+			{
+				ID:            "session-future",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554997776655@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"buffer": map[string]interface{}{
+						"status":        "PENDING",
+						"pending_until": futureAt.Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+			{
+				ID:            "session-idle",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554996665544@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"buffer": map[string]interface{}{
+						"status": "IDLE",
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		reprocessResults: map[string]chat.ReprocessResult{
+			"session-due": {
+				Session: chat.Session{
+					ID:            "session-due",
+					Channel:       "WHATSAPP",
+					ContactKey:    "554998887766@s.whatsapp.net",
+					Status:        "ACTIVE",
+					HandoffStatus: "BOT",
+					CreatedAt:     now,
+					UpdatedAt:     now,
+				},
+				Status: "accepted",
+				Reason: "draft_generated",
+				Draft: &chat.Message{
+					ID:               "draft-1",
+					SessionID:        "session-due",
+					Direction:        "OUTBOUND",
+					Kind:             "TEXT",
+					ProcessingStatus: "AUTOMATION_DRAFT",
+					ReceivedAt:       now,
+					CreatedAt:        now,
+				},
+			},
+		},
+	}
+	handler := NewHandler(NewService(store, chatSvc, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/automation/jobs/chat-buffer-flush/run", nil)
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if chatSvc.listCalls != 1 {
+		t.Fatalf("expected list sessions once, got %d", chatSvc.listCalls)
+	}
+	if chatSvc.lastListFilter.Channel != "WHATSAPP" {
+		t.Fatalf("expected channel WHATSAPP, got %s", chatSvc.lastListFilter.Channel)
+	}
+	if chatSvc.lastListFilter.Status != "ACTIVE" {
+		t.Fatalf("expected status ACTIVE, got %s", chatSvc.lastListFilter.Status)
+	}
+	if chatSvc.lastListFilter.HandoffStatus != "BOT" {
+		t.Fatalf("expected handoff BOT, got %s", chatSvc.lastListFilter.HandoffStatus)
+	}
+	if chatSvc.reprocessCalls != 1 {
+		t.Fatalf("expected one reprocess call, got %d", chatSvc.reprocessCalls)
+	}
+	if chatSvc.reprocessInputs[0].SessionID != "session-due" {
+		t.Fatalf("expected due session to be reprocessed, got %s", chatSvc.reprocessInputs[0].SessionID)
+	}
+	if chatSvc.reprocessInputs[0].Trigger != "SYSTEM_BUFFER_FLUSH" {
+		t.Fatalf("unexpected trigger: %s", chatSvc.reprocessInputs[0].Trigger)
+	}
+	if len(store.jobRuns) != 1 {
+		t.Fatalf("expected one job run, got %d", len(store.jobRuns))
+	}
+	if store.jobRuns[0].Status != "COMPLETED" {
+		t.Fatalf("expected COMPLETED job run, got %s", store.jobRuns[0].Status)
+	}
+
+	var out RunChatBufferFlushResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.Status != "processed" {
+		t.Fatalf("expected processed status, got %s", out.Status)
+	}
+	if out.Reason != "buffers_flushed" {
+		t.Fatalf("expected buffers_flushed, got %s", out.Reason)
+	}
+	if out.CheckedCount != 3 {
+		t.Fatalf("expected checked_count 3, got %d", out.CheckedCount)
+	}
+	if out.DueCount != 1 {
+		t.Fatalf("expected due_count 1, got %d", out.DueCount)
+	}
+	if out.FlushedCount != 1 {
+		t.Fatalf("expected flushed_count 1, got %d", out.FlushedCount)
+	}
+	if out.FailedCount != 0 {
+		t.Fatalf("expected failed_count 0, got %d", out.FailedCount)
+	}
+	if len(out.FlushedSessions) != 1 {
+		t.Fatalf("expected one flushed session, got %d", len(out.FlushedSessions))
+	}
+	if out.FlushedSessions[0].DraftMessageID != "draft-1" {
+		t.Fatalf("expected draft-1, got %s", out.FlushedSessions[0].DraftMessageID)
+	}
+}
+
+func TestRunChatBufferFlushSkipsWhenNoDueBuffers(t *testing.T) {
+	store := &fakeAutomationStore{}
+	now := time.Now().UTC()
+	chatSvc := &fakeChatIngestor{
+		sessions: []chat.Session{
+			{
+				ID:            "session-future",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554997776655@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"buffer": map[string]interface{}{
+						"status":        "PENDING",
+						"pending_until": now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+	}
+	handler := NewHandler(NewService(store, chatSvc, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/automation/jobs/chat-buffer-flush/run", nil)
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if chatSvc.reprocessCalls != 0 {
+		t.Fatalf("expected no reprocess calls, got %d", chatSvc.reprocessCalls)
+	}
+	if len(store.jobRuns) != 1 {
+		t.Fatalf("expected one job run, got %d", len(store.jobRuns))
+	}
+	if store.jobRuns[0].Status != "SKIPPED" {
+		t.Fatalf("expected SKIPPED job run, got %s", store.jobRuns[0].Status)
+	}
+
+	var out RunChatBufferFlushResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.Status != "skipped" {
+		t.Fatalf("expected skipped status, got %s", out.Status)
+	}
+	if out.Reason != "no_due_buffers" {
+		t.Fatalf("expected no_due_buffers, got %s", out.Reason)
+	}
+}
+
+func TestStartChatBufferFlushLoopRunsSystemCycleWhenEnabled(t *testing.T) {
+	store := &fakeAutomationStore{}
+	now := time.Now().UTC()
+	chatSvc := &fakeChatIngestor{
+		sessions: []chat.Session{
+			{
+				ID:            "session-due",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554998887766@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"buffer": map[string]interface{}{
+						"status":        "PENDING",
+						"pending_until": now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		reprocessResults: map[string]chat.ReprocessResult{
+			"session-due": {
+				Session: chat.Session{
+					ID:            "session-due",
+					Channel:       "WHATSAPP",
+					ContactKey:    "554998887766@s.whatsapp.net",
+					Status:        "ACTIVE",
+					HandoffStatus: "BOT",
+					CreatedAt:     now,
+					UpdatedAt:     now,
+				},
+				Status: "accepted",
+				Reason: "draft_generated",
+			},
+		},
+	}
+	svc := NewService(store, chatSvc, config.Config{})
+	logger := &fakeChatBufferFlushLogger{ch: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	StartChatBufferFlushLoop(ctx, svc, config.Config{
+		ChatBufferAutoFlushEnabled:         true,
+		ChatBufferAutoFlushIntervalSeconds: 60,
+		ChatBufferAutoFlushLimit:           10,
+	}, logger)
+
+	select {
+	case <-logger.ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected automatic chat-buffer-flush cycle to run")
+	}
+
+	cancel()
+
+	if len(store.jobRuns) != 1 {
+		t.Fatalf("expected one system job run, got %d", len(store.jobRuns))
+	}
+	if store.jobRuns[0].TriggerSource != "SYSTEM" {
+		t.Fatalf("expected SYSTEM trigger source, got %s", store.jobRuns[0].TriggerSource)
+	}
+	if chatSvc.reprocessCalls != 1 {
+		t.Fatalf("expected one reprocess call, got %d", chatSvc.reprocessCalls)
+	}
+}
+
+func TestStartChatBufferFlushLoopDoesNothingWhenDisabled(t *testing.T) {
+	store := &fakeAutomationStore{}
+	chatSvc := &fakeChatIngestor{}
+	svc := NewService(store, chatSvc, config.Config{})
+	logger := &fakeChatBufferFlushLogger{ch: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	StartChatBufferFlushLoop(ctx, svc, config.Config{
+		ChatBufferAutoFlushEnabled: false,
+	}, logger)
+
+	select {
+	case <-logger.ch:
+		t.Fatal("did not expect automatic chat-buffer-flush cycle when disabled")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if len(store.jobRuns) != 0 {
+		t.Fatalf("expected no job runs, got %d", len(store.jobRuns))
+	}
+	if chatSvc.reprocessCalls != 0 {
+		t.Fatalf("expected no reprocess calls, got %d", chatSvc.reprocessCalls)
+	}
+}
+
+func TestRunChatAutoSendRetryRejectsInvalidInput(t *testing.T) {
+	handler := NewHandler(NewService(&fakeAutomationStore{}, &fakeChatIngestor{}, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/automation/jobs/chat-auto-send-retry/run", bytes.NewBufferString(`{"limit":-1}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestRunChatAutoSendRetryProcessesDueDrafts(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeAutomationStore{}
+	chatSvc := &fakeChatIngestor{
+		sessions: []chat.Session{
+			{
+				ID:            "session-due",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554998887766@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"agent": map[string]interface{}{
+						"auto_send_status":          "AUTO_SEND_RETRY_PENDING",
+						"auto_send_last_attempt_at": now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+			{
+				ID:            "session-cooldown",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554997776655@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"agent": map[string]interface{}{
+						"auto_send_status":          "AUTO_SEND_RETRY_PENDING",
+						"auto_send_last_attempt_at": now.Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		retryDraftResults: map[string]chat.RetryDraftAutoSendResult{
+			"session-due": {
+				Session: chat.Session{
+					ID:            "session-due",
+					Channel:       "WHATSAPP",
+					ContactKey:    "554998887766@s.whatsapp.net",
+					Status:        "ACTIVE",
+					HandoffStatus: "BOT",
+					CreatedAt:     now,
+					UpdatedAt:     now,
+				},
+				Status: "accepted",
+				Reason: "draft_auto_send_retried",
+				Draft: &chat.Message{
+					ID:               "draft-due",
+					SessionID:        "session-due",
+					ProcessingStatus: "AUTOMATION_SENT",
+				},
+				Outbound: &chat.ReplyOutbound{
+					ID:        "outbound-due",
+					SessionID: "session-due",
+				},
+			},
+		},
+	}
+	handler := NewHandler(NewService(store, chatSvc, config.Config{
+		ChatAutoSendRetryLimit:           20,
+		ChatAutoSendRetryCooldownSeconds: 30,
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/automation/jobs/chat-auto-send-retry/run", bytes.NewBufferString(`{"cooldown_seconds":30}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if chatSvc.listCalls != 1 {
+		t.Fatalf("expected one list call, got %d", chatSvc.listCalls)
+	}
+	if chatSvc.lastListFilter.DraftAutoSendStatus != "AUTO_SEND_RETRY_PENDING" {
+		t.Fatalf("expected retry-pending filter, got %s", chatSvc.lastListFilter.DraftAutoSendStatus)
+	}
+	if chatSvc.retryDraftCalls != 1 {
+		t.Fatalf("expected one retry call, got %d", chatSvc.retryDraftCalls)
+	}
+	if chatSvc.retryDraftInputs[0].SessionID != "session-due" {
+		t.Fatalf("expected retry for session-due, got %s", chatSvc.retryDraftInputs[0].SessionID)
+	}
+	if chatSvc.retryDraftInputs[0].RequestedBy != "system:auto-send-retry-loop" {
+		t.Fatalf("expected system requester, got %s", chatSvc.retryDraftInputs[0].RequestedBy)
+	}
+	if len(store.jobRuns) != 1 {
+		t.Fatalf("expected one job run, got %d", len(store.jobRuns))
+	}
+	if store.jobRuns[0].Status != "COMPLETED" {
+		t.Fatalf("expected COMPLETED job run, got %s", store.jobRuns[0].Status)
+	}
+
+	var out RunChatAutoSendRetryResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.Status != "processed" {
+		t.Fatalf("expected processed status, got %s", out.Status)
+	}
+	if out.DueCount != 1 {
+		t.Fatalf("expected due_count 1, got %d", out.DueCount)
+	}
+	if out.RetriedCount != 1 {
+		t.Fatalf("expected retried_count 1, got %d", out.RetriedCount)
+	}
+	if out.FailedCount != 0 {
+		t.Fatalf("expected failed_count 0, got %d", out.FailedCount)
+	}
+}
+
+func TestRunChatAutoSendRetrySkipsWhenNothingIsDue(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeAutomationStore{}
+	chatSvc := &fakeChatIngestor{
+		sessions: []chat.Session{
+			{
+				ID:            "session-cooldown",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554997776655@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"agent": map[string]interface{}{
+						"auto_send_status":          "AUTO_SEND_RETRY_PENDING",
+						"auto_send_last_attempt_at": now.Add(-5 * time.Second).Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+	}
+	handler := NewHandler(NewService(store, chatSvc, config.Config{
+		ChatAutoSendRetryCooldownSeconds: 60,
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/automation/jobs/chat-auto-send-retry/run", nil)
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if chatSvc.retryDraftCalls != 0 {
+		t.Fatalf("expected zero retry calls, got %d", chatSvc.retryDraftCalls)
+	}
+	if len(store.jobRuns) != 1 {
+		t.Fatalf("expected one job run, got %d", len(store.jobRuns))
+	}
+	if store.jobRuns[0].Status != "SKIPPED" {
+		t.Fatalf("expected SKIPPED job run, got %s", store.jobRuns[0].Status)
+	}
+
+	var out RunChatAutoSendRetryResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.Status != "skipped" {
+		t.Fatalf("expected skipped status, got %s", out.Status)
+	}
+	if out.Reason != "no_due_retries" {
+		t.Fatalf("expected no_due_retries reason, got %s", out.Reason)
+	}
+}
+
+func TestStartChatAutoSendRetryLoopRunsSystemCycleWhenEnabled(t *testing.T) {
+	now := time.Now().UTC()
+	store := &fakeAutomationStore{}
+	chatSvc := &fakeChatIngestor{
+		sessions: []chat.Session{
+			{
+				ID:            "session-retry",
+				Channel:       "WHATSAPP",
+				ContactKey:    "554998887766@s.whatsapp.net",
+				Status:        "ACTIVE",
+				HandoffStatus: "BOT",
+				Metadata: map[string]interface{}{
+					"agent": map[string]interface{}{
+						"auto_send_status":          "AUTO_SEND_RETRY_PENDING",
+						"auto_send_last_attempt_at": now.Add(-2 * time.Minute).Format(time.RFC3339Nano),
+					},
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		retryDraftResults: map[string]chat.RetryDraftAutoSendResult{
+			"session-retry": {
+				Session: chat.Session{
+					ID:            "session-retry",
+					Channel:       "WHATSAPP",
+					ContactKey:    "554998887766@s.whatsapp.net",
+					Status:        "ACTIVE",
+					HandoffStatus: "BOT",
+					CreatedAt:     now,
+					UpdatedAt:     now,
+				},
+				Status: "accepted",
+				Reason: "draft_auto_send_retried",
+			},
+		},
+	}
+	svc := NewService(store, chatSvc, config.Config{})
+	logger := &fakeChatBufferFlushLogger{ch: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	StartChatAutoSendRetryLoop(ctx, svc, config.Config{
+		ChatAutoSendRetryEnabled:         true,
+		ChatAutoSendRetryIntervalSeconds: 60,
+		ChatAutoSendRetryLimit:           10,
+		ChatAutoSendRetryCooldownSeconds: 30,
+	}, logger)
+
+	select {
+	case <-logger.ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected automatic chat-auto-send-retry cycle to run")
+	}
+
+	cancel()
+
+	if len(store.jobRuns) != 1 {
+		t.Fatalf("expected one system job run, got %d", len(store.jobRuns))
+	}
+	if store.jobRuns[0].TriggerSource != "SYSTEM" {
+		t.Fatalf("expected SYSTEM trigger source, got %s", store.jobRuns[0].TriggerSource)
+	}
+	if chatSvc.retryDraftCalls != 1 {
+		t.Fatalf("expected one retry call, got %d", chatSvc.retryDraftCalls)
+	}
+}
+
+func TestStartChatAutoSendRetryLoopDoesNothingWhenDisabled(t *testing.T) {
+	store := &fakeAutomationStore{}
+	chatSvc := &fakeChatIngestor{}
+	svc := NewService(store, chatSvc, config.Config{})
+	logger := &fakeChatBufferFlushLogger{ch: make(chan struct{}, 1)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	StartChatAutoSendRetryLoop(ctx, svc, config.Config{
+		ChatAutoSendRetryEnabled: false,
+	}, logger)
+
+	select {
+	case <-logger.ch:
+		t.Fatal("did not expect automatic chat-auto-send-retry cycle when disabled")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	if len(store.jobRuns) != 0 {
+		t.Fatalf("expected no job runs, got %d", len(store.jobRuns))
+	}
+	if chatSvc.retryDraftCalls != 0 {
+		t.Fatalf("expected no retry calls, got %d", chatSvc.retryDraftCalls)
 	}
 }
 
@@ -656,6 +1413,127 @@ func TestListJobRunsRejectsInvalidLimit(t *testing.T) {
 	}
 }
 
+func TestGetCutoverReadinessReturnsSnapshot(t *testing.T) {
+	startedAt := time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(5 * time.Second)
+	store := &fakeAutomationStore{
+		jobRuns: []JobRun{
+			{
+				ID:            "job-buffer",
+				JobName:       "CHAT_BUFFER_FLUSH",
+				TriggerSource: "SYSTEM",
+				Status:        "COMPLETED",
+				StartedAt:     startedAt,
+				FinishedAt:    &finishedAt,
+				CreatedAt:     startedAt,
+			},
+			{
+				ID:            "job-retry",
+				JobName:       "CHAT_AUTO_SEND_RETRY",
+				TriggerSource: "SYSTEM",
+				Status:        "COMPLETED",
+				StartedAt:     startedAt,
+				FinishedAt:    &finishedAt,
+				CreatedAt:     startedAt,
+			},
+		},
+	}
+	chatSvc := &fakeChatIngestor{
+		summary: chat.SessionsSummary{
+			TotalCount:         4,
+			PendingReviewCount: 1,
+			BotOwnedCount:      4,
+			ReviewSLASeconds:   900,
+		},
+	}
+	handler := NewHandler(NewService(store, chatSvc, config.Config{
+		OpenAIAPIKey:               "sk-test",
+		OpenAIModel:                "gpt-5.4-mini",
+		EvolutionBaseURL:           "https://evolution.example.com",
+		EvolutionAPIKey:            "evo-key",
+		EvolutionInstance:          "schumacher",
+		EvolutionWebhookSecret:     "cutover-secret",
+		ChatBufferAutoFlushEnabled: true,
+		ChatAutoSendRetryEnabled:   true,
+	}, &fakePaymentNotificationSource{}, &fakeBookingExpirationSource{}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/automation/cutover/readiness", nil)
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out CutoverReadinessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.Status != "READY" {
+		t.Fatalf("expected READY status, got %s", out.Status)
+	}
+	if out.SessionsSummary.TotalCount != 4 {
+		t.Fatalf("expected total_count 4, got %d", out.SessionsSummary.TotalCount)
+	}
+	if got := findCutoverCheck(out.Checks, "evolution_webhook_secret"); got == nil || got.Status != "READY" {
+		t.Fatalf("expected evolution_webhook_secret check to be READY, got %#v", got)
+	}
+	if got := findCutoverJob(out.LatestJobs, "CHAT_BUFFER_FLUSH"); got == nil || got.Status != "COMPLETED" {
+		t.Fatalf("expected CHAT_BUFFER_FLUSH job snapshot, got %#v", got)
+	}
+	if got := findCutoverJob(out.LatestJobs, "PAYMENT_NOTIFICATIONS"); got == nil || got.Status != "NEVER_RUN" {
+		t.Fatalf("expected PAYMENT_NOTIFICATIONS as NEVER_RUN, got %#v", got)
+	}
+}
+
+func TestGetCutoverReadinessFlagsAttentionWhenCriticalCheckFails(t *testing.T) {
+	chatSvc := &fakeChatIngestor{
+		summary: chat.SessionsSummary{
+			TotalCount:       2,
+			ReviewSLASeconds: 900,
+		},
+	}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{
+		OpenAIAPIKey:               "sk-test",
+		OpenAIModel:                "gpt-5.4-mini",
+		EvolutionBaseURL:           "https://evolution.example.com",
+		EvolutionAPIKey:            "evo-key",
+		EvolutionInstance:          "schumacher",
+		ChatBufferAutoFlushEnabled: false,
+		ChatAutoSendRetryEnabled:   true,
+	}, &fakePaymentNotificationSource{}, &fakeBookingExpirationSource{}))
+
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/automation/cutover/readiness", nil)
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out CutoverReadinessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if out.Status != "ATTENTION_REQUIRED" {
+		t.Fatalf("expected ATTENTION_REQUIRED status, got %s", out.Status)
+	}
+	if got := findCutoverCheck(out.Checks, "chat_buffer_auto_flush"); got == nil || got.Status != "ATTENTION_REQUIRED" {
+		t.Fatalf("expected chat_buffer_auto_flush attention, got %#v", got)
+	}
+	if len(out.Issues) == 0 {
+		t.Fatalf("expected issues to be present")
+	}
+}
+
 func TestRunChatReviewAlertsSkipsWithoutActiveAlert(t *testing.T) {
 	chatSvc := &fakeChatIngestor{
 		summary: chat.SessionsSummary{
@@ -851,9 +1729,20 @@ type fakeChatIngestor struct {
 	lastInput         chat.IngestMessageInput
 	presenceCalls     int
 	lastPresenceInput chat.ApplyPresenceSignalInput
+	listCalls         int
+	lastListFilter    chat.ListSessionsFilter
+	sessions          []chat.Session
 	summaryCalls      int
 	lastSummaryFilter chat.ListSessionsFilter
 	summary           chat.SessionsSummary
+	reprocessCalls    int
+	reprocessInputs   []chat.ReprocessInput
+	reprocessResults  map[string]chat.ReprocessResult
+	reprocessErrs     map[string]error
+	retryDraftCalls   int
+	retryDraftInputs  []chat.RetryDraftAutoSendInput
+	retryDraftResults map[string]chat.RetryDraftAutoSendResult
+	retryDraftErrs    map[string]error
 	draftCalls        int
 	lastDraftInput    chat.QueueAutomationDraftInput
 	draftResult       chat.QueueAutomationDraftResult
@@ -915,10 +1804,60 @@ func (f *fakeChatIngestor) ApplyPresenceSignal(_ context.Context, input chat.App
 	}, nil
 }
 
+func (f *fakeChatIngestor) ListSessions(_ context.Context, filter chat.ListSessionsFilter) ([]chat.Session, error) {
+	f.listCalls++
+	f.lastListFilter = filter
+	return f.sessions, nil
+}
+
 func (f *fakeChatIngestor) GetSessionsSummary(_ context.Context, filter chat.ListSessionsFilter) (chat.SessionsSummary, error) {
 	f.summaryCalls++
 	f.lastSummaryFilter = filter
 	return f.summary, nil
+}
+
+func (f *fakeChatIngestor) Reprocess(_ context.Context, input chat.ReprocessInput) (chat.ReprocessResult, error) {
+	f.reprocessCalls++
+	f.reprocessInputs = append(f.reprocessInputs, input)
+	if err := f.reprocessErrs[input.SessionID]; err != nil {
+		return chat.ReprocessResult{}, err
+	}
+	if result, ok := f.reprocessResults[input.SessionID]; ok {
+		return result, nil
+	}
+	return chat.ReprocessResult{
+		Session: chat.Session{
+			ID:            input.SessionID,
+			Status:        "ACTIVE",
+			HandoffStatus: "BOT",
+			CreatedAt:     time.Now().UTC(),
+			UpdatedAt:     time.Now().UTC(),
+		},
+		Status: "accepted",
+		Reason: "automation_pending",
+	}, nil
+}
+
+func (f *fakeChatIngestor) RetryDraftAutoSend(_ context.Context, input chat.RetryDraftAutoSendInput) (chat.RetryDraftAutoSendResult, error) {
+	f.retryDraftCalls++
+	f.retryDraftInputs = append(f.retryDraftInputs, input)
+	if err := f.retryDraftErrs[input.SessionID]; err != nil {
+		return chat.RetryDraftAutoSendResult{}, err
+	}
+	if result, ok := f.retryDraftResults[input.SessionID]; ok {
+		return result, nil
+	}
+	return chat.RetryDraftAutoSendResult{
+		Session: chat.Session{
+			ID:            input.SessionID,
+			Status:        "ACTIVE",
+			HandoffStatus: "BOT",
+			CreatedAt:     time.Now().UTC(),
+			UpdatedAt:     time.Now().UTC(),
+		},
+		Status: "accepted",
+		Reason: "draft_auto_send_retried",
+	}, nil
 }
 
 func (f *fakeChatIngestor) QueueAutomationDraft(_ context.Context, input chat.QueueAutomationDraftInput) (chat.QueueAutomationDraftResult, error) {
@@ -1070,6 +2009,92 @@ func TestHandleEvolutionMessagesResponseBody(t *testing.T) {
 	}
 	if out.MessageType != "imageMessage" {
 		t.Fatalf("expected imageMessage type, got %s", out.MessageType)
+	}
+}
+
+func TestHandleEvolutionMessagesDocumentPDFMetadata(t *testing.T) {
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"instance":"belle",
+		"data":{
+			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-PDF-1"},
+			"pushName":"Cliente PDF",
+			"message":{
+				"documentMessage":{
+					"caption":"segue o pdf do documento",
+					"fileName":"rg-frente-verso.pdf",
+					"mimetype":"application/pdf",
+					"pageCount":2,
+					"fileLength":48123,
+					"url":"https://files.example.test/doc.pdf"
+				}
+			},
+			"messageType":"documentMessage",
+			"messageTimestamp":1772544357
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+	if chatSvc.lastInput.Message.Kind != "DOCUMENT" {
+		t.Fatalf("unexpected kind: %s", chatSvc.lastInput.Message.Kind)
+	}
+	if chatSvc.lastInput.Message.Body != "segue o pdf do documento" {
+		t.Fatalf("unexpected extracted body: %s", chatSvc.lastInput.Message.Body)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["document_file_name"]; got != "rg-frente-verso.pdf" {
+		t.Fatalf("unexpected document file name: %#v", got)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["document_mime_type"]; got != "application/pdf" {
+		t.Fatalf("unexpected document mime type: %#v", got)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["document_page_count"]; got != 2 {
+		t.Fatalf("unexpected document page count: %#v", got)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["document_is_pdf"]; got != true {
+		t.Fatalf("expected document_is_pdf=true, got %#v", got)
+	}
+}
+
+func TestHandleEvolutionMessagesDocumentFallsBackToFileName(t *testing.T) {
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-PDF-2"},
+			"message":{
+				"documentMessage":{
+					"fileName":"cpf-cliente.pdf",
+					"mimetype":"application/pdf"
+				}
+			},
+			"messageType":"documentMessage"
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d", http.StatusAccepted, rec.Code)
+	}
+	if chatSvc.lastInput.Message.Body != "cpf-cliente.pdf" {
+		t.Fatalf("expected fallback body from file name, got %s", chatSvc.lastInput.Message.Body)
 	}
 }
 
@@ -1326,6 +2351,29 @@ type fakeChatReviewAlertNotifier struct {
 	lastPayload ChatReviewAlertNotificationPayload
 }
 
+type fakeChatBufferFlushLogger struct {
+	calls int
+	ch    chan struct{}
+}
+
+func findCutoverCheck(items []CutoverReadinessCheck, key string) *CutoverReadinessCheck {
+	for i := range items {
+		if items[i].Key == key {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
+func findCutoverJob(items []CutoverReadinessJob, jobName string) *CutoverReadinessJob {
+	for i := range items {
+		if items[i].JobName == jobName {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
 func (f *fakeChatReviewAlertNotifier) Enabled() bool {
 	return f != nil && f.enabled
 }
@@ -1334,4 +2382,15 @@ func (f *fakeChatReviewAlertNotifier) NotifyReviewAlert(_ context.Context, paylo
 	f.calls++
 	f.lastPayload = payload
 	return nil
+}
+
+func (f *fakeChatBufferFlushLogger) Printf(string, ...interface{}) {
+	f.calls++
+	if f.ch == nil {
+		return
+	}
+	select {
+	case f.ch <- struct{}{}:
+	default:
+	}
 }

@@ -26,14 +26,22 @@ var (
 const toolNameAvailabilitySearch = "availability_search"
 const toolNamePricingQuote = "pricing_quote"
 const toolNameBookingLookup = "booking_lookup"
+const toolNameBookingCreate = "booking_create"
+const toolNameBookingCancel = "booking_cancel"
+const toolNameRescheduleLookup = "reschedule_lookup"
 const toolNamePaymentStatus = "payment_status"
+const toolNamePaymentCreate = "payment_create"
 
 type agentToolContext struct {
-	Calls        []ToolCall
-	Availability *AvailabilitySearchResult
-	Pricing      *PricingQuoteResult
-	Booking      *BookingLookupResult
-	Payments     *PaymentStatusResult
+	Calls         []ToolCall
+	Availability  *AvailabilitySearchResult
+	Pricing       *PricingQuoteResult
+	Booking       *BookingLookupResult
+	BookingCreate *BookingCreateResult
+	BookingCancel *BookingCancelResult
+	Reschedule    *RescheduleAssistResult
+	Payments      *PaymentStatusResult
+	PaymentCreate *PaymentCreateResult
 }
 
 func (s *Service) canSearchAvailability() bool {
@@ -48,13 +56,72 @@ func (s *Service) canSearchBookings() bool {
 	return s.bookings != nil && s.bookings.Enabled()
 }
 
+func (s *Service) canCreateBookings() bool {
+	return s.bookingCreate != nil && s.bookingCreate.Enabled()
+}
+
+func (s *Service) canSearchReschedules() bool {
+	return s.reschedules != nil && s.reschedules.Enabled()
+}
+
 func (s *Service) canSearchPayments() bool {
 	return s.payments != nil && s.payments.Enabled()
 }
 
-func (s *Service) resolveAgentToolContext(ctx context.Context, session Session, memory map[string]interface{}) (agentToolContext, error) {
+func (s *Service) canCreatePayments() bool {
+	return s.paymentCreate != nil && s.paymentCreate.Enabled()
+}
+
+func (s *Service) canCancelBookings() bool {
+	return s.bookingCancel != nil && s.bookingCancel.Enabled()
+}
+
+func (s *Service) resolveAgentToolContext(ctx context.Context, session Session, history []Message, memory map[string]interface{}) (agentToolContext, error) {
 	currentTurn := strings.TrimSpace(asString(memory["current_turn_body"]))
 	context := agentToolContext{}
+	if s.canSearchReschedules() {
+		searchInput, ok := parseRescheduleAssistInput(currentTurn, time.Now().UTC())
+		if ok {
+			startedAt := time.Now().UTC()
+			requestPayload := buildRescheduleAssistRequestPayload(searchInput)
+			result, err := s.reschedules.Search(ctx, searchInput)
+			finishedAt := time.Now().UTC()
+			finishedAtPtr := &finishedAt
+			if err != nil {
+				call, recordErr := s.store.CreateToolCall(ctx, CreateToolCallInput{
+					SessionID:      session.ID,
+					ToolName:       toolNameRescheduleLookup,
+					RequestPayload: requestPayload,
+					Status:         "FAILED",
+					ErrorCode:      "RESCHEDULE_LOOKUP_ERROR",
+					ErrorMessage:   strings.TrimSpace(err.Error()),
+					StartedAt:      startedAt,
+					FinishedAt:     finishedAtPtr,
+				})
+				if recordErr != nil {
+					return agentToolContext{}, recordErr
+				}
+				return agentToolContext{Calls: []ToolCall{call}}, fmt.Errorf("%w: %v", ErrAgentToolFailed, err)
+			}
+
+			call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
+				SessionID:       session.ID,
+				ToolName:        toolNameRescheduleLookup,
+				RequestPayload:  requestPayload,
+				ResponsePayload: buildRescheduleAssistResponsePayload(result),
+				Status:          "COMPLETED",
+				StartedAt:       startedAt,
+				FinishedAt:      finishedAtPtr,
+			})
+			if err != nil {
+				return agentToolContext{}, err
+			}
+
+			context.Calls = append(context.Calls, call)
+			context.Reschedule = &result
+			return context, nil
+		}
+	}
 	if s.canSearchBookings() {
 		searchInput, ok := parseBookingLookupInput(currentTurn)
 		if ok {
@@ -95,6 +162,20 @@ func (s *Service) resolveAgentToolContext(ctx context.Context, session Session, 
 
 			context.Calls = append(context.Calls, call)
 			context.Booking = &result
+
+			if s.canCancelBookings() && looksLikeBookingCancelIntent(currentTurn) && len(result.Results) > 0 {
+				cancelInput, ok := parseBookingCancelInput(history, currentTurn, context.Booking, nil)
+				if ok {
+					return s.executeBookingCancelTool(ctx, session, context, cancelInput)
+				}
+			}
+
+			if s.canCreatePayments() && looksLikePaymentCreateIntent(currentTurn) && len(result.Results) > 0 {
+				createInput, ok := parsePaymentCreateInput(session, history, currentTurn, context.Booking, nil)
+				if ok {
+					return s.executePaymentCreateTool(ctx, session, context, createInput)
+				}
+			}
 
 			if s.canSearchPayments() && looksLikePaymentLookupIntent(currentTurn) && len(result.Results) > 0 {
 				paymentInput := PaymentStatusInput{
@@ -143,6 +224,10 @@ func (s *Service) resolveAgentToolContext(ctx context.Context, session Session, 
 
 			return context, nil
 		}
+	}
+
+	if context, used, err := s.resolveContextualActionTools(ctx, session, history, currentTurn, context); err != nil || used {
+		return context, err
 	}
 
 	if !s.canSearchAvailability() {
@@ -232,6 +317,197 @@ func (s *Service) resolveAgentToolContext(ctx context.Context, session Session, 
 		context.Pricing = &pricingResult
 	}
 
+	if s.canCreateBookings() {
+		createInput, ok := parseBookingCreateInput(session, history, currentTurn, context.Availability)
+		if ok {
+			startedAt := time.Now().UTC()
+			requestPayload := buildBookingCreateRequestPayload(createInput)
+			createResult, createErr := s.bookingCreate.Create(ctx, createInput)
+			finishedAt := time.Now().UTC()
+			finishedAtPtr := &finishedAt
+			if createErr != nil {
+				call, recordErr := s.store.CreateToolCall(ctx, CreateToolCallInput{
+					SessionID:      session.ID,
+					ToolName:       toolNameBookingCreate,
+					RequestPayload: requestPayload,
+					Status:         "FAILED",
+					ErrorCode:      "BOOKING_CREATE_ERROR",
+					ErrorMessage:   strings.TrimSpace(createErr.Error()),
+					StartedAt:      startedAt,
+					FinishedAt:     finishedAtPtr,
+				})
+				if recordErr != nil {
+					return agentToolContext{}, recordErr
+				}
+				context.Calls = append(context.Calls, call)
+				return context, fmt.Errorf("%w: %v", ErrAgentToolFailed, createErr)
+			}
+
+			call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
+				SessionID:       session.ID,
+				ToolName:        toolNameBookingCreate,
+				RequestPayload:  requestPayload,
+				ResponsePayload: buildBookingCreateResponsePayload(createResult),
+				Status:          "COMPLETED",
+				StartedAt:       startedAt,
+				FinishedAt:      finishedAtPtr,
+			})
+			if err != nil {
+				return agentToolContext{}, err
+			}
+			context.Calls = append(context.Calls, call)
+			context.BookingCreate = &createResult
+		}
+	}
+
+	return context, nil
+}
+
+func (s *Service) resolveContextualActionTools(ctx context.Context, session Session, history []Message, currentTurn string, context agentToolContext) (agentToolContext, bool, error) {
+	if s.canCreateBookings() {
+		createInput, ok := parseBookingCreateInput(session, history, currentTurn, nil)
+		if ok {
+			updated, err := s.executeBookingCreateTool(ctx, session, context, createInput)
+			return updated, true, err
+		}
+	}
+	if s.canCreatePayments() {
+		createInput, ok := parsePaymentCreateInput(session, history, currentTurn, nil, nil)
+		if ok {
+			updated, err := s.executePaymentCreateTool(ctx, session, context, createInput)
+			return updated, true, err
+		}
+	}
+	if s.canCancelBookings() {
+		cancelInput, ok := parseBookingCancelInput(history, currentTurn, nil, nil)
+		if ok {
+			updated, err := s.executeBookingCancelTool(ctx, session, context, cancelInput)
+			return updated, true, err
+		}
+	}
+	return context, false, nil
+}
+
+func (s *Service) executeBookingCreateTool(ctx context.Context, session Session, context agentToolContext, input BookingCreateInput) (agentToolContext, error) {
+	startedAt := time.Now().UTC()
+	requestPayload := buildBookingCreateRequestPayload(input)
+	createResult, createErr := s.bookingCreate.Create(ctx, input)
+	finishedAt := time.Now().UTC()
+	finishedAtPtr := &finishedAt
+	if createErr != nil {
+		call, recordErr := s.store.CreateToolCall(ctx, CreateToolCallInput{
+			SessionID:      session.ID,
+			ToolName:       toolNameBookingCreate,
+			RequestPayload: requestPayload,
+			Status:         "FAILED",
+			ErrorCode:      "BOOKING_CREATE_ERROR",
+			ErrorMessage:   strings.TrimSpace(createErr.Error()),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAtPtr,
+		})
+		if recordErr != nil {
+			return agentToolContext{}, recordErr
+		}
+		context.Calls = append(context.Calls, call)
+		return context, fmt.Errorf("%w: %v", ErrAgentToolFailed, createErr)
+	}
+
+	call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
+		SessionID:       session.ID,
+		ToolName:        toolNameBookingCreate,
+		RequestPayload:  requestPayload,
+		ResponsePayload: buildBookingCreateResponsePayload(createResult),
+		Status:          "COMPLETED",
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAtPtr,
+	})
+	if err != nil {
+		return agentToolContext{}, err
+	}
+	context.Calls = append(context.Calls, call)
+	context.BookingCreate = &createResult
+	return context, nil
+}
+
+func (s *Service) executePaymentCreateTool(ctx context.Context, session Session, context agentToolContext, input PaymentCreateInput) (agentToolContext, error) {
+	startedAt := time.Now().UTC()
+	requestPayload := buildPaymentCreateRequestPayload(input)
+	createResult, createErr := s.paymentCreate.Create(ctx, input)
+	finishedAt := time.Now().UTC()
+	finishedAtPtr := &finishedAt
+	if createErr != nil {
+		call, recordErr := s.store.CreateToolCall(ctx, CreateToolCallInput{
+			SessionID:      session.ID,
+			ToolName:       toolNamePaymentCreate,
+			RequestPayload: requestPayload,
+			Status:         "FAILED",
+			ErrorCode:      "PAYMENT_CREATE_ERROR",
+			ErrorMessage:   strings.TrimSpace(createErr.Error()),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAtPtr,
+		})
+		if recordErr != nil {
+			return agentToolContext{}, recordErr
+		}
+		context.Calls = append(context.Calls, call)
+		return context, fmt.Errorf("%w: %v", ErrAgentToolFailed, createErr)
+	}
+
+	call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
+		SessionID:       session.ID,
+		ToolName:        toolNamePaymentCreate,
+		RequestPayload:  requestPayload,
+		ResponsePayload: buildPaymentCreateResponsePayload(createResult),
+		Status:          "COMPLETED",
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAtPtr,
+	})
+	if err != nil {
+		return agentToolContext{}, err
+	}
+	context.Calls = append(context.Calls, call)
+	context.PaymentCreate = &createResult
+	return context, nil
+}
+
+func (s *Service) executeBookingCancelTool(ctx context.Context, session Session, context agentToolContext, input BookingCancelInput) (agentToolContext, error) {
+	startedAt := time.Now().UTC()
+	requestPayload := buildBookingCancelRequestPayload(input)
+	cancelResult, cancelErr := s.bookingCancel.Cancel(ctx, input)
+	finishedAt := time.Now().UTC()
+	finishedAtPtr := &finishedAt
+	if cancelErr != nil {
+		call, recordErr := s.store.CreateToolCall(ctx, CreateToolCallInput{
+			SessionID:      session.ID,
+			ToolName:       toolNameBookingCancel,
+			RequestPayload: requestPayload,
+			Status:         "FAILED",
+			ErrorCode:      "BOOKING_CANCEL_ERROR",
+			ErrorMessage:   strings.TrimSpace(cancelErr.Error()),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAtPtr,
+		})
+		if recordErr != nil {
+			return agentToolContext{}, recordErr
+		}
+		context.Calls = append(context.Calls, call)
+		return context, fmt.Errorf("%w: %v", ErrAgentToolFailed, cancelErr)
+	}
+
+	call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
+		SessionID:       session.ID,
+		ToolName:        toolNameBookingCancel,
+		RequestPayload:  requestPayload,
+		ResponsePayload: buildBookingCancelResponsePayload(cancelResult),
+		Status:          "COMPLETED",
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAtPtr,
+	})
+	if err != nil {
+		return agentToolContext{}, err
+	}
+	context.Calls = append(context.Calls, call)
+	context.BookingCancel = &cancelResult
 	return context, nil
 }
 
@@ -559,16 +835,7 @@ func parseBookingLookupInput(text string) (BookingLookupInput, bool) {
 		return BookingLookupInput{}, false
 	}
 
-	bookingID := strings.ToUpper(strings.TrimSpace(bookingIDPattern.FindString(body)))
-	reservationCode := ""
-	for _, token := range reservationCodePattern.FindAllString(strings.ToUpper(body), -1) {
-		if token == "" || token == bookingID || !containsLetter(token) {
-			continue
-		}
-		reservationCode = token
-		break
-	}
-
+	bookingID, reservationCode := extractBookingIdentifiers(body)
 	if bookingID == "" && reservationCode == "" {
 		return BookingLookupInput{}, false
 	}
@@ -605,6 +872,57 @@ func looksLikeBookingLookupIntent(text string) bool {
 	return false
 }
 
+func parseRescheduleAssistInput(text string, observedAt time.Time) (RescheduleAssistInput, bool) {
+	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if body == "" || !looksLikeRescheduleIntent(body) {
+		return RescheduleAssistInput{}, false
+	}
+
+	bookingID, reservationCode := extractBookingIdentifiers(body)
+	requestedTripDate := extractTripDate(body, observedAt)
+	if bookingID == "" && reservationCode == "" {
+		return RescheduleAssistInput{}, false
+	}
+	if requestedTripDate == nil {
+		return RescheduleAssistInput{}, false
+	}
+
+	requestedOrigin, requestedDestination := extractRequestedRoute(body)
+	input := RescheduleAssistInput{
+		BookingID:            bookingID,
+		ReservationCode:      reservationCode,
+		RequestedTripDate:    requestedTripDate,
+		RequestedOrigin:      requestedOrigin,
+		RequestedDestination: requestedDestination,
+		RequestedQty:         extractPassengerQuantity(body),
+	}
+	return input, true
+}
+
+func looksLikeRescheduleIntent(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return false
+	}
+
+	keywords := []string{
+		"reagend",
+		"remarc",
+		"mudar a data",
+		"mudar data",
+		"trocar a data",
+		"trocar data",
+		"alterar a data",
+		"alterar data",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(lower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 func looksLikePaymentLookupIntent(text string) bool {
 	lower := strings.ToLower(strings.TrimSpace(text))
 	if lower == "" {
@@ -626,6 +944,36 @@ func looksLikePaymentLookupIntent(text string) bool {
 		}
 	}
 	return false
+}
+
+func extractBookingIdentifiers(text string) (string, string) {
+	bookingID := strings.ToUpper(strings.TrimSpace(bookingIDPattern.FindString(text)))
+	reservationCode := ""
+	for _, token := range reservationCodePattern.FindAllString(strings.ToUpper(text), -1) {
+		if token == "" || token == bookingID || !containsLetter(token) {
+			continue
+		}
+		reservationCode = token
+		break
+	}
+	return bookingID, reservationCode
+}
+
+func extractRequestedRoute(text string) (string, string) {
+	origin, destination := "", ""
+	if match := routeFromToPattern.FindStringSubmatch(text); len(match) == 3 {
+		origin = normalizeLocationDisplayName(match[1])
+		destination = normalizeLocationDisplayName(match[2])
+	}
+	if origin != "" && destination != "" {
+		return origin, destination
+	}
+
+	locations := extractCanonicalLocations(text)
+	if len(locations) >= 2 {
+		return locations[0], locations[1]
+	}
+	return "", ""
 }
 
 func containsLetter(value string) bool {
@@ -682,6 +1030,87 @@ func buildBookingLookupResponsePayload(result BookingLookupResult) map[string]in
 	if result.Filter.ReservationCode != "" {
 		payload["reservation_code"] = result.Filter.ReservationCode
 	}
+	return payload
+}
+
+func buildRescheduleAssistRequestPayload(input RescheduleAssistInput) map[string]interface{} {
+	payload := map[string]interface{}{}
+	if input.BookingID != "" {
+		payload["booking_id"] = input.BookingID
+	}
+	if input.ReservationCode != "" {
+		payload["reservation_code"] = input.ReservationCode
+	}
+	if input.RequestedTripDate != nil {
+		payload["requested_trip_date"] = input.RequestedTripDate.UTC().Format("2006-01-02")
+	}
+	if input.RequestedOrigin != "" {
+		payload["requested_origin"] = input.RequestedOrigin
+	}
+	if input.RequestedDestination != "" {
+		payload["requested_destination"] = input.RequestedDestination
+	}
+	if input.RequestedQty > 0 {
+		payload["requested_qty"] = input.RequestedQty
+	}
+	return payload
+}
+
+func buildRescheduleAssistResponsePayload(result RescheduleAssistResult) map[string]interface{} {
+	payload := map[string]interface{}{
+		"mode":                  result.Mode,
+		"next_step":             result.NextStep,
+		"human_review_required": result.HumanReviewRequired,
+		"can_auto_reschedule":   result.CanAutoReschedule,
+		"options_count":         len(result.Options),
+	}
+	if len(result.Errors) > 0 {
+		payload["errors"] = result.Errors
+	}
+	if result.MessageForAgent != "" {
+		payload["message_for_agent"] = result.MessageForAgent
+	}
+	if len(result.FieldsRequiredForManualCompletion) > 0 {
+		payload["fields_required_for_manual_completion"] = result.FieldsRequiredForManualCompletion
+	}
+	if result.Booking != nil {
+		payload["booking"] = map[string]interface{}{
+			"booking_id":       result.Booking.ID,
+			"trip_id":          result.Booking.TripID,
+			"status":           result.Booking.Status,
+			"reservation_code": result.Booking.ReservationCode,
+		}
+	}
+	payload["current"] = map[string]interface{}{
+		"origin":          result.Current.Origin,
+		"destination":     result.Current.Destination,
+		"trip_date":       result.Current.TripDate,
+		"passenger_count": result.Current.PassengerCount,
+	}
+	payload["requested"] = map[string]interface{}{
+		"origin":        result.Requested.Origin,
+		"destination":   result.Requested.Destination,
+		"trip_date":     result.Requested.TripDate,
+		"qtd_passagens": result.Requested.Qty,
+	}
+
+	options := make([]map[string]interface{}, 0, len(result.Options))
+	for _, option := range result.Options {
+		options = append(options, map[string]interface{}{
+			"trip_id":         option.TripID,
+			"trip_date":       option.TripDate,
+			"hora":            option.DepartureTime,
+			"origin":          option.Origin,
+			"destination":     option.Destination,
+			"board_stop_id":   option.BoardStopID,
+			"alight_stop_id":  option.AlightStopID,
+			"seats_available": option.SeatsAvailable,
+			"price":           option.Price,
+			"currency":        option.Currency,
+			"package_name":    option.PackageName,
+		})
+	}
+	payload["options"] = options
 	return payload
 }
 

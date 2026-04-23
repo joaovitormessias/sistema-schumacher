@@ -55,7 +55,9 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("db error: %v", err)
@@ -96,15 +98,23 @@ func main() {
 	availabilitySvc := availability.NewService(availability.NewRepository(pool))
 	pricingSvc := pricing.NewService(pricing.NewRepository(pool))
 	bookingsSvc := bookings.NewService(bookings.NewRepository(pool), pricingSvc, paymentsSvc)
+	reportsSvc := reports.NewService(reports.NewRepository(pool))
 	evolutionSender := automation.NewEvolutionSender(cfg)
 	openAIRunner := chat.NewOpenAIRunner(cfg)
 	availabilityTool := chat.NewAvailabilityTool(availabilitySvc)
 	pricingQuoteTool := chat.NewPricingQuoteTool(pricingSvc)
 	bookingLookupTool := chat.NewBookingLookupTool(bookingsSvc)
+	bookingCreateTool := chat.NewBookingCreateTool(bookingsSvc)
+	bookingCancelTool := chat.NewBookingCancelTool(bookingsSvc)
+	rescheduleAssistTool := chat.NewRescheduleAssistTool(bookingLookupTool, reportsSvc, availabilityTool)
 	paymentStatusTool := chat.NewPaymentStatusTool(paymentsSvc)
-	chatSvc := chat.NewService(chat.NewRepository(pool), cfg, evolutionSender, openAIRunner, availabilityTool, pricingQuoteTool, bookingLookupTool, paymentStatusTool)
+	paymentCreateTool := chat.NewPaymentCreateTool(bookingsSvc, paymentsSvc)
+	chatSvc := chat.NewService(chat.NewRepository(pool), cfg, evolutionSender, openAIRunner, availabilityTool, pricingQuoteTool, bookingLookupTool, bookingCreateTool, bookingCancelTool, rescheduleAssistTool, paymentStatusTool, paymentCreateTool)
 	chatHandler := chat.NewHandler(chatSvc)
-	automationHandler := automation.NewHandler(automation.NewService(automation.NewRepository(pool), chatSvc, cfg, paymentsRepo, bookingsSvc))
+	automationSvc := automation.NewService(automation.NewRepository(pool), chatSvc, cfg, paymentsRepo, bookingsSvc)
+	automation.StartChatBufferFlushLoop(ctx, automationSvc, cfg, log.Default())
+	automation.StartChatAutoSendRetryLoop(ctx, automationSvc, cfg, log.Default())
+	automationHandler := automation.NewHandler(automationSvc)
 	automationHandler.RegisterWebhooks(r)
 
 	r.Group(func(pr chi.Router) {
@@ -117,7 +127,7 @@ func main() {
 		tripOperationsHandler := trip_operations.NewHandler(trip_operations.NewService(trip_operations.NewRepository(pool)))
 		availabilityHandler := availability.NewHandler(availabilitySvc)
 		bookingsHandler := bookings.NewHandler(bookingsSvc)
-		reportsHandler := reports.NewHandler(reports.NewService(reports.NewRepository(pool)))
+		reportsHandler := reports.NewHandler(reportsSvc)
 		pricingHandler := pricing.NewHandler(pricingSvc)
 
 		routesHandler.RegisterRoutes(pr)

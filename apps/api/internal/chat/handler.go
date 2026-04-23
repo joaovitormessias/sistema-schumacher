@@ -26,6 +26,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 		r.Route("/sessions/{sessionId}", func(r chi.Router) {
 			r.Get("/", h.getSession)
 			r.Get("/draft", h.getCurrentDraft)
+			r.Post("/draft/retry-auto-send", h.retryDraftAutoSend)
 			r.Get("/messages", h.listMessages)
 			r.Post("/handoff", h.requestHandoff)
 			r.Post("/resume", h.resumeSession)
@@ -133,6 +134,40 @@ func (h *Handler) getCurrentDraft(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, item)
+}
+
+func (h *Handler) retryDraftAutoSend(w http.ResponseWriter, r *http.Request) {
+	sessionID, err := httpx.ParseUUIDParam(r, "sessionId")
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_ID", "invalid session id", nil)
+		return
+	}
+
+	var input RetryDraftAutoSendInput
+	if err := httpx.DecodeJSON(r, &input); err != nil && !errors.Is(err, http.ErrBodyNotAllowed) {
+		httpx.WriteError(w, http.StatusBadRequest, "INVALID_BODY", "invalid json", err.Error())
+		return
+	}
+	input.SessionID = sessionID.String()
+
+	result, err := h.svc.RetryDraftAutoSend(r.Context(), input)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "NOT_FOUND", "chat session not found", nil)
+		case errors.Is(err, ErrDraftNotFound):
+			httpx.WriteError(w, http.StatusNotFound, "DRAFT_NOT_FOUND", "chat session has no automation draft", nil)
+		case errors.Is(err, ErrDraftAutoSendRetryNotAllowed):
+			httpx.WriteError(w, http.StatusConflict, "DRAFT_AUTO_SEND_RETRY_NOT_ALLOWED", err.Error(), nil)
+		case errors.Is(err, ErrReplyDeliveryFailed):
+			httpx.WriteError(w, http.StatusBadGateway, "CHAT_AUTO_SEND_RETRY_ERROR", "could not retry auto-send for current draft", err.Error())
+		default:
+			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_DRAFT_AUTO_SEND_RETRY_ERROR", "could not retry auto-send for current draft", err.Error())
+		}
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) listMessages(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +321,8 @@ func (h *Handler) reprocess(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadGateway, "CHAT_AGENT_TOOL_ERROR", "could not resolve agent tool context", err.Error())
 		case errors.Is(err, ErrAgentRunFailed):
 			httpx.WriteError(w, http.StatusBadGateway, "CHAT_AGENT_RUN_ERROR", "could not generate agent draft", err.Error())
+		case errors.Is(err, ErrReplyDeliveryFailed):
+			httpx.WriteError(w, http.StatusBadGateway, "CHAT_AUTO_SEND_ERROR", "could not auto-send agent draft", err.Error())
 		default:
 			httpx.WriteError(w, http.StatusInternalServerError, "CHAT_REPROCESS_ERROR", "could not reprocess chat session", err.Error())
 		}
@@ -297,13 +334,14 @@ func (h *Handler) reprocess(w http.ResponseWriter, r *http.Request) {
 
 func parseListSessionsFilter(r *http.Request) (ListSessionsFilter, error) {
 	filter := ListSessionsFilter{
-		Channel:           r.URL.Query().Get("channel"),
-		Status:            r.URL.Query().Get("status"),
-		HandoffStatus:     r.URL.Query().Get("handoff_status"),
-		ContactKey:        r.URL.Query().Get("contact_key"),
-		AgentStatus:       r.URL.Query().Get("agent_status"),
-		DraftReviewStatus: r.URL.Query().Get("draft_review_status"),
-		OrderBy:           r.URL.Query().Get("order_by"),
+		Channel:             r.URL.Query().Get("channel"),
+		Status:              r.URL.Query().Get("status"),
+		HandoffStatus:       r.URL.Query().Get("handoff_status"),
+		ContactKey:          r.URL.Query().Get("contact_key"),
+		AgentStatus:         r.URL.Query().Get("agent_status"),
+		DraftReviewStatus:   r.URL.Query().Get("draft_review_status"),
+		DraftAutoSendStatus: r.URL.Query().Get("draft_auto_send_status"),
+		OrderBy:             r.URL.Query().Get("order_by"),
 	}
 
 	if limit := r.URL.Query().Get("limit"); limit != "" {

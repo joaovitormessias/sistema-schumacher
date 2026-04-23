@@ -272,6 +272,12 @@ func TestGetCurrentDraftReturnsObservabilityForGeneratedDraft(t *testing.T) {
 	if out.ProviderResponseID != "resp-draft-view-1" {
 		t.Fatalf("expected provider response id resp-draft-view-1, got %s", out.ProviderResponseID)
 	}
+	if out.AutoSendStatus != draftAutoSendStatusReviewNeeded {
+		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusReviewNeeded, out.AutoSendStatus)
+	}
+	if len(out.AutoSendReasons) != 1 || out.AutoSendReasons[0] != draftAutoSendReasonToolCall {
+		t.Fatalf("expected auto_send_reasons [%s], got %+v", draftAutoSendReasonToolCall, out.AutoSendReasons)
+	}
 	if len(out.CurrentTurnMessageIDs) != 1 || out.CurrentTurnMessageIDs[0] == "" {
 		t.Fatalf("expected current_turn_message_ids, got %+v", out.CurrentTurnMessageIDs)
 	}
@@ -374,11 +380,170 @@ func TestGetCurrentDraftReturnsLinkedReplyForReviewedDraft(t *testing.T) {
 	if out.ReviewedAt == nil {
 		t.Fatalf("expected reviewed_at to be present")
 	}
+	if out.AutoSendStatus != draftAutoSendStatusEligible {
+		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusEligible, out.AutoSendStatus)
+	}
+	if len(out.AutoSendReasons) != 0 {
+		t.Fatalf("expected no auto_send_reasons for simple text draft, got %+v", out.AutoSendReasons)
+	}
 	if out.LinkedReply == nil {
 		t.Fatalf("expected linked reply to be present")
 	}
 	if out.LinkedReply.ID != replied.Message.ID {
 		t.Fatalf("expected linked reply id %s, got %s", replied.Message.ID, out.LinkedReply.ID)
+	}
+}
+
+func TestGetCurrentDraftReturnsReviewRequiredForDocumentTurn(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Recebi seu documento e vou analisar.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp-draft-view-document-1",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner)
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511777000000",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			Kind:              "DOCUMENT",
+			ProviderMessageID: "msg-draft-view-document-1",
+			IdempotencyKey:    "idem-draft-view-document-1",
+			Body:              "RG frente",
+			NormalizedPayload: map[string]interface{}{
+				"document_file_name": "rg-frente.pdf",
+				"document_mime_type": "application/pdf",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+	reprocessed, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
+	if err != nil {
+		t.Fatalf("reprocess message: %v", err)
+	}
+	if reprocessed.Draft == nil {
+		t.Fatalf("expected draft to be generated")
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/sessions/"+ingested.Session.ID+"/draft", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out CurrentDraftResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal current draft: %v", err)
+	}
+	if out.AutoSendStatus != draftAutoSendStatusReviewNeeded {
+		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusReviewNeeded, out.AutoSendStatus)
+	}
+	if len(out.AutoSendReasons) != 1 || out.AutoSendReasons[0] != draftAutoSendReasonNonTextTurn {
+		t.Fatalf("expected auto_send_reasons [%s], got %+v", draftAutoSendReasonNonTextTurn, out.AutoSendReasons)
+	}
+}
+
+func TestGetCurrentDraftReturnsAutoSendRetryDetails(t *testing.T) {
+	store := newFakeStore()
+	now := time.Now().UTC()
+	session, _ := store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511888000000",
+		CustomerPhone: "5511888000000",
+		LastMessageAt: timePointer(now),
+		Metadata: map[string]interface{}{
+			"agent": map[string]interface{}{
+				"status":                    agentStatusDraftGenerated,
+				"draft_generated_at":        now.Add(-5 * time.Minute).Format(time.RFC3339Nano),
+				"auto_send_status":          draftAutoSendStatusRetryPending,
+				"auto_send_reasons":         []string{draftAutoSendReasonDeliveryFail},
+				"auto_send_last_attempt_at": now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+				"auto_send_last_error_text": "gateway timeout",
+			},
+		},
+	})
+
+	draft := Message{
+		ID:             uuid.NewString(),
+		SessionID:      session.ID,
+		Direction:      "OUTBOUND",
+		Kind:           "TEXT",
+		IdempotencyKey: "chat-agent-draft-retry-1",
+		Body:           "Posso seguir com seu atendimento.",
+		Payload: map[string]interface{}{
+			"mode":                            "AUTOMATION_DRAFT",
+			"draft_idempotency_key":           "chat-agent-draft-retry-1",
+			"auto_send_status":                draftAutoSendStatusRetryPending,
+			"auto_send_reasons":               []string{draftAutoSendReasonDeliveryFail},
+			"auto_send_last_attempt_at":       now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+			"auto_send_retry_pending_at":      now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+			"auto_send_last_error_text":       "gateway timeout",
+			"auto_send_last_reply_message_id": "reply-retry-1",
+			"auto_send_last_outbound_id":      "outbound-retry-1",
+		},
+		NormalizedPayload: map[string]interface{}{
+			"mode":                            "AUTOMATION_DRAFT",
+			"draft_idempotency_key":           "chat-agent-draft-retry-1",
+			"auto_send_status":                draftAutoSendStatusRetryPending,
+			"auto_send_reasons":               []string{draftAutoSendReasonDeliveryFail},
+			"auto_send_last_attempt_at":       now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+			"auto_send_retry_pending_at":      now.Add(-1 * time.Minute).Format(time.RFC3339Nano),
+			"auto_send_last_error_text":       "gateway timeout",
+			"auto_send_last_reply_message_id": "reply-retry-1",
+			"auto_send_last_outbound_id":      "outbound-retry-1",
+		},
+		ProcessingStatus: messageStatusAutomationDraft,
+		ReceivedAt:       now.Add(-5 * time.Minute),
+		CreatedAt:        now.Add(-5 * time.Minute),
+	}
+	store.messages[draft.ID] = draft
+	store.messageOrder = append(store.messageOrder, draft.ID)
+	store.byIdempotencyKey[draft.IdempotencyKey] = draft.ID
+
+	handler := NewHandler(NewService(store, config.Config{ChatDebounceWindowMS: 1500}))
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/sessions/"+session.ID+"/draft", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out CurrentDraftResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal current draft: %v", err)
+	}
+	if out.AutoSendStatus != draftAutoSendStatusRetryPending {
+		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusRetryPending, out.AutoSendStatus)
+	}
+	if !out.AutoSendIssueActive {
+		t.Fatalf("expected auto_send_issue_active true")
+	}
+	if out.AutoSendLastErrorText != "gateway timeout" {
+		t.Fatalf("expected auto_send_last_error_text gateway timeout, got %s", out.AutoSendLastErrorText)
+	}
+	if out.AutoSendLastReplyID != "reply-retry-1" {
+		t.Fatalf("expected auto_send_last_reply_message_id reply-retry-1, got %s", out.AutoSendLastReplyID)
+	}
+	if out.AutoSendLastOutboundID != "outbound-retry-1" {
+		t.Fatalf("expected auto_send_last_outbound_id outbound-retry-1, got %s", out.AutoSendLastOutboundID)
+	}
+	if out.AutoSendLastAttemptAt == nil || out.AutoSendRetryAt == nil {
+		t.Fatalf("expected auto-send retry timestamps to be populated")
 	}
 }
 
@@ -492,6 +657,12 @@ func TestListSessionsIncludesDraftReviewSummary(t *testing.T) {
 	if sessions[0].DraftProviderResponseID != "resp-session-summary-1" {
 		t.Fatalf("expected provider response id resp-session-summary-1, got %s", sessions[0].DraftProviderResponseID)
 	}
+	if sessions[0].DraftAutoSendStatus != draftAutoSendStatusReviewNeeded {
+		t.Fatalf("expected draft auto send status %s, got %s", draftAutoSendStatusReviewNeeded, sessions[0].DraftAutoSendStatus)
+	}
+	if len(sessions[0].DraftAutoSendReasons) != 1 || sessions[0].DraftAutoSendReasons[0] != draftAutoSendReasonToolCall {
+		t.Fatalf("expected draft auto send reasons [%s], got %+v", draftAutoSendReasonToolCall, sessions[0].DraftAutoSendReasons)
+	}
 }
 
 func TestGetSessionIncludesReviewedDraftSummary(t *testing.T) {
@@ -571,6 +742,12 @@ func TestGetSessionIncludesReviewedDraftSummary(t *testing.T) {
 	}
 	if out.DraftReviewAction != "APPROVED_AS_IS" {
 		t.Fatalf("expected draft review action APPROVED_AS_IS, got %s", out.DraftReviewAction)
+	}
+	if out.DraftAutoSendStatus != draftAutoSendStatusEligible {
+		t.Fatalf("expected draft auto send status %s, got %s", draftAutoSendStatusEligible, out.DraftAutoSendStatus)
+	}
+	if len(out.DraftAutoSendReasons) != 0 {
+		t.Fatalf("expected no draft auto send reasons, got %+v", out.DraftAutoSendReasons)
 	}
 }
 
@@ -659,6 +836,66 @@ func TestListSessionsFiltersByDraftReviewStatus(t *testing.T) {
 	}
 	if sessions[0].DraftReviewStatus != "PENDING_REVIEW" {
 		t.Fatalf("expected draft review status PENDING_REVIEW, got %s", sessions[0].DraftReviewStatus)
+	}
+}
+
+func TestListSessionsFiltersByDraftAutoSendStatus(t *testing.T) {
+	store := newFakeStore()
+	now := time.Now().UTC()
+
+	retryPending, _ := store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511666666661",
+		CustomerPhone: "5511666666661",
+		LastMessageAt: timePointer(now.Add(-3 * time.Minute)),
+		Metadata: map[string]interface{}{
+			"agent": map[string]interface{}{
+				"status":             agentStatusDraftGenerated,
+				"draft_generated_at": now.Add(-10 * time.Minute).Format(time.RFC3339Nano),
+				"auto_send_status":   draftAutoSendStatusRetryPending,
+				"auto_send_reasons":  []string{draftAutoSendReasonDeliveryFail},
+			},
+		},
+	})
+	_, _ = store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511666666662",
+		CustomerPhone: "5511666666662",
+		LastMessageAt: timePointer(now.Add(-2 * time.Minute)),
+		Metadata: map[string]interface{}{
+			"agent": map[string]interface{}{
+				"status":             agentStatusDraftGenerated,
+				"draft_generated_at": now.Add(-9 * time.Minute).Format(time.RFC3339Nano),
+				"auto_send_status":   draftAutoSendStatusBlockedHuman,
+				"auto_send_reasons":  []string{draftAutoSendReasonHumanHandoff},
+			},
+		},
+	})
+
+	handler := NewHandler(NewService(store, config.Config{ChatDebounceWindowMS: 1500}))
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/sessions?draft_auto_send_status=auto_send_retry_pending&limit=10", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var sessions []Session
+	if err := json.Unmarshal(rec.Body.Bytes(), &sessions); err != nil {
+		t.Fatalf("unmarshal sessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected one retry-pending session, got %d", len(sessions))
+	}
+	if sessions[0].ID != retryPending.ID {
+		t.Fatalf("expected retry-pending session %s, got %s", retryPending.ID, sessions[0].ID)
+	}
+	if sessions[0].DraftAutoSendStatus != draftAutoSendStatusRetryPending {
+		t.Fatalf("expected draft auto send status %s, got %s", draftAutoSendStatusRetryPending, sessions[0].DraftAutoSendStatus)
 	}
 }
 
@@ -790,6 +1027,34 @@ func TestGetSessionsSummaryReturnsReviewCounters(t *testing.T) {
 
 	_, _ = store.UpsertSession(context.Background(), UpsertSessionInput{
 		Channel:       "WHATSAPP",
+		ContactKey:    "5511000000004",
+		CustomerPhone: "5511000000004",
+		LastMessageAt: timePointer(now.Add(-90 * time.Second)),
+		Metadata: map[string]interface{}{
+			"agent": map[string]interface{}{
+				"status":             "DRAFT_GENERATED",
+				"draft_generated_at": now.Add(-6 * time.Minute).Format(time.RFC3339Nano),
+				"auto_send_status":   draftAutoSendStatusRetryPending,
+				"auto_send_reasons":  []string{draftAutoSendReasonDeliveryFail},
+			},
+		},
+	})
+	_, _ = store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511000000005",
+		CustomerPhone: "5511000000005",
+		LastMessageAt: timePointer(now.Add(-30 * time.Second)),
+		Metadata: map[string]interface{}{
+			"agent": map[string]interface{}{
+				"status":             "DRAFT_GENERATED",
+				"draft_generated_at": now.Add(-4 * time.Minute).Format(time.RFC3339Nano),
+				"auto_send_status":   draftAutoSendStatusBlockedHuman,
+				"auto_send_reasons":  []string{draftAutoSendReasonHumanHandoff},
+			},
+		},
+	})
+	_, _ = store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
 		ContactKey:    "5511000000003",
 		CustomerPhone: "5511000000003",
 		LastMessageAt: timePointer(now.Add(-1 * time.Minute)),
@@ -811,14 +1076,14 @@ func TestGetSessionsSummaryReturnsReviewCounters(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("unmarshal summary: %v", err)
 	}
-	if out.TotalCount != 3 {
-		t.Fatalf("expected total_count 3, got %d", out.TotalCount)
+	if out.TotalCount != 5 {
+		t.Fatalf("expected total_count 5, got %d", out.TotalCount)
 	}
 	if out.ReviewSLASeconds != 15*60 {
 		t.Fatalf("expected review_sla_seconds 900, got %d", out.ReviewSLASeconds)
 	}
-	if out.PendingReviewCount != 1 {
-		t.Fatalf("expected pending_review_count 1, got %d", out.PendingReviewCount)
+	if out.PendingReviewCount != 3 {
+		t.Fatalf("expected pending_review_count 3, got %d", out.PendingReviewCount)
 	}
 	if out.ReviewedCount != 1 {
 		t.Fatalf("expected reviewed_count 1, got %d", out.ReviewedCount)
@@ -829,8 +1094,8 @@ func TestGetSessionsSummaryReturnsReviewCounters(t *testing.T) {
 	if out.HumanOwnedCount != 1 {
 		t.Fatalf("expected human_owned_count 1, got %d", out.HumanOwnedCount)
 	}
-	if out.BotOwnedCount != 2 {
-		t.Fatalf("expected bot_owned_count 2, got %d", out.BotOwnedCount)
+	if out.BotOwnedCount != 4 {
+		t.Fatalf("expected bot_owned_count 4, got %d", out.BotOwnedCount)
 	}
 	if out.DueSoonReviewCount != 0 {
 		t.Fatalf("expected due_soon_review_count 0, got %d", out.DueSoonReviewCount)
@@ -844,8 +1109,17 @@ func TestGetSessionsSummaryReturnsReviewCounters(t *testing.T) {
 	if out.MediumPriorityReviewCount != 0 {
 		t.Fatalf("expected medium_priority_review_count 0, got %d", out.MediumPriorityReviewCount)
 	}
-	if out.LowPriorityReviewCount != 1 {
-		t.Fatalf("expected low_priority_review_count 1, got %d", out.LowPriorityReviewCount)
+	if out.LowPriorityReviewCount != 3 {
+		t.Fatalf("expected low_priority_review_count 3, got %d", out.LowPriorityReviewCount)
+	}
+	if out.AutoSendRetryPendingCount != 1 {
+		t.Fatalf("expected auto_send_retry_pending_count 1, got %d", out.AutoSendRetryPendingCount)
+	}
+	if out.AutoSendBlockedHumanCount != 1 {
+		t.Fatalf("expected auto_send_blocked_human_count 1, got %d", out.AutoSendBlockedHumanCount)
+	}
+	if out.AutoSendIssueCount != 2 {
+		t.Fatalf("expected auto_send_issue_count 2, got %d", out.AutoSendIssueCount)
 	}
 	if out.HasReviewAlert {
 		t.Fatalf("expected has_review_alert false, got true")
@@ -2228,6 +2502,568 @@ func TestReprocessGeneratesAgentDraftWhenRunnerIsEnabled(t *testing.T) {
 	}
 }
 
+func TestReprocessAutoSendsEligibleDraftWhenSenderIsEnabled(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{
+		enabled: true,
+		result: SendReplyResult{
+			ProviderMessageID: "MSG-AUTO-1",
+			ProviderStatus:    "SENT",
+			Payload:           map[string]interface{}{"provider": "EVOLUTION"},
+			SentAt:            time.Now().UTC(),
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Posso te ajudar com a proxima etapa da reserva.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_auto_send_1",
+		},
+	})
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999@s.whatsapp.net",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-auto-send-1",
+			IdempotencyKey:    "idem-auto-send-1",
+			Body:              "oi",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Reason != "draft_auto_sent" {
+		t.Fatalf("expected reason draft_auto_sent, got %s", out.Reason)
+	}
+	if out.Draft == nil {
+		t.Fatalf("expected draft to be present")
+	}
+	if out.Draft.ProcessingStatus != messageStatusAutomationSent {
+		t.Fatalf("expected draft status %s, got %s", messageStatusAutomationSent, out.Draft.ProcessingStatus)
+	}
+	agent, ok := out.Session.Metadata["agent"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected agent metadata")
+	}
+	if got := asString(agent["status"]); got != agentStatusDraftAutoSent {
+		t.Fatalf("expected agent status %s, got %s", agentStatusDraftAutoSent, got)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected one sender call, got %d", sender.calls)
+	}
+	if len(store.outbounds) != 1 {
+		t.Fatalf("expected one outbound record, got %d", len(store.outbounds))
+	}
+	for _, outbound := range store.outbounds {
+		if outbound.Status != "SENT" {
+			t.Fatalf("expected outbound status SENT, got %s", outbound.Status)
+		}
+		if asString(outbound.Payload["mode"]) != "BOT_AUTO_REPLY" {
+			t.Fatalf("expected BOT_AUTO_REPLY mode, got %s", asString(outbound.Payload["mode"]))
+		}
+	}
+}
+
+func TestReprocessDoesNotAutoSendReviewRequiredDraft(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{
+		enabled: true,
+		result: SendReplyResult{
+			ProviderMessageID: "MSG-AUTO-SKIP-1",
+			ProviderStatus:    "SENT",
+			Payload:           map[string]interface{}{"provider": "EVOLUTION"},
+			SentAt:            time.Now().UTC(),
+		},
+	}
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Encontrei uma opcao para esse trecho.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_tool_auto_skip_1",
+		},
+	}
+	searcher := &fakeAvailabilitySearcher{
+		enabled: true,
+		result: AvailabilitySearchResult{
+			Results: []AvailabilitySearchItem{{
+				SegmentID:              "seg-1",
+				TripID:                 "trip-1",
+				RouteID:                "route-1",
+				OriginDisplayName:      "Videira/SC",
+				DestinationDisplayName: "Sao Luis/MA",
+				OriginDepartTime:       "18:30",
+				TripDate:               "2026-05-10",
+				SeatsAvailable:         12,
+				Price:                  250,
+				Currency:               "BRL",
+				Status:                 "ACTIVE",
+				TripStatus:             "SCHEDULED",
+			}},
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, runner, searcher)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-auto-send-skip-1",
+			IdempotencyKey:    "idem-auto-send-skip-1",
+			Body:              "quais horarios e o valor de Videira/SC para Sao Luis/MA em 10/05?",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Draft == nil {
+		t.Fatalf("expected draft to be present")
+	}
+	if out.Draft.ProcessingStatus != messageStatusAutomationDraft {
+		t.Fatalf("expected draft status %s, got %s", messageStatusAutomationDraft, out.Draft.ProcessingStatus)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("expected zero sender calls, got %d", sender.calls)
+	}
+	if len(store.outbounds) != 0 {
+		t.Fatalf("expected no outbound records, got %d", len(store.outbounds))
+	}
+}
+
+func TestReprocessRetriesAutoSendOnSameDraftAfterFailure(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{
+		enabled: true,
+		errs:    []error{errors.New("gateway timeout"), nil},
+		results: []SendReplyResult{
+			{},
+			{
+				ProviderMessageID: "MSG-AUTO-RETRY-1",
+				ProviderStatus:    "SENT",
+				Payload:           map[string]interface{}{"provider": "EVOLUTION"},
+				SentAt:            time.Now().UTC(),
+			},
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Posso seguir com seu atendimento.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_auto_retry_1",
+		},
+	})
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999@s.whatsapp.net",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-auto-retry-1",
+			IdempotencyKey:    "idem-auto-retry-1",
+			Body:              "oi",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected first status %d, got %d", http.StatusBadGateway, rec.Code)
+	}
+	var failedDraft *Message
+	for _, message := range store.messages {
+		if message.SessionID == ingested.Session.ID && message.Direction == "OUTBOUND" && message.ProcessingStatus == messageStatusAutomationDraft {
+			item := message
+			failedDraft = &item
+			break
+		}
+	}
+	if failedDraft == nil {
+		t.Fatalf("expected failed draft to remain available")
+	}
+	if got := readDraftAutoSendStatus(*failedDraft); got != draftAutoSendStatusRetryPending {
+		t.Fatalf("expected failed draft auto_send_status %s, got %s", draftAutoSendStatusRetryPending, got)
+	}
+	if reasons := readDraftAutoSendReasons(*failedDraft); len(reasons) != 1 || reasons[0] != draftAutoSendReasonDeliveryFail {
+		t.Fatalf("expected retry reason %s, got %#v", draftAutoSendReasonDeliveryFail, reasons)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected second status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !out.Idempotent {
+		t.Fatalf("expected idempotent response on retry")
+	}
+	if out.Draft == nil || out.Draft.ProcessingStatus != messageStatusAutomationSent {
+		t.Fatalf("expected auto-sent draft on retry, got %+v", out.Draft)
+	}
+	if sender.calls != 2 {
+		t.Fatalf("expected two sender calls, got %d", sender.calls)
+	}
+	if len(store.outbounds) != 1 {
+		t.Fatalf("expected one outbound record, got %d", len(store.outbounds))
+	}
+}
+
+func TestMaybeAutoSendDraftBlocksWhenSessionMovesToHuman(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{enabled: true}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender)
+
+	session := Session{
+		ID:                 uuid.NewString(),
+		Channel:            "WHATSAPP",
+		ContactKey:         "5511999999999@s.whatsapp.net",
+		Status:             "ACTIVE",
+		HandoffStatus:      "HUMAN",
+		CurrentOwnerUserID: uuid.NewString(),
+		Metadata: map[string]interface{}{
+			"agent": map[string]interface{}{
+				"status":             agentStatusDraftGenerated,
+				"draft_generated_at": time.Now().UTC().Format(time.RFC3339Nano),
+				"auto_send_status":   draftAutoSendStatusEligible,
+			},
+		},
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	store.sessions[session.ID] = session
+	store.sessionsByKey[session.Channel+"|"+session.ContactKey] = session.ID
+
+	draft := Message{
+		ID:             uuid.NewString(),
+		SessionID:      session.ID,
+		Direction:      "OUTBOUND",
+		Kind:           "TEXT",
+		IdempotencyKey: "chat-agent-draft-blocked",
+		Body:           "Posso seguir com seu atendimento.",
+		Payload: map[string]interface{}{
+			"mode":             "AUTOMATION_DRAFT",
+			"auto_send_status": draftAutoSendStatusEligible,
+		},
+		NormalizedPayload: map[string]interface{}{
+			"mode":             "AUTOMATION_DRAFT",
+			"auto_send_status": draftAutoSendStatusEligible,
+		},
+		ProcessingStatus: messageStatusAutomationDraft,
+		ReceivedAt:       time.Now().UTC(),
+		CreatedAt:        time.Now().UTC(),
+	}
+	store.messages[draft.ID] = draft
+	store.messageOrder = append(store.messageOrder, draft.ID)
+	store.byIdempotencyKey[draft.IdempotencyKey] = draft.ID
+
+	out, err := svc.maybeAutoSendDraft(context.Background(), ReprocessResult{
+		Session: session,
+		Draft:   &draft,
+		Status:  "accepted",
+		Reason:  "draft_already_generated",
+	})
+	if err != nil {
+		t.Fatalf("maybe auto-send draft: %v", err)
+	}
+	if out.Reason != "draft_auto_send_blocked_human" {
+		t.Fatalf("expected reason draft_auto_send_blocked_human, got %s", out.Reason)
+	}
+	if out.Draft == nil {
+		t.Fatalf("expected updated draft")
+	}
+	if got := readDraftAutoSendStatus(*out.Draft); got != draftAutoSendStatusBlockedHuman {
+		t.Fatalf("expected blocked draft status %s, got %s", draftAutoSendStatusBlockedHuman, got)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("expected zero sender calls, got %d", sender.calls)
+	}
+	agent := asMap(out.Session.Metadata["agent"])
+	if got := asString(agent["auto_send_status"]); got != draftAutoSendStatusBlockedHuman {
+		t.Fatalf("expected session auto_send_status %s, got %s", draftAutoSendStatusBlockedHuman, got)
+	}
+}
+
+func TestRetryDraftAutoSendRetriesFailedDraftWithoutRerun(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{
+		enabled: true,
+		errs: []error{
+			errors.New("gateway timeout"),
+			nil,
+		},
+		results: []SendReplyResult{
+			{},
+			{
+				ProviderMessageID: "msg-auto-retry-manual-1",
+				ProviderStatus:    "SENT",
+				Payload: map[string]interface{}{
+					"provider": "evolution",
+				},
+				SentAt: time.Now().UTC(),
+			},
+		},
+	}
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Posso seguir com seu atendimento.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_auto_retry_manual_1",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, runner)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999@s.whatsapp.net",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-auto-manual-1",
+			IdempotencyKey:    "idem-auto-manual-1",
+			Body:              "oi",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected first status %d, got %d", http.StatusBadGateway, rec.Code)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("expected one runner call after failed auto-send, got %d", runner.calls)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/draft/retry-auto-send", bytes.NewBufferString(`{
+		"requested_by":"ops-bot",
+		"reason":"manual_retry_dashboard",
+		"metadata":{"source":"dashboard"}
+	}`))
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected retry status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out RetryDraftAutoSendResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Status != "accepted" {
+		t.Fatalf("expected status accepted, got %s", out.Status)
+	}
+	if out.Reason != "draft_auto_send_retried" {
+		t.Fatalf("expected reason draft_auto_send_retried, got %s", out.Reason)
+	}
+	if out.Draft == nil || out.Draft.ProcessingStatus != messageStatusAutomationSent {
+		t.Fatalf("expected sent draft after manual retry, got %+v", out.Draft)
+	}
+	if got := readDraftAutoSendStatus(*out.Draft); got != draftAutoSendStatusEligible {
+		t.Fatalf("expected draft auto_send_status %s after successful retry, got %s", draftAutoSendStatusEligible, got)
+	}
+	if got := asString(out.Draft.Payload["auto_send_retry_requested_by"]); got != "ops-bot" {
+		t.Fatalf("expected auto_send_retry_requested_by ops-bot, got %s", got)
+	}
+	if got := asString(out.Draft.Payload["auto_send_retry_request_reason"]); got != "manual_retry_dashboard" {
+		t.Fatalf("expected retry request reason manual_retry_dashboard, got %s", got)
+	}
+	if got := asInt(out.Draft.Payload["auto_send_retry_request_count"]); got != 1 {
+		t.Fatalf("expected retry request count 1, got %d", got)
+	}
+	if out.Message == nil || out.Outbound == nil {
+		t.Fatalf("expected linked message and outbound in retry result")
+	}
+	if sender.calls != 2 {
+		t.Fatalf("expected two sender calls after manual retry, got %d", sender.calls)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("expected manual retry to avoid rerunning the agent, got %d runner calls", runner.calls)
+	}
+	if len(store.outbounds) != 1 {
+		t.Fatalf("expected one outbound record reused for retry, got %d", len(store.outbounds))
+	}
+}
+
+func TestRetryDraftAutoSendBlocksWhenSessionMovesToHuman(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{
+		enabled: true,
+		errs:    []error{errors.New("gateway timeout")},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Posso seguir com seu atendimento.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_auto_retry_manual_block_1",
+		},
+	})
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999@s.whatsapp.net",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-auto-manual-block-1",
+			IdempotencyKey:    "idem-auto-manual-block-1",
+			Body:              "oi",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected first status %d, got %d", http.StatusBadGateway, rec.Code)
+	}
+
+	session := store.sessions[ingested.Session.ID]
+	session.HandoffStatus = "HUMAN"
+	session.CurrentOwnerUserID = uuid.NewString()
+	if session.Metadata == nil {
+		session.Metadata = map[string]interface{}{}
+	}
+	store.sessions[session.ID] = session
+
+	req = httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/draft/retry-auto-send", bytes.NewBufferString(`{"requested_by":"ops-human"}`))
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected blocked retry status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out RetryDraftAutoSendResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Status != "blocked" {
+		t.Fatalf("expected status blocked, got %s", out.Status)
+	}
+	if out.Reason != "draft_auto_send_blocked_human" {
+		t.Fatalf("expected reason draft_auto_send_blocked_human, got %s", out.Reason)
+	}
+	if out.Draft == nil {
+		t.Fatalf("expected blocked draft in response")
+	}
+	if got := readDraftAutoSendStatus(*out.Draft); got != draftAutoSendStatusBlockedHuman {
+		t.Fatalf("expected blocked draft auto_send_status %s, got %s", draftAutoSendStatusBlockedHuman, got)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected no extra sender call after human block, got %d", sender.calls)
+	}
+}
+
+func TestRetryDraftAutoSendRejectsDraftOutsideRetryQueue(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{
+		enabled: true,
+		result: SendReplyResult{
+			ProviderMessageID: "msg-auto-direct-1",
+			ProviderStatus:    "SENT",
+			SentAt:            time.Now().UTC(),
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Posso seguir com seu atendimento.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_auto_direct_1",
+		},
+	})
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999@s.whatsapp.net",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-auto-direct-req-1",
+			IdempotencyKey:    "idem-auto-direct-req-1",
+			Body:              "oi",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected reprocess status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/draft/retry-auto-send", bytes.NewBufferString(`{}`))
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected conflict status %d, got %d", http.StatusConflict, rec.Code)
+	}
+}
+
 func TestReprocessUsesAvailabilityToolWhenTurnHasStructuredRoute(t *testing.T) {
 	store := newFakeStore()
 	runner := &fakeAgentRunner{
@@ -2743,6 +3579,164 @@ func TestReprocessReturnsBadGatewayWhenBookingLookupToolFails(t *testing.T) {
 	}
 }
 
+func TestReprocessUsesRescheduleLookupToolWhenTurnRequestsReschedule(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Encontrei opcoes para a nova data e vou encaminhar para revisao.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_reschedule_1",
+		},
+	}
+	searcher := &fakeRescheduleAssistSearcher{
+		enabled: true,
+		result: RescheduleAssistResult{
+			Mode:                "manual_review_required_with_options",
+			NextStep:            "revisao_humana",
+			HumanReviewRequired: true,
+			Booking: &RescheduleAssistBooking{
+				ID:              "BK-ABC123456",
+				ReservationCode: "ABC12345",
+				Status:          "PENDING",
+			},
+			Current: RescheduleAssistRoute{
+				Origin:         "Videira/SC",
+				Destination:    "Sao Luis/MA",
+				TripDate:       "2026-06-10",
+				PassengerCount: 2,
+			},
+			Requested: RescheduleAssistRequest{
+				Origin:      "Videira/SC",
+				Destination: "Sao Luis/MA",
+				TripDate:    "2026-06-12",
+				Qty:         2,
+			},
+			Options: []RescheduleAssistOption{
+				{
+					TripID:         "trip-2",
+					TripDate:       "2026-06-12",
+					DepartureTime:  "18:30",
+					Origin:         "Videira/SC",
+					Destination:    "Sao Luis/MA",
+					BoardStopID:    "stop-1",
+					AlightStopID:   "stop-2",
+					SeatsAvailable: 6,
+					Price:          950,
+					Currency:       "BRL",
+					PackageName:    "Convencional",
+				},
+			},
+			FieldsRequiredForManualCompletion: []string{"trip_id", "board_stop_id", "alight_stop_id"},
+			MessageForAgent:                   "Nao confirme reagendamento como concluido; a troca depende de revisao humana.",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-reschedule-tool-1",
+			IdempotencyKey:    "idem-reschedule-tool-1",
+			Body:              "quero reagendar a reserva ABC12345 para 12/06/2026",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].ToolName != toolNameRescheduleLookup {
+		t.Fatalf("expected tool name %s, got %s", toolNameRescheduleLookup, out.ToolCalls[0].ToolName)
+	}
+	if searcher.calls != 1 {
+		t.Fatalf("expected one reschedule lookup, got %d", searcher.calls)
+	}
+	if searcher.lastInput.ReservationCode != "ABC12345" {
+		t.Fatalf("expected reservation_code ABC12345, got %s", searcher.lastInput.ReservationCode)
+	}
+	if searcher.lastInput.RequestedTripDate == nil || searcher.lastInput.RequestedTripDate.UTC().Format("2006-01-02") != "2026-06-12" {
+		t.Fatalf("expected requested trip date 2026-06-12")
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, toolNameRescheduleLookup) {
+		t.Fatalf("expected prompt to include reschedule tool section")
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "Nunca confirme o reagendamento como concluido") &&
+		!strings.Contains(runner.lastInput.UserPrompt, "revisao humana") {
+		t.Fatalf("expected prompt to include manual review guardrail")
+	}
+}
+
+func TestReprocessReturnsBadGatewayWhenRescheduleLookupToolFails(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "draft",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_reschedule_2",
+		},
+	}
+	searcher := &fakeRescheduleAssistSearcher{
+		enabled: true,
+		err:     errors.New("reports timeout"),
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-reschedule-tool-2",
+			IdempotencyKey:    "idem-reschedule-tool-2",
+			Body:              "preciso reagendar a reserva ABC12345 para 14/06/2026",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d", http.StatusBadGateway, rec.Code)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("expected no runner call after reschedule tool failure, got %d", runner.calls)
+	}
+	if len(store.toolCalls) != 1 {
+		t.Fatalf("expected one stored tool call, got %d", len(store.toolCalls))
+	}
+	if store.toolCalls[store.toolCallOrder[0]].ToolName != toolNameRescheduleLookup {
+		t.Fatalf("expected stored tool call to be %s", toolNameRescheduleLookup)
+	}
+}
+
 func TestReprocessUsesPaymentStatusToolWhenTurnAsksAboutPix(t *testing.T) {
 	store := newFakeStore()
 	runner := &fakeAgentRunner{
@@ -2914,6 +3908,614 @@ func TestReprocessReturnsBadGatewayWhenPaymentStatusToolFails(t *testing.T) {
 	}
 }
 
+func TestReprocessUsesBookingCreateToolWhenCustomerChoosesPreviousOption(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Reserva criada com sucesso. Seu codigo e ABC12345.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_booking_create_1",
+		},
+	}
+	creator := &fakeBookingCreator{
+		enabled: true,
+		result: BookingCreateResult{
+			Mode:            "created",
+			BookingID:       "BK-ABC123456",
+			ReservationCode: "ABC12345",
+			Status:          "PENDING",
+			TotalAmount:     950,
+			DepositAmount:   0,
+			RemainderAmount: 950,
+			Passengers: []BookingCreatePassengerResult{
+				{
+					Name:         "Joao Vitor Messias da Cruz Damasio",
+					Document:     "06645648105",
+					DocumentType: "CPF",
+					Phone:        "5511999999999",
+					SeatID:       "12",
+				},
+			},
+			MessageForAgent: "Reserva criada com sucesso. Informe o codigo e siga para pagamento.",
+		},
+	}
+	availabilitySearcher := &fakeAvailabilitySearcher{enabled: true}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, availabilitySearcher, creator)
+
+	now := time.Now().UTC()
+	session, err := store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Joao Vitor Messias da Cruz Damasio",
+		LastMessageAt: &now,
+		LastInboundAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := store.CreateMessage(context.Background(), CreateMessageInput{
+		SessionID:        session.ID,
+		Direction:        "INBOUND",
+		Kind:             "TEXT",
+		ProcessingStatus: "PROCESSED",
+		ReceivedAt:       now.Add(-2 * time.Minute),
+		Body:             "quais horarios de Videira/SC para Sao Luis/MA em 10/05?",
+	}); err != nil {
+		t.Fatalf("seed prior inbound: %v", err)
+	}
+	if _, err := store.SaveAgentDraft(context.Background(), SaveAgentDraftInput{
+		SessionID:        session.ID,
+		IdempotencyKey:   "draft-prev-booking-create",
+		Body:             "Tenho duas opcoes para essa data.",
+		SenderName:       "SHABAS",
+		ProcessingStatus: messageStatusAutomationSent,
+		Payload: map[string]interface{}{
+			"tool_context": map[string]interface{}{
+				toolNameAvailabilitySearch: buildAvailabilityToolResponsePayload(AvailabilitySearchResult{
+					Filter: AvailabilitySearchInput{
+						Origin:      "Videira/SC",
+						Destination: "Sao Luis/MA",
+						Qty:         1,
+						Limit:       5,
+					},
+					Results: []AvailabilitySearchItem{
+						{
+							TripID:                 "trip-1",
+							BoardStopID:            "board-1",
+							AlightStopID:           "alight-1",
+							OriginStopID:           "origin-1",
+							DestinationStopID:      "destination-1",
+							OriginDisplayName:      "Videira/SC",
+							DestinationDisplayName: "Sao Luis/MA",
+							OriginDepartTime:       "18:30",
+							TripDate:               "2026-05-10",
+							SeatsAvailable:         8,
+							Price:                  950,
+							Currency:               "BRL",
+							Status:                 "ACTIVE",
+							TripStatus:             "SCHEDULED",
+						},
+						{
+							TripID:                 "trip-2",
+							BoardStopID:            "board-2",
+							AlightStopID:           "alight-2",
+							OriginStopID:           "origin-2",
+							DestinationStopID:      "destination-2",
+							OriginDisplayName:      "Videira/SC",
+							DestinationDisplayName: "Sao Luis/MA",
+							OriginDepartTime:       "20:15",
+							TripDate:               "2026-05-10",
+							SeatsAvailable:         5,
+							Price:                  980,
+							Currency:               "BRL",
+							Status:                 "ACTIVE",
+							TripStatus:             "SCHEDULED",
+						},
+					},
+				}),
+			},
+		},
+		NormalizedPayload: map[string]interface{}{"mode": "AUTOMATION_DRAFT"},
+		Agent:             map[string]interface{}{"status": agentStatusDraftGenerated},
+		Buffer:            map[string]interface{}{},
+		RecordedAt:        now.Add(-90 * time.Second),
+	}); err != nil {
+		t.Fatalf("seed prior draft: %v", err)
+	}
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Joao Vitor Messias da Cruz Damasio",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-booking-create-1",
+			IdempotencyKey:    "idem-booking-create-1",
+			Body:              "quero reservar a opcao 1. nome: Joao Vitor Messias da Cruz Damasio cpf: 06645648105",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].ToolName != toolNameBookingCreate {
+		t.Fatalf("expected tool name %s, got %s", toolNameBookingCreate, out.ToolCalls[0].ToolName)
+	}
+	if creator.calls != 1 {
+		t.Fatalf("expected one booking create call, got %d", creator.calls)
+	}
+	if creator.lastInput.TripID != "trip-1" || creator.lastInput.BoardStopID != "board-1" || creator.lastInput.AlightStopID != "alight-1" {
+		t.Fatalf("unexpected selected trip input: %+v", creator.lastInput)
+	}
+	if creator.lastInput.SelectedOptionIndex != 1 {
+		t.Fatalf("expected selected option index 1, got %d", creator.lastInput.SelectedOptionIndex)
+	}
+	if len(creator.lastInput.Passengers) != 1 || creator.lastInput.Passengers[0].Document != "06645648105" {
+		t.Fatalf("unexpected passenger input: %+v", creator.lastInput.Passengers)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, toolNameBookingCreate) {
+		t.Fatalf("expected prompt to include booking create tool section")
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "codigo ABC12345") && !strings.Contains(runner.lastInput.UserPrompt, "ABC12345") {
+		t.Fatalf("expected prompt to include reservation code")
+	}
+}
+
+func TestReprocessUsesPaymentCreateToolWhenCustomerAsksToGeneratePix(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Segue o PIX copia e cola para a sua reserva.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_payment_create_1",
+		},
+	}
+	bookingSearcher := &fakeBookingLookupSearcher{
+		enabled: true,
+		result: BookingLookupResult{
+			Results: []BookingLookupItem{
+				{
+					ID:              "BK-ABC123456",
+					Status:          "PENDING",
+					ReservationCode: "ABC12345",
+					TotalAmount:     950,
+					DepositAmount:   0,
+					RemainderAmount: 950,
+					PassengerName:   "Maria Silva",
+					PassengerPhone:  "48999999999",
+					CreatedAt:       time.Now().UTC(),
+				},
+			},
+		},
+	}
+	paymentCreator := &fakePaymentCreator{
+		enabled: true,
+		result: PaymentCreateResult{
+			Mode:            "pix_sent",
+			BookingID:       "BK-ABC123456",
+			ReservationCode: "ABC12345",
+			BookingStatus:   "PENDING",
+			PaymentType:     "sinal",
+			Stage:           "deposit",
+			AmountTotal:     950,
+			AmountPaid:      0,
+			AmountDue:       250,
+			PaymentID:       "pay-1",
+			PaymentStatus:   "PENDING",
+			Provider:        "PAGARME",
+			ProviderRef:     "charge-1",
+			PixCode:         "000201PIXCODE",
+			MessageForAgent: "PIX gerado com sucesso. Envie somente o copia e cola ao cliente, sem link do provedor.",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, bookingSearcher, paymentCreator)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Maria Silva",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-payment-create-1",
+			IdempotencyKey:    "idem-payment-create-1",
+			Body:              "gera o pix da reserva ABC12345",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("expected two tool calls, got %d", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].ToolName != toolNameBookingLookup {
+		t.Fatalf("expected first tool name %s, got %s", toolNameBookingLookup, out.ToolCalls[0].ToolName)
+	}
+	if out.ToolCalls[1].ToolName != toolNamePaymentCreate {
+		t.Fatalf("expected second tool name %s, got %s", toolNamePaymentCreate, out.ToolCalls[1].ToolName)
+	}
+	if paymentCreator.calls != 1 {
+		t.Fatalf("expected one payment create call, got %d", paymentCreator.calls)
+	}
+	if paymentCreator.lastInput.BookingID != "BK-ABC123456" {
+		t.Fatalf("expected booking_id BK-ABC123456, got %s", paymentCreator.lastInput.BookingID)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, toolNamePaymentCreate) {
+		t.Fatalf("expected prompt to include payment create tool section")
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "000201PIXCODE") {
+		t.Fatalf("expected prompt to include pix code")
+	}
+}
+
+func TestReprocessUsesPaymentCreateToolFromPreviousBookingCreateContext(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Aqui esta o PIX copia e cola.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_payment_create_2",
+		},
+	}
+	paymentCreator := &fakePaymentCreator{
+		enabled: true,
+		result: PaymentCreateResult{
+			Mode:            "pix_sent",
+			BookingID:       "BK-ABC123456",
+			ReservationCode: "ABC12345",
+			BookingStatus:   "PENDING",
+			PaymentType:     "sinal",
+			Stage:           "deposit",
+			AmountTotal:     950,
+			AmountPaid:      0,
+			AmountDue:       250,
+			PaymentID:       "pay-2",
+			PaymentStatus:   "PENDING",
+			Provider:        "PAGARME",
+			ProviderRef:     "charge-2",
+			PixCode:         "000201PIXCODE2",
+			MessageForAgent: "PIX gerado com sucesso. Envie somente o copia e cola ao cliente, sem link do provedor.",
+		},
+	}
+	availabilitySearcher := &fakeAvailabilitySearcher{enabled: true}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, availabilitySearcher, paymentCreator)
+
+	now := time.Now().UTC()
+	session, err := store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Maria Silva",
+		LastMessageAt: &now,
+		LastInboundAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := store.SaveAgentDraft(context.Background(), SaveAgentDraftInput{
+		SessionID:        session.ID,
+		IdempotencyKey:   "draft-prev-payment-create",
+		Body:             "Reserva criada com sucesso.",
+		SenderName:       "SHABAS",
+		ProcessingStatus: messageStatusAutomationSent,
+		Payload: map[string]interface{}{
+			"tool_context": map[string]interface{}{
+				toolNameBookingCreate: buildBookingCreateResponsePayload(BookingCreateResult{
+					Mode:            "created",
+					BookingID:       "BK-ABC123456",
+					ReservationCode: "ABC12345",
+					Status:          "PENDING",
+					TotalAmount:     950,
+					RemainderAmount: 950,
+					Passengers: []BookingCreatePassengerResult{
+						{
+							Name:         "Maria Silva",
+							Document:     "RG123456",
+							DocumentType: "RG",
+							Phone:        "48999999999",
+						},
+					},
+				}),
+			},
+		},
+		NormalizedPayload: map[string]interface{}{"mode": "AUTOMATION_DRAFT"},
+		Agent:             map[string]interface{}{"status": agentStatusDraftGenerated},
+		Buffer:            map[string]interface{}{},
+		RecordedAt:        now.Add(-90 * time.Second),
+	}); err != nil {
+		t.Fatalf("seed prior draft: %v", err)
+	}
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Maria Silva",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-payment-create-2",
+			IdempotencyKey:    "idem-payment-create-2",
+			Body:              "pode gerar o pix? cpf: 06645648105",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].ToolName != toolNamePaymentCreate {
+		t.Fatalf("expected tool name %s, got %s", toolNamePaymentCreate, out.ToolCalls[0].ToolName)
+	}
+	if paymentCreator.lastInput.BookingID != "BK-ABC123456" {
+		t.Fatalf("expected booking id from previous booking create context, got %s", paymentCreator.lastInput.BookingID)
+	}
+	if paymentCreator.lastInput.CustomerDocument != "06645648105" {
+		t.Fatalf("expected explicit cpf propagated, got %s", paymentCreator.lastInput.CustomerDocument)
+	}
+}
+
+func TestReprocessUsesBookingCancelToolWhenCustomerAsksToCancelReservation(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Sua reserva foi cancelada com sucesso.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_booking_cancel_1",
+		},
+	}
+	bookingSearcher := &fakeBookingLookupSearcher{
+		enabled: true,
+		result: BookingLookupResult{
+			Results: []BookingLookupItem{
+				{
+					ID:              "BK-ABC123456",
+					Status:          "PENDING",
+					ReservationCode: "ABC12345",
+					TotalAmount:     950,
+					RemainderAmount: 950,
+					PassengerName:   "Maria Silva",
+					PassengerPhone:  "48999999999",
+					CreatedAt:       time.Now().UTC(),
+				},
+			},
+		},
+	}
+	bookingCanceler := &fakeBookingCanceler{
+		enabled: true,
+		result: BookingCancelResult{
+			Mode:            "cancel",
+			BookingID:       "BK-ABC123456",
+			ReservationCode: "ABC12345",
+			TripID:          "trip-1",
+			PreviousStatus:  "PENDING",
+			BookingStatus:   "CANCELLED",
+			Reason:          "customer_requested",
+			Actor:           "CUSTOMER",
+			PassengerCount:  1,
+			MessageForAgent: "Cancelamento aplicado com sucesso. Confirme ao cliente que a reserva foi cancelada.",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, bookingSearcher, bookingCanceler)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Maria Silva",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-booking-cancel-1",
+			IdempotencyKey:    "idem-booking-cancel-1",
+			Body:              "quero cancelar a reserva ABC12345",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("expected two tool calls, got %d", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].ToolName != toolNameBookingLookup {
+		t.Fatalf("expected first tool name %s, got %s", toolNameBookingLookup, out.ToolCalls[0].ToolName)
+	}
+	if out.ToolCalls[1].ToolName != toolNameBookingCancel {
+		t.Fatalf("expected second tool name %s, got %s", toolNameBookingCancel, out.ToolCalls[1].ToolName)
+	}
+	if bookingCanceler.calls != 1 {
+		t.Fatalf("expected one booking cancel call, got %d", bookingCanceler.calls)
+	}
+	if bookingCanceler.lastInput.BookingID != "BK-ABC123456" {
+		t.Fatalf("expected booking_id BK-ABC123456, got %s", bookingCanceler.lastInput.BookingID)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, toolNameBookingCancel) {
+		t.Fatalf("expected prompt to include booking cancel tool section")
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "CANCELLED") {
+		t.Fatalf("expected prompt to include cancelled status")
+	}
+}
+
+func TestReprocessUsesBookingCancelToolFromPreviousBookingCreateContext(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Sua reserva foi cancelada.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_booking_cancel_2",
+		},
+	}
+	availabilitySearcher := &fakeAvailabilitySearcher{enabled: true}
+	bookingCanceler := &fakeBookingCanceler{
+		enabled: true,
+		result: BookingCancelResult{
+			Mode:            "cancel",
+			BookingID:       "BK-ABC123456",
+			ReservationCode: "ABC12345",
+			TripID:          "trip-1",
+			PreviousStatus:  "PENDING",
+			BookingStatus:   "CANCELLED",
+			Reason:          "customer_requested",
+			Actor:           "CUSTOMER",
+			PassengerCount:  1,
+			MessageForAgent: "Cancelamento aplicado com sucesso. Confirme ao cliente que a reserva foi cancelada.",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, availabilitySearcher, bookingCanceler)
+
+	now := time.Now().UTC()
+	session, err := store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Maria Silva",
+		LastMessageAt: &now,
+		LastInboundAt: &now,
+	})
+	if err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	if _, err := store.SaveAgentDraft(context.Background(), SaveAgentDraftInput{
+		SessionID:        session.ID,
+		IdempotencyKey:   "draft-prev-booking-cancel",
+		Body:             "Reserva criada com sucesso.",
+		SenderName:       "SHABAS",
+		ProcessingStatus: messageStatusAutomationSent,
+		Payload: map[string]interface{}{
+			"tool_context": map[string]interface{}{
+				toolNameBookingCreate: buildBookingCreateResponsePayload(BookingCreateResult{
+					Mode:            "created",
+					BookingID:       "BK-ABC123456",
+					ReservationCode: "ABC12345",
+					Status:          "PENDING",
+					TotalAmount:     950,
+					RemainderAmount: 950,
+				}),
+			},
+		},
+		NormalizedPayload: map[string]interface{}{"mode": "AUTOMATION_DRAFT"},
+		Agent:             map[string]interface{}{"status": agentStatusDraftGenerated},
+		Buffer:            map[string]interface{}{},
+		RecordedAt:        now.Add(-90 * time.Second),
+	}); err != nil {
+		t.Fatalf("seed prior draft: %v", err)
+	}
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+		CustomerName:  "Maria Silva",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-booking-cancel-2",
+			IdempotencyKey:    "idem-booking-cancel-2",
+			Body:              "quero cancelar minha reserva",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out.ToolCalls))
+	}
+	if out.ToolCalls[0].ToolName != toolNameBookingCancel {
+		t.Fatalf("expected tool name %s, got %s", toolNameBookingCancel, out.ToolCalls[0].ToolName)
+	}
+	if bookingCanceler.lastInput.BookingID != "BK-ABC123456" {
+		t.Fatalf("expected booking id from previous booking context, got %s", bookingCanceler.lastInput.BookingID)
+	}
+}
+
 func TestReprocessDraftIsIdempotentPerTurn(t *testing.T) {
 	store := newFakeStore()
 	runner := &fakeAgentRunner{
@@ -3048,12 +4650,13 @@ type fakeStore struct {
 }
 
 type fakeReplySender struct {
-	enabled bool
-	calls   int
-	result  SendReplyResult
-	results []SendReplyResult
-	err     error
-	errs    []error
+	enabled    bool
+	calls      int
+	result     SendReplyResult
+	results    []SendReplyResult
+	err        error
+	errs       []error
+	beforeSend func(SendReplyInput)
 }
 
 type fakeAgentRunner struct {
@@ -3096,6 +4699,26 @@ type fakeBookingLookupSearcher struct {
 	lastInput BookingLookupInput
 }
 
+type fakeBookingCreator struct {
+	enabled   bool
+	calls     int
+	result    BookingCreateResult
+	results   []BookingCreateResult
+	err       error
+	errs      []error
+	lastInput BookingCreateInput
+}
+
+type fakeRescheduleAssistSearcher struct {
+	enabled   bool
+	calls     int
+	result    RescheduleAssistResult
+	results   []RescheduleAssistResult
+	err       error
+	errs      []error
+	lastInput RescheduleAssistInput
+}
+
 type fakePaymentStatusSearcher struct {
 	enabled   bool
 	calls     int
@@ -3104,6 +4727,26 @@ type fakePaymentStatusSearcher struct {
 	err       error
 	errs      []error
 	lastInput PaymentStatusInput
+}
+
+type fakePaymentCreator struct {
+	enabled   bool
+	calls     int
+	result    PaymentCreateResult
+	results   []PaymentCreateResult
+	err       error
+	errs      []error
+	lastInput PaymentCreateInput
+}
+
+type fakeBookingCanceler struct {
+	enabled   bool
+	calls     int
+	result    BookingCancelResult
+	results   []BookingCancelResult
+	err       error
+	errs      []error
+	lastInput BookingCancelInput
 }
 
 func newFakeStore() *fakeStore {
@@ -3125,7 +4768,10 @@ func (f *fakeReplySender) Enabled() bool {
 	return f != nil && f.enabled
 }
 
-func (f *fakeReplySender) SendReply(_ context.Context, _ SendReplyInput) (SendReplyResult, error) {
+func (f *fakeReplySender) SendReply(_ context.Context, input SendReplyInput) (SendReplyResult, error) {
+	if f.beforeSend != nil {
+		f.beforeSend(input)
+	}
 	f.calls++
 	if len(f.errs) > 0 {
 		err := f.errs[0]
@@ -3250,7 +4896,45 @@ func (f *fakeBookingLookupSearcher) Search(_ context.Context, input BookingLooku
 	return f.result, nil
 }
 
+func (f *fakeBookingCreator) Enabled() bool {
+	return f != nil && f.enabled
+}
+
+func (f *fakeBookingCreator) Create(_ context.Context, input BookingCreateInput) (BookingCreateResult, error) {
+	f.calls++
+	f.lastInput = input
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		var result BookingCreateResult
+		if len(f.results) > 0 {
+			result = f.results[0]
+			f.results = f.results[1:]
+		}
+		if err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if f.err != nil {
+		return BookingCreateResult{}, f.err
+	}
+	return f.result, nil
+}
+
 func (f *fakePaymentStatusSearcher) Enabled() bool {
+	return f != nil && f.enabled
+}
+
+func (f *fakePaymentCreator) Enabled() bool {
+	return f != nil && f.enabled
+}
+
+func (f *fakeBookingCanceler) Enabled() bool {
+	return f != nil && f.enabled
+}
+
+func (f *fakeRescheduleAssistSearcher) Enabled() bool {
 	return f != nil && f.enabled
 }
 
@@ -3272,6 +4956,72 @@ func (f *fakePaymentStatusSearcher) Search(_ context.Context, input PaymentStatu
 	}
 	if f.err != nil {
 		return PaymentStatusResult{}, f.err
+	}
+	return f.result, nil
+}
+
+func (f *fakePaymentCreator) Create(_ context.Context, input PaymentCreateInput) (PaymentCreateResult, error) {
+	f.calls++
+	f.lastInput = input
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		var result PaymentCreateResult
+		if len(f.results) > 0 {
+			result = f.results[0]
+			f.results = f.results[1:]
+		}
+		if err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if f.err != nil {
+		return PaymentCreateResult{}, f.err
+	}
+	return f.result, nil
+}
+
+func (f *fakeBookingCanceler) Cancel(_ context.Context, input BookingCancelInput) (BookingCancelResult, error) {
+	f.calls++
+	f.lastInput = input
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		var result BookingCancelResult
+		if len(f.results) > 0 {
+			result = f.results[0]
+			f.results = f.results[1:]
+		}
+		if err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if f.err != nil {
+		return BookingCancelResult{}, f.err
+	}
+	return f.result, nil
+}
+
+func (f *fakeRescheduleAssistSearcher) Search(_ context.Context, input RescheduleAssistInput) (RescheduleAssistResult, error) {
+	f.calls++
+	f.lastInput = input
+	if len(f.errs) > 0 {
+		err := f.errs[0]
+		f.errs = f.errs[1:]
+		var result RescheduleAssistResult
+		if len(f.results) > 0 {
+			result = f.results[0]
+			f.results = f.results[1:]
+		}
+		if err != nil {
+			return result, err
+		}
+		return result, nil
+	}
+	if f.err != nil {
+		return RescheduleAssistResult{}, f.err
 	}
 	return f.result, nil
 }
@@ -3657,6 +5407,145 @@ func (s *fakeStore) CreateReply(_ context.Context, input ReplyInput, debounceWin
 	}, nil
 }
 
+func (s *fakeStore) CreateAutomationReply(_ context.Context, input CreateAutomationReplyInput, debounceWindow time.Duration) (ReplyResult, error) {
+	session, ok := s.sessions[input.SessionID]
+	if !ok {
+		return ReplyResult{}, ErrSessionNotFound
+	}
+	if session.HandoffStatus != "BOT" || strings.TrimSpace(session.CurrentOwnerUserID) != "" {
+		return ReplyResult{}, ErrReprocessRequiresBot
+	}
+
+	draft, ok := s.messages[input.DraftMessageID]
+	if !ok || draft.SessionID != input.SessionID || draft.Direction != "OUTBOUND" || !strings.EqualFold(draft.ProcessingStatus, messageStatusAutomationDraft) {
+		return ReplyResult{}, ErrReplyDraftNotAllowed
+	}
+
+	now := time.Now().UTC()
+	senderName := strings.TrimSpace(input.SenderName)
+	if senderName == "" {
+		senderName = firstNonEmpty(strings.TrimSpace(draft.SenderName), "SHABAS")
+	}
+
+	message := Message{
+		ID:             uuid.NewString(),
+		SessionID:      input.SessionID,
+		Direction:      "OUTBOUND",
+		Kind:           "TEXT",
+		IdempotencyKey: input.IdempotencyKey,
+		SenderName:     senderName,
+		Body:           strings.TrimSpace(draft.Body),
+		Payload: map[string]interface{}{
+			"mode":             "BOT_AUTO_REPLY",
+			"draft_message_id": draft.ID,
+			"draft_auto_sent":  true,
+			"sender_name":      senderName,
+			"auto_send_status": firstNonEmpty(asString(draft.NormalizedPayload["auto_send_status"]), asString(draft.Payload["auto_send_status"]), draftAutoSendStatusEligible),
+		},
+		NormalizedPayload: map[string]interface{}{
+			"mode":             "BOT_AUTO_REPLY",
+			"draft_message_id": draft.ID,
+			"draft_auto_sent":  true,
+			"sender_name":      senderName,
+			"auto_send_status": firstNonEmpty(asString(draft.NormalizedPayload["auto_send_status"]), asString(draft.Payload["auto_send_status"]), draftAutoSendStatusEligible),
+		},
+		ProcessingStatus: "AUTOMATION_PENDING",
+		ReceivedAt:       now,
+		CreatedAt:        now,
+	}
+	if reasons := firstNonEmptyStringSlice(asStringSlice(draft.NormalizedPayload["auto_send_reasons"]), asStringSlice(draft.Payload["auto_send_reasons"])); len(reasons) > 0 {
+		message.Payload["auto_send_reasons"] = reasons
+		message.NormalizedPayload["auto_send_reasons"] = reasons
+	}
+	for key, value := range input.Metadata {
+		message.Payload[key] = value
+		message.NormalizedPayload[key] = value
+	}
+	s.messages[message.ID] = message
+	s.messageOrder = append(s.messageOrder, message.ID)
+	s.byIdempotencyKey[message.IdempotencyKey] = message.ID
+
+	if session.Metadata == nil {
+		session.Metadata = map[string]interface{}{}
+	}
+	session.LastMessageAt = &now
+	session.LastOutboundAt = &now
+	session.Metadata["buffer"] = buildBufferState(session.Metadata, message, debounceWindow)
+	session.UpdatedAt = now
+	s.sessions[session.ID] = session
+
+	outbound := ReplyOutbound{
+		ID:             uuid.NewString(),
+		SessionID:      session.ID,
+		Channel:        session.Channel,
+		Recipient:      session.ContactKey,
+		Payload:        map[string]interface{}{"body": message.Body, "mode": "BOT_AUTO_REPLY", "draft_message_id": draft.ID, "draft_auto_sent": true, "sender_name": senderName, "message_id": message.ID, "auto_send_status": message.Payload["auto_send_status"]},
+		Provider:       "EVOLUTION",
+		IdempotencyKey: input.IdempotencyKey,
+		Status:         "AUTOMATION_PENDING",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if reasons, ok := message.Payload["auto_send_reasons"]; ok {
+		outbound.Payload["auto_send_reasons"] = reasons
+	}
+	for key, value := range input.Metadata {
+		outbound.Payload[key] = value
+	}
+	s.outbounds[outbound.ID] = outbound
+
+	return ReplyResult{
+		Session:  session,
+		Message:  message,
+		Outbound: outbound,
+		Draft:    &draft,
+	}, nil
+}
+
+func (s *fakeStore) UpdateDraftAutoSendState(_ context.Context, input UpdateDraftAutoSendStateInput) (SaveAgentDraftResult, error) {
+	session, ok := s.sessions[input.SessionID]
+	if !ok {
+		return SaveAgentDraftResult{}, ErrSessionNotFound
+	}
+
+	draft, ok := s.messages[input.DraftMessageID]
+	if !ok || draft.SessionID != input.SessionID || draft.Direction != "OUTBOUND" || !isAutomationDraftStatus(draft.ProcessingStatus) {
+		return SaveAgentDraftResult{}, ErrReplyDraftNotAllowed
+	}
+
+	if draft.Payload == nil {
+		draft.Payload = map[string]interface{}{}
+	}
+	if draft.NormalizedPayload == nil {
+		draft.NormalizedPayload = map[string]interface{}{}
+	}
+	for key, value := range input.Payload {
+		draft.Payload[key] = value
+		draft.NormalizedPayload[key] = value
+	}
+	draft.Payload["auto_send_status"] = input.AutoSendStatus
+	draft.NormalizedPayload["auto_send_status"] = input.AutoSendStatus
+	if reasons := mergeDistinctStrings(readDraftAutoSendReasons(draft), input.AutoSendReasons...); len(reasons) > 0 {
+		draft.Payload["auto_send_reasons"] = reasons
+		draft.NormalizedPayload["auto_send_reasons"] = reasons
+	}
+	s.messages[draft.ID] = draft
+
+	if len(input.Agent) > 0 {
+		if session.Metadata == nil {
+			session.Metadata = map[string]interface{}{}
+		}
+		session.Metadata["agent"] = input.Agent
+	}
+	session.UpdatedAt = time.Now().UTC()
+	s.sessions[session.ID] = session
+
+	return SaveAgentDraftResult{
+		Session: session,
+		Message: draft,
+	}, nil
+}
+
 func (s *fakeStore) MarkReplyDeliverySent(_ context.Context, input MarkReplyDeliverySentInput) (ReplyResult, error) {
 	session := s.sessions[input.SessionID]
 	message := s.messages[input.MessageID]
@@ -3688,10 +5577,49 @@ func (s *fakeStore) MarkReplyDeliverySent(_ context.Context, input MarkReplyDeli
 	outbound.UpdatedAt = time.Now().UTC()
 	s.outbounds[outbound.ID] = outbound
 
+	var draft *Message
+	if strings.EqualFold(asString(message.Payload["mode"]), "BOT_AUTO_REPLY") {
+		if draftID := strings.TrimSpace(firstNonEmpty(asString(message.Payload["draft_message_id"]), asString(message.NormalizedPayload["draft_message_id"]))); draftID != "" {
+			item := s.messages[draftID]
+			if item.Payload == nil {
+				item.Payload = map[string]interface{}{}
+			}
+			if item.NormalizedPayload == nil {
+				item.NormalizedPayload = map[string]interface{}{}
+			}
+			item.Payload["auto_sent"] = true
+			item.Payload["auto_send_status"] = draftAutoSendStatusEligible
+			item.Payload["auto_sent_at"] = input.SentAt.UTC().Format(time.RFC3339Nano)
+			item.Payload["auto_sent_message_id"] = message.ID
+			item.Payload["auto_sent_outbound_id"] = outbound.ID
+			item.Payload["auto_sent_provider_message_id"] = input.ProviderMessageID
+			item.Payload["auto_send_last_error_text"] = nil
+			item.Payload["auto_send_retry_pending_at"] = nil
+			item.NormalizedPayload["auto_sent"] = true
+			item.NormalizedPayload["auto_send_status"] = draftAutoSendStatusEligible
+			item.NormalizedPayload["auto_sent_at"] = input.SentAt.UTC().Format(time.RFC3339Nano)
+			item.NormalizedPayload["auto_sent_message_id"] = message.ID
+			item.NormalizedPayload["auto_sent_outbound_id"] = outbound.ID
+			item.NormalizedPayload["auto_sent_provider_message_id"] = input.ProviderMessageID
+			item.NormalizedPayload["auto_send_last_error_text"] = nil
+			item.NormalizedPayload["auto_send_retry_pending_at"] = nil
+			item.ProcessingStatus = messageStatusAutomationSent
+			s.messages[item.ID] = item
+			draft = &item
+
+			if session.Metadata == nil {
+				session.Metadata = map[string]interface{}{}
+			}
+			session.Metadata["agent"] = buildDraftAutoSentAgentState(session.Metadata, item, message, outbound, input.SentAt)
+			s.sessions[session.ID] = session
+		}
+	}
+
 	return ReplyResult{
 		Session:  session,
 		Message:  message,
 		Outbound: outbound,
+		Draft:    draft,
 	}, nil
 }
 
@@ -3715,10 +5643,48 @@ func (s *fakeStore) MarkReplyDeliveryFailure(_ context.Context, input MarkReplyD
 	outbound.UpdatedAt = time.Now().UTC()
 	s.outbounds[outbound.ID] = outbound
 
+	var draft *Message
+	if strings.EqualFold(asString(message.Payload["mode"]), "BOT_AUTO_REPLY") {
+		if draftID := strings.TrimSpace(firstNonEmpty(asString(message.Payload["draft_message_id"]), asString(message.NormalizedPayload["draft_message_id"]))); draftID != "" {
+			item := s.messages[draftID]
+			if item.Payload == nil {
+				item.Payload = map[string]interface{}{}
+			}
+			if item.NormalizedPayload == nil {
+				item.NormalizedPayload = map[string]interface{}{}
+			}
+			observedAt := time.Now().UTC()
+			reasons := mergeDistinctStrings(readDraftAutoSendReasons(item), draftAutoSendReasonDeliveryFail)
+			item.Payload["auto_send_status"] = draftAutoSendStatusRetryPending
+			item.Payload["auto_send_reasons"] = reasons
+			item.Payload["auto_send_last_attempt_at"] = observedAt.Format(time.RFC3339Nano)
+			item.Payload["auto_send_retry_pending_at"] = observedAt.Format(time.RFC3339Nano)
+			item.Payload["auto_send_last_error_text"] = input.ErrorText
+			item.Payload["auto_send_last_reply_message_id"] = message.ID
+			item.Payload["auto_send_last_outbound_id"] = outbound.ID
+			item.NormalizedPayload["auto_send_status"] = draftAutoSendStatusRetryPending
+			item.NormalizedPayload["auto_send_reasons"] = reasons
+			item.NormalizedPayload["auto_send_last_attempt_at"] = observedAt.Format(time.RFC3339Nano)
+			item.NormalizedPayload["auto_send_retry_pending_at"] = observedAt.Format(time.RFC3339Nano)
+			item.NormalizedPayload["auto_send_last_error_text"] = input.ErrorText
+			item.NormalizedPayload["auto_send_last_reply_message_id"] = message.ID
+			item.NormalizedPayload["auto_send_last_outbound_id"] = outbound.ID
+			s.messages[item.ID] = item
+			draft = &item
+
+			if session.Metadata == nil {
+				session.Metadata = map[string]interface{}{}
+			}
+			session.Metadata["agent"] = buildDraftAutoSendRetryPendingAgentState(session.Metadata, item, message, outbound, input.ErrorText, observedAt)
+			s.sessions[session.ID] = session
+		}
+	}
+
 	return ReplyResult{
 		Session:  session,
 		Message:  message,
 		Outbound: outbound,
+		Draft:    draft,
 	}, nil
 }
 
@@ -3809,6 +5775,10 @@ func (s *fakeStore) ListSessions(_ context.Context, filter ListSessionsFilter) (
 		agent := asMap(item.Metadata["agent"])
 		agentStatus := strings.ToUpper(strings.TrimSpace(asString(agent["status"])))
 		if filter.AgentStatus != "" && agentStatus != filter.AgentStatus {
+			continue
+		}
+		autoSendStatus := strings.ToUpper(strings.TrimSpace(asString(agent["auto_send_status"])))
+		if filter.DraftAutoSendStatus != "" && autoSendStatus != filter.DraftAutoSendStatus {
 			continue
 		}
 		switch filter.DraftReviewStatus {
@@ -3916,6 +5886,14 @@ func (s *fakeStore) CountSessionsSummary(_ context.Context, filter ListSessionsF
 		}
 		if decorated.DraftPendingAgeSeconds > summary.OldestPendingAgeSeconds {
 			summary.OldestPendingAgeSeconds = decorated.DraftPendingAgeSeconds
+		}
+		switch strings.ToUpper(strings.TrimSpace(decorated.DraftAutoSendStatus)) {
+		case draftAutoSendStatusRetryPending:
+			summary.AutoSendRetryPendingCount++
+			summary.AutoSendIssueCount++
+		case draftAutoSendStatusBlockedHuman:
+			summary.AutoSendBlockedHumanCount++
+			summary.AutoSendIssueCount++
 		}
 	}
 	summary.ReviewSLASeconds = reviewSLASeconds

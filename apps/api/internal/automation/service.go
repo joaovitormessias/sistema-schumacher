@@ -16,21 +16,27 @@ import (
 )
 
 var (
-	ErrInvalidEvolutionPayload    = errors.New("invalid evolution payload")
-	ErrMissingEvolutionChatKey    = errors.New("missing evolution remoteJid")
-	ErrMissingEvolutionMessageID  = errors.New("missing evolution message id")
-	ErrMissingEvolutionStatus     = errors.New("missing evolution status")
-	ErrMissingEvolutionPresence   = errors.New("missing evolution presence status")
-	ErrMissingJobName             = errors.New("missing automation job name")
-	ErrInvalidJobRunLimit         = errors.New("invalid automation job run limit")
-	ErrInvalidBookingsExpireLimit = errors.New("invalid bookings expire limit")
-	ErrInvalidBookingsExpireHold  = errors.New("invalid bookings expire hold_minutes")
-	ErrPaymentNotificationTarget  = errors.New("payment_id or booking_id is required")
+	ErrInvalidEvolutionPayload          = errors.New("invalid evolution payload")
+	ErrMissingEvolutionChatKey          = errors.New("missing evolution remoteJid")
+	ErrMissingEvolutionMessageID        = errors.New("missing evolution message id")
+	ErrMissingEvolutionStatus           = errors.New("missing evolution status")
+	ErrMissingEvolutionPresence         = errors.New("missing evolution presence status")
+	ErrMissingJobName                   = errors.New("missing automation job name")
+	ErrInvalidJobRunLimit               = errors.New("invalid automation job run limit")
+	ErrInvalidChatBufferFlushLimit      = errors.New("invalid chat buffer flush limit")
+	ErrInvalidChatAutoSendRetryLimit    = errors.New("invalid chat auto-send retry limit")
+	ErrInvalidChatAutoSendRetryCooldown = errors.New("invalid chat auto-send retry cooldown_seconds")
+	ErrInvalidBookingsExpireLimit       = errors.New("invalid bookings expire limit")
+	ErrInvalidBookingsExpireHold        = errors.New("invalid bookings expire hold_minutes")
+	ErrPaymentNotificationTarget        = errors.New("payment_id or booking_id is required")
 )
 
 type ChatIngestor interface {
 	Ingest(ctx context.Context, input chat.IngestMessageInput) (chat.IngestMessageResult, error)
 	ApplyPresenceSignal(ctx context.Context, input chat.ApplyPresenceSignalInput) (chat.ApplyPresenceSignalResult, error)
+	ListSessions(ctx context.Context, filter chat.ListSessionsFilter) ([]chat.Session, error)
+	Reprocess(ctx context.Context, input chat.ReprocessInput) (chat.ReprocessResult, error)
+	RetryDraftAutoSend(ctx context.Context, input chat.RetryDraftAutoSendInput) (chat.RetryDraftAutoSendResult, error)
 	GetSessionsSummary(ctx context.Context, filter chat.ListSessionsFilter) (chat.SessionsSummary, error)
 	QueueAutomationDraft(ctx context.Context, input chat.QueueAutomationDraftInput) (chat.QueueAutomationDraftResult, error)
 }
@@ -140,6 +146,9 @@ func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (Evo
 		"chatwoot_message_id":      payload.Data.ChatwootMessageID,
 		"chatwoot_inbox_id":        payload.Data.ChatwootInboxID,
 		"chatwoot_conversation_id": payload.Data.ChatwootConversationID,
+	}
+	for key, value := range extractEvolutionMessageMetadata(payload.Data) {
+		normalized[key] = value
 	}
 
 	result, err := s.chat.Ingest(ctx, chat.IngestMessageInput{
@@ -383,6 +392,323 @@ func (s *Service) RunChatReviewAlerts(ctx context.Context, input RunChatReviewAl
 	result.Status = "sent"
 	result.Reason = "alert_sent"
 	result.NotificationTriggered = true
+	return result, nil
+}
+
+func (s *Service) RunChatBufferFlush(ctx context.Context, input RunChatBufferFlushInput) (RunChatBufferFlushResult, error) {
+	return s.runChatBufferFlush(ctx, input, "MANUAL")
+}
+
+func (s *Service) RunChatAutoSendRetry(ctx context.Context, input RunChatAutoSendRetryInput) (RunChatAutoSendRetryResult, error) {
+	return s.runChatAutoSendRetry(ctx, input, "MANUAL")
+}
+
+func (s *Service) runChatBufferFlush(ctx context.Context, input RunChatBufferFlushInput, triggerSource string) (RunChatBufferFlushResult, error) {
+	filter, err := normalizeRunChatBufferFlushInput(input)
+	if err != nil {
+		return RunChatBufferFlushResult{}, err
+	}
+	triggerSource = strings.ToUpper(strings.TrimSpace(triggerSource))
+	if triggerSource == "" {
+		triggerSource = "MANUAL"
+	}
+
+	observedAt := time.Now().UTC()
+	jobRun, err := s.store.CreateJobRun(ctx, CreateJobRunInput{
+		JobName:       "CHAT_BUFFER_FLUSH",
+		TriggerSource: triggerSource,
+		Status:        "RUNNING",
+		InputPayload: map[string]interface{}{
+			"filter": filter,
+		},
+		StartedAt: observedAt,
+	})
+	if err != nil {
+		return RunChatBufferFlushResult{}, err
+	}
+
+	result := RunChatBufferFlushResult{
+		Status:     "skipped",
+		Reason:     "no_due_buffers",
+		ObservedAt: observedAt,
+		JobRunID:   jobRun.ID,
+		Filter:     filter,
+	}
+
+	sessions, err := s.chat.ListSessions(ctx, chat.ListSessionsFilter{
+		Limit:         filter.Limit,
+		Channel:       filter.Channel,
+		Status:        filter.Status,
+		HandoffStatus: filter.HandoffStatus,
+	})
+	if err != nil {
+		if _, updateErr := s.store.UpdateJobRun(ctx, UpdateJobRunInput{
+			ID:         jobRun.ID,
+			Status:     "FAILED",
+			ErrorText:  err.Error(),
+			FinishedAt: time.Now().UTC(),
+			ResultPayload: map[string]interface{}{
+				"reason": "list_sessions_failed",
+				"filter": filter,
+			},
+		}); updateErr != nil {
+			return RunChatBufferFlushResult{}, fmt.Errorf("list sessions: %w; update job run: %v", err, updateErr)
+		}
+		return RunChatBufferFlushResult{}, err
+	}
+
+	result.CheckedCount = len(sessions)
+	results := make([]ChatBufferFlushSessionResult, 0)
+	for _, session := range sessions {
+		buffer := parseAutomationBufferState(session.Metadata)
+		if !buffer.isDue(observedAt) {
+			continue
+		}
+
+		result.DueCount++
+		item := ChatBufferFlushSessionResult{
+			SessionID:    session.ID,
+			ContactKey:   strings.TrimSpace(session.ContactKey),
+			PendingUntil: buffer.PendingUntil,
+		}
+
+		reprocessed, err := s.chat.Reprocess(ctx, chat.ReprocessInput{
+			SessionID: session.ID,
+			Trigger:   "SYSTEM_BUFFER_FLUSH",
+			Metadata: map[string]interface{}{
+				"source":        "CHAT_BUFFER_FLUSH",
+				"job_run_id":    jobRun.ID,
+				"observed_at":   observedAt.Format(time.RFC3339Nano),
+				"pending_until": buffer.pendingUntilString(),
+			},
+		})
+		if err != nil {
+			item.Status = "failed"
+			item.Reason = "reprocess_failed"
+			item.ErrorText = err.Error()
+			result.FailedCount++
+			results = append(results, item)
+			continue
+		}
+
+		item.Status = strings.ToLower(strings.TrimSpace(reprocessed.Status))
+		if item.Status == "" {
+			item.Status = "accepted"
+		}
+		item.Reason = strings.TrimSpace(reprocessed.Reason)
+		item.Idempotent = reprocessed.Idempotent
+		if reprocessed.Draft != nil {
+			item.DraftMessageID = strings.TrimSpace(reprocessed.Draft.ID)
+		}
+		result.FlushedCount++
+		results = append(results, item)
+	}
+	result.FlushedSessions = results
+
+	jobStatus := "SKIPPED"
+	switch {
+	case result.DueCount == 0:
+		result.Status = "skipped"
+		result.Reason = "no_due_buffers"
+	case result.FlushedCount > 0 && result.FailedCount == 0:
+		result.Status = "processed"
+		result.Reason = "buffers_flushed"
+		jobStatus = "COMPLETED"
+	case result.FlushedCount > 0 && result.FailedCount > 0:
+		result.Status = "partial"
+		result.Reason = "some_flushes_failed"
+		jobStatus = "PARTIAL"
+	default:
+		result.Status = "failed"
+		result.Reason = "all_due_flushes_failed"
+		jobStatus = "FAILED"
+	}
+
+	if _, err := s.store.UpdateJobRun(ctx, UpdateJobRunInput{
+		ID:         jobRun.ID,
+		Status:     jobStatus,
+		ErrorText:  buildChatBufferFlushJobError(result),
+		FinishedAt: time.Now().UTC(),
+		ResultPayload: map[string]interface{}{
+			"reason":           result.Reason,
+			"filter":           result.Filter,
+			"checked_count":    result.CheckedCount,
+			"due_count":        result.DueCount,
+			"flushed_count":    result.FlushedCount,
+			"failed_count":     result.FailedCount,
+			"flushed_sessions": serializeChatBufferFlushSessions(result.FlushedSessions),
+		},
+	}); err != nil {
+		return RunChatBufferFlushResult{}, err
+	}
+
+	return result, nil
+}
+
+func (s *Service) runChatAutoSendRetry(ctx context.Context, input RunChatAutoSendRetryInput, triggerSource string) (RunChatAutoSendRetryResult, error) {
+	filter, err := normalizeRunChatAutoSendRetryInput(input, s.cfg)
+	if err != nil {
+		return RunChatAutoSendRetryResult{}, err
+	}
+	triggerSource = strings.ToUpper(strings.TrimSpace(triggerSource))
+	if triggerSource == "" {
+		triggerSource = "MANUAL"
+	}
+
+	observedAt := time.Now().UTC()
+	jobRun, err := s.store.CreateJobRun(ctx, CreateJobRunInput{
+		JobName:       "CHAT_AUTO_SEND_RETRY",
+		TriggerSource: triggerSource,
+		Status:        "RUNNING",
+		InputPayload: map[string]interface{}{
+			"filter": filter,
+		},
+		StartedAt: observedAt,
+	})
+	if err != nil {
+		return RunChatAutoSendRetryResult{}, err
+	}
+
+	result := RunChatAutoSendRetryResult{
+		Status:     "skipped",
+		Reason:     "no_due_retries",
+		ObservedAt: observedAt,
+		JobRunID:   jobRun.ID,
+		Filter:     filter,
+	}
+
+	sessions, err := s.chat.ListSessions(ctx, chat.ListSessionsFilter{
+		Limit:               filter.Limit,
+		Channel:             filter.Channel,
+		Status:              filter.Status,
+		HandoffStatus:       filter.HandoffStatus,
+		DraftAutoSendStatus: "AUTO_SEND_RETRY_PENDING",
+	})
+	if err != nil {
+		if _, updateErr := s.store.UpdateJobRun(ctx, UpdateJobRunInput{
+			ID:         jobRun.ID,
+			Status:     "FAILED",
+			ErrorText:  err.Error(),
+			FinishedAt: time.Now().UTC(),
+			ResultPayload: map[string]interface{}{
+				"reason": "list_sessions_failed",
+				"filter": filter,
+			},
+		}); updateErr != nil {
+			return RunChatAutoSendRetryResult{}, fmt.Errorf("list sessions: %w; update job run: %v", err, updateErr)
+		}
+		return RunChatAutoSendRetryResult{}, err
+	}
+
+	result.CheckedCount = len(sessions)
+	items := make([]ChatAutoSendRetrySessionResult, 0)
+	cooldown := time.Duration(filter.CooldownSeconds) * time.Second
+	for _, session := range sessions {
+		retryState := parseAutomationDraftRetryState(session.Metadata)
+		if !retryState.isDue(observedAt, cooldown) {
+			continue
+		}
+
+		result.DueCount++
+		item := ChatAutoSendRetrySessionResult{
+			SessionID:        session.ID,
+			ContactKey:       strings.TrimSpace(session.ContactKey),
+			LastAttemptAt:    retryState.LastAttemptAt,
+			RetryRequestedAt: retryState.RetryRequestedAt,
+		}
+
+		retried, err := s.chat.RetryDraftAutoSend(ctx, chat.RetryDraftAutoSendInput{
+			SessionID:   session.ID,
+			RequestedBy: "system:auto-send-retry-loop",
+			Reason:      "system_retry_loop",
+			Metadata: map[string]interface{}{
+				"source":           "CHAT_AUTO_SEND_RETRY",
+				"job_run_id":       jobRun.ID,
+				"observed_at":      observedAt.Format(time.RFC3339Nano),
+				"cooldown_seconds": filter.CooldownSeconds,
+			},
+		})
+		if err != nil {
+			item.Status = "failed"
+			item.Reason = "retry_failed"
+			item.ErrorText = err.Error()
+			result.FailedCount++
+			items = append(items, item)
+			continue
+		}
+
+		item.Status = strings.ToLower(strings.TrimSpace(retried.Status))
+		if item.Status == "" {
+			item.Status = "accepted"
+		}
+		item.Reason = strings.TrimSpace(retried.Reason)
+		item.Idempotent = retried.Idempotent
+		if retried.Draft != nil {
+			item.DraftMessageID = strings.TrimSpace(retried.Draft.ID)
+		}
+		if retried.Outbound != nil {
+			item.OutboundID = strings.TrimSpace(retried.Outbound.ID)
+		}
+
+		switch item.Status {
+		case "accepted":
+			result.RetriedCount++
+		case "blocked":
+			result.BlockedCount++
+		case "skipped":
+			result.SkippedCount++
+		default:
+			result.SkippedCount++
+		}
+		items = append(items, item)
+	}
+	result.RetriedSessions = items
+
+	jobStatus := "SKIPPED"
+	switch {
+	case result.DueCount == 0:
+		result.Status = "skipped"
+		result.Reason = "no_due_retries"
+	case result.FailedCount == 0 && result.RetriedCount > 0 && result.BlockedCount == 0 && result.SkippedCount == 0:
+		result.Status = "processed"
+		result.Reason = "retries_delivered"
+		jobStatus = "COMPLETED"
+	case result.FailedCount == 0 && result.RetriedCount == 0 && result.BlockedCount > 0 && result.SkippedCount == 0:
+		result.Status = "blocked"
+		result.Reason = "retries_blocked_human"
+	case result.FailedCount == 0 && result.RetriedCount == 0 && result.SkippedCount > 0 && result.BlockedCount == 0:
+		result.Status = "skipped"
+		result.Reason = "no_retryable_retries"
+	case result.FailedCount > 0 && result.RetriedCount == 0 && result.BlockedCount == 0 && result.SkippedCount == 0:
+		result.Status = "failed"
+		result.Reason = "all_retries_failed"
+		jobStatus = "FAILED"
+	default:
+		result.Status = "partial"
+		result.Reason = "some_retries_not_delivered"
+		jobStatus = "PARTIAL"
+	}
+
+	if _, err := s.store.UpdateJobRun(ctx, UpdateJobRunInput{
+		ID:         jobRun.ID,
+		Status:     jobStatus,
+		ErrorText:  buildChatAutoSendRetryJobError(result),
+		FinishedAt: time.Now().UTC(),
+		ResultPayload: map[string]interface{}{
+			"reason":           result.Reason,
+			"filter":           result.Filter,
+			"checked_count":    result.CheckedCount,
+			"due_count":        result.DueCount,
+			"retried_count":    result.RetriedCount,
+			"blocked_count":    result.BlockedCount,
+			"skipped_count":    result.SkippedCount,
+			"failed_count":     result.FailedCount,
+			"retried_sessions": serializeChatAutoSendRetrySessions(result.RetriedSessions),
+		},
+	}); err != nil {
+		return RunChatAutoSendRetryResult{}, err
+	}
+
 	return result, nil
 }
 
@@ -708,6 +1034,130 @@ func (s *Service) ListJobRuns(ctx context.Context, input ListJobRunsInput) (List
 	}, nil
 }
 
+func (s *Service) GetCutoverReadiness(ctx context.Context) (CutoverReadinessResult, error) {
+	checkedAt := time.Now().UTC()
+
+	summary, err := s.chat.GetSessionsSummary(ctx, chat.ListSessionsFilter{})
+	if err != nil {
+		return CutoverReadinessResult{}, err
+	}
+
+	checks := make([]CutoverReadinessCheck, 0, 10)
+	addCheck := func(key string, ready bool, critical bool, readyMessage string, attentionMessage string) {
+		status := "READY"
+		message := readyMessage
+		if !ready {
+			status = "ATTENTION_REQUIRED"
+			message = attentionMessage
+		}
+		checks = append(checks, CutoverReadinessCheck{
+			Key:      key,
+			Status:   status,
+			Message:  message,
+			Critical: critical,
+		})
+	}
+
+	openAIReady := strings.TrimSpace(s.cfg.OpenAIAPIKey) != "" && strings.TrimSpace(s.cfg.OpenAIModel) != ""
+	evolutionSenderReady := strings.TrimSpace(s.cfg.EvolutionBaseURL) != "" &&
+		strings.TrimSpace(s.cfg.EvolutionAPIKey) != "" &&
+		strings.TrimSpace(s.cfg.EvolutionInstance) != ""
+	evolutionSecretReady := strings.TrimSpace(s.cfg.EvolutionWebhookSecret) != ""
+
+	addCheck("openai_runner", openAIReady, true,
+		"OPENAI_API_KEY e OPENAI_MODEL configurados para o loop do agente.",
+		"Falta configurar OPENAI_API_KEY e/ou OPENAI_MODEL para operar o atendimento sem o n8n.")
+	addCheck("evolution_sender", evolutionSenderReady, true,
+		"Evolution sender configurado para envio e reply da API.",
+		"Falta configurar EVOLUTION_BASE_URL, EVOLUTION_API_KEY e/ou EVOLUTION_INSTANCE.")
+	addCheck("evolution_webhook_secret", evolutionSecretReady, true,
+		"EVOLUTION_WEBHOOK_SECRET configurado para validar os webhooks publicos.",
+		"EVOLUTION_WEBHOOK_SECRET ainda nao esta configurado; o cutover fica sem validacao explicita de origem.")
+	addCheck("chat_buffer_auto_flush", s.cfg.ChatBufferAutoFlushEnabled, true,
+		"Loop server-side de chat-buffer-flush esta habilitado.",
+		"CHAT_BUFFER_AUTO_FLUSH_ENABLED esta desligado.")
+	addCheck("chat_auto_send_retry", s.cfg.ChatAutoSendRetryEnabled, true,
+		"Loop server-side de chat-auto-send-retry esta habilitado.",
+		"CHAT_AUTO_SEND_RETRY_ENABLED esta desligado.")
+	addCheck("payment_notifications", s.paymentSource != nil, true,
+		"Fonte interna para notificacao pos-pagamento esta conectada.",
+		"Fonte interna de notificacao pos-pagamento nao foi conectada no bootstrap.")
+	addCheck("bookings_expire", s.bookingSource != nil, true,
+		"Fonte interna para expiracao de reservas esta conectada.",
+		"Fonte interna de expiracao de reservas nao foi conectada no bootstrap.")
+	addCheck("session_observability", true, false,
+		"Observabilidade operacional disponivel em /chat/sessions, /chat/sessions/summary e /chat/sessions/{sessionId}/draft.",
+		"Observabilidade operacional indisponivel.")
+	addCheck("review_queue", !summary.HasReviewAlert, false,
+		"Fila de revisao sem alerta ativo no momento.",
+		firstNonEmptyString(
+			summary.ReviewAlertMessage,
+			fmt.Sprintf("Fila de revisao com alerta ativo (%s).", strings.TrimSpace(summary.ReviewAlertCode)),
+		))
+	addCheck("auto_send_issue_queue", summary.AutoSendIssueCount == 0, false,
+		"Nao ha problemas pendentes na fila de auto-send.",
+		fmt.Sprintf("Existem %d sessoes com problema de auto-send pendente.", summary.AutoSendIssueCount))
+
+	latestJobs := make([]CutoverReadinessJob, 0, 4)
+	for _, jobName := range []string{"CHAT_BUFFER_FLUSH", "CHAT_AUTO_SEND_RETRY", "BOOKINGS_EXPIRE", "PAYMENT_NOTIFICATIONS"} {
+		item, err := s.latestCutoverJob(ctx, jobName)
+		if err != nil {
+			return CutoverReadinessResult{}, err
+		}
+		latestJobs = append(latestJobs, item)
+	}
+
+	issues := make([]string, 0, len(checks))
+	overallStatus := "READY"
+	for _, check := range checks {
+		if check.Status == "READY" {
+			continue
+		}
+		issues = append(issues, check.Message)
+		if check.Critical {
+			overallStatus = "ATTENTION_REQUIRED"
+		}
+	}
+	if overallStatus == "READY" && (summary.HasReviewAlert || summary.AutoSendIssueCount > 0) {
+		overallStatus = "ATTENTION_REQUIRED"
+	}
+
+	return CutoverReadinessResult{
+		Status:          overallStatus,
+		CheckedAt:       checkedAt,
+		Issues:          issues,
+		Checks:          checks,
+		SessionsSummary: summary,
+		LatestJobs:      latestJobs,
+	}, nil
+}
+
+func (s *Service) latestCutoverJob(ctx context.Context, jobName string) (CutoverReadinessJob, error) {
+	runs, err := s.store.ListJobRuns(ctx, ListJobRunsInput{
+		JobName: jobName,
+		Limit:   1,
+	})
+	if err != nil {
+		return CutoverReadinessJob{}, err
+	}
+	if len(runs) == 0 {
+		return CutoverReadinessJob{
+			JobName: jobName,
+			Status:  "NEVER_RUN",
+		}, nil
+	}
+	run := runs[0]
+	return CutoverReadinessJob{
+		JobName:       jobName,
+		Status:        strings.TrimSpace(run.Status),
+		JobRunID:      strings.TrimSpace(run.ID),
+		TriggerSource: strings.TrimSpace(run.TriggerSource),
+		StartedAt:     timePointer(run.StartedAt),
+		FinishedAt:    run.FinishedAt,
+		ErrorText:     strings.TrimSpace(run.ErrorText),
+	}, nil
+}
+
 func buildChatReviewAlertSummarySnapshot(summary chat.SessionsSummary) ChatReviewAlertSummarySnapshot {
 	return ChatReviewAlertSummarySnapshot{
 		TotalCount:                summary.TotalCount,
@@ -834,6 +1284,13 @@ func extractEvolutionText(data EvolutionMessageData) string {
 		if data.Message.VideoMessage != nil {
 			return strings.TrimSpace(data.Message.VideoMessage.Caption)
 		}
+	case "documentMessage":
+		if text := extractEvolutionDocumentCaption(data.Message.DocumentMessage); text != "" {
+			return text
+		}
+		if text := extractEvolutionDocumentFileName(data.Message.DocumentMessage); text != "" {
+			return text
+		}
 	}
 
 	if text := strings.TrimSpace(data.Message.Conversation); text != "" {
@@ -852,7 +1309,79 @@ func extractEvolutionText(data EvolutionMessageData) string {
 	if data.Message.VideoMessage != nil {
 		return strings.TrimSpace(data.Message.VideoMessage.Caption)
 	}
+	if text := extractEvolutionDocumentCaption(data.Message.DocumentMessage); text != "" {
+		return text
+	}
+	if text := extractEvolutionDocumentFileName(data.Message.DocumentMessage); text != "" {
+		return text
+	}
 	return ""
+}
+
+func extractEvolutionMessageMetadata(data EvolutionMessageData) map[string]interface{} {
+	switch strings.TrimSpace(data.MessageType) {
+	case "documentMessage":
+		return extractEvolutionDocumentMetadata(data.Message.DocumentMessage)
+	default:
+		return nil
+	}
+}
+
+func extractEvolutionDocumentMetadata(payload map[string]interface{}) map[string]interface{} {
+	if len(payload) == 0 {
+		return nil
+	}
+
+	metadata := map[string]interface{}{}
+	if caption := extractEvolutionDocumentCaption(payload); caption != "" {
+		metadata["document_caption"] = caption
+	}
+	if fileName := extractEvolutionDocumentFileName(payload); fileName != "" {
+		metadata["document_file_name"] = fileName
+	}
+	if mimeType := firstNonEmptyString(
+		payload["mimetype"],
+		payload["mimeType"],
+		payload["mime_type"],
+	); mimeType != "" {
+		metadata["document_mime_type"] = mimeType
+		if strings.EqualFold(mimeType, "application/pdf") {
+			metadata["document_is_pdf"] = true
+			metadata["document_format"] = "PDF"
+		}
+	}
+	if pageCount := intValue(payload["pageCount"]); pageCount > 0 {
+		metadata["document_page_count"] = pageCount
+	}
+	if fileLength := intValue(payload["fileLength"]); fileLength > 0 {
+		metadata["document_file_length"] = fileLength
+	}
+	if url := firstNonEmptyString(
+		payload["url"],
+		payload["directPath"],
+		payload["direct_path"],
+	); url != "" {
+		metadata["document_url"] = url
+	}
+	if title := firstNonEmptyString(payload["title"]); title != "" {
+		metadata["document_title"] = title
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func extractEvolutionDocumentCaption(payload map[string]interface{}) string {
+	return firstNonEmptyString(payload["caption"])
+}
+
+func extractEvolutionDocumentFileName(payload map[string]interface{}) string {
+	return firstNonEmptyString(
+		payload["fileName"],
+		payload["file_name"],
+		payload["title"],
+	)
 }
 
 func normalizePhone(contactKey string) string {
@@ -903,6 +1432,230 @@ func normalizeProviderStatus(status string) string {
 	return strings.ToUpper(strings.TrimSpace(status))
 }
 
+type automationBufferState struct {
+	Status       string
+	PendingUntil *time.Time
+}
+
+func (b automationBufferState) isDue(observedAt time.Time) bool {
+	if strings.ToUpper(strings.TrimSpace(b.Status)) != "PENDING" || b.PendingUntil == nil {
+		return false
+	}
+	return !b.PendingUntil.After(observedAt)
+}
+
+func (b automationBufferState) pendingUntilString() string {
+	if b.PendingUntil == nil {
+		return ""
+	}
+	return b.PendingUntil.UTC().Format(time.RFC3339Nano)
+}
+
+func parseAutomationBufferState(metadata map[string]interface{}) automationBufferState {
+	raw, ok := metadata["buffer"].(map[string]interface{})
+	if !ok || len(raw) == 0 {
+		return automationBufferState{}
+	}
+	return automationBufferState{
+		Status:       strings.ToUpper(strings.TrimSpace(stringValue(raw["status"]))),
+		PendingUntil: parseAutomationTime(raw["pending_until"]),
+	}
+}
+
+type automationDraftRetryState struct {
+	Status           string
+	LastAttemptAt    *time.Time
+	RetryRequestedAt *time.Time
+}
+
+func (r automationDraftRetryState) isDue(observedAt time.Time, cooldown time.Duration) bool {
+	if strings.ToUpper(strings.TrimSpace(r.Status)) != "AUTO_SEND_RETRY_PENDING" {
+		return false
+	}
+	base := r.referenceTime()
+	if base == nil {
+		return true
+	}
+	if cooldown <= 0 {
+		return !base.After(observedAt)
+	}
+	return !base.Add(cooldown).After(observedAt)
+}
+
+func (r automationDraftRetryState) referenceTime() *time.Time {
+	switch {
+	case r.LastAttemptAt != nil && r.RetryRequestedAt != nil:
+		if r.LastAttemptAt.After(*r.RetryRequestedAt) {
+			return r.LastAttemptAt
+		}
+		return r.RetryRequestedAt
+	case r.LastAttemptAt != nil:
+		return r.LastAttemptAt
+	case r.RetryRequestedAt != nil:
+		return r.RetryRequestedAt
+	default:
+		return nil
+	}
+}
+
+func parseAutomationDraftRetryState(metadata map[string]interface{}) automationDraftRetryState {
+	raw, ok := metadata["agent"].(map[string]interface{})
+	if !ok || len(raw) == 0 {
+		return automationDraftRetryState{}
+	}
+	return automationDraftRetryState{
+		Status:           strings.ToUpper(strings.TrimSpace(stringValue(raw["auto_send_status"]))),
+		LastAttemptAt:    parseAutomationTime(raw["auto_send_last_attempt_at"]),
+		RetryRequestedAt: parseAutomationTime(raw["auto_send_retry_requested_at"]),
+	}
+}
+
+func parseAutomationTime(value interface{}) *time.Time {
+	raw := strings.TrimSpace(stringValue(value))
+	if raw == "" {
+		return nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		utc := parsed.UTC()
+		return &utc
+	}
+	if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+		utc := parsed.UTC()
+		return &utc
+	}
+	return nil
+}
+
+func normalizeRunChatBufferFlushInput(input RunChatBufferFlushInput) (RunChatBufferFlushInput, error) {
+	if input.Limit < 0 || input.Limit > 500 {
+		return RunChatBufferFlushInput{}, ErrInvalidChatBufferFlushLimit
+	}
+	if input.Limit == 0 {
+		input.Limit = 100
+	}
+	input.Channel = strings.ToUpper(strings.TrimSpace(input.Channel))
+	if input.Channel == "" {
+		input.Channel = "WHATSAPP"
+	}
+	input.Status = strings.ToUpper(strings.TrimSpace(input.Status))
+	if input.Status == "" {
+		input.Status = "ACTIVE"
+	}
+	input.HandoffStatus = strings.ToUpper(strings.TrimSpace(input.HandoffStatus))
+	if input.HandoffStatus == "" {
+		input.HandoffStatus = "BOT"
+	}
+	return input, nil
+}
+
+func normalizeRunChatAutoSendRetryInput(input RunChatAutoSendRetryInput, cfg config.Config) (RunChatAutoSendRetryInput, error) {
+	if input.Limit < 0 || input.Limit > 500 {
+		return RunChatAutoSendRetryInput{}, ErrInvalidChatAutoSendRetryLimit
+	}
+	if input.CooldownSeconds < 0 || input.CooldownSeconds > 86400 {
+		return RunChatAutoSendRetryInput{}, ErrInvalidChatAutoSendRetryCooldown
+	}
+	if input.Limit == 0 {
+		input.Limit = cfg.ChatAutoSendRetryLimit
+		if input.Limit <= 0 {
+			input.Limit = 20
+		}
+	}
+	if input.CooldownSeconds == 0 {
+		input.CooldownSeconds = cfg.ChatAutoSendRetryCooldownSeconds
+		if input.CooldownSeconds <= 0 {
+			input.CooldownSeconds = 30
+		}
+	}
+	input.Channel = strings.ToUpper(strings.TrimSpace(input.Channel))
+	if input.Channel == "" {
+		input.Channel = "WHATSAPP"
+	}
+	input.Status = strings.ToUpper(strings.TrimSpace(input.Status))
+	if input.Status == "" {
+		input.Status = "ACTIVE"
+	}
+	input.HandoffStatus = strings.ToUpper(strings.TrimSpace(input.HandoffStatus))
+	if input.HandoffStatus == "" {
+		input.HandoffStatus = "BOT"
+	}
+	return input, nil
+}
+
+func serializeChatBufferFlushSessions(items []ChatBufferFlushSessionResult) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		payload := map[string]interface{}{
+			"session_id":  item.SessionID,
+			"contact_key": item.ContactKey,
+			"status":      item.Status,
+			"reason":      item.Reason,
+			"idempotent":  item.Idempotent,
+		}
+		if item.PendingUntil != nil {
+			payload["pending_until"] = item.PendingUntil.UTC().Format(time.RFC3339Nano)
+		}
+		if strings.TrimSpace(item.DraftMessageID) != "" {
+			payload["draft_message_id"] = item.DraftMessageID
+		}
+		if strings.TrimSpace(item.ErrorText) != "" {
+			payload["error_text"] = item.ErrorText
+		}
+		result = append(result, payload)
+	}
+	return result
+}
+
+func serializeChatAutoSendRetrySessions(items []ChatAutoSendRetrySessionResult) []map[string]interface{} {
+	result := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		payload := map[string]interface{}{
+			"session_id":  item.SessionID,
+			"contact_key": item.ContactKey,
+			"status":      item.Status,
+			"reason":      item.Reason,
+			"idempotent":  item.Idempotent,
+		}
+		if item.LastAttemptAt != nil {
+			payload["last_attempt_at"] = item.LastAttemptAt.UTC().Format(time.RFC3339Nano)
+		}
+		if item.RetryRequestedAt != nil {
+			payload["retry_requested_at"] = item.RetryRequestedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if strings.TrimSpace(item.DraftMessageID) != "" {
+			payload["draft_message_id"] = item.DraftMessageID
+		}
+		if strings.TrimSpace(item.OutboundID) != "" {
+			payload["outbound_id"] = item.OutboundID
+		}
+		if strings.TrimSpace(item.ErrorText) != "" {
+			payload["error_text"] = item.ErrorText
+		}
+		result = append(result, payload)
+	}
+	return result
+}
+
+func buildChatBufferFlushJobError(result RunChatBufferFlushResult) string {
+	if result.FailedCount == 0 {
+		return ""
+	}
+	if result.FlushedCount == 0 {
+		return "all due chat buffer flushes failed"
+	}
+	return "some chat buffer flushes failed"
+}
+
+func buildChatAutoSendRetryJobError(result RunChatAutoSendRetryResult) string {
+	if result.FailedCount == 0 {
+		return ""
+	}
+	if result.RetriedCount == 0 && result.BlockedCount == 0 && result.SkippedCount == 0 {
+		return "all due chat auto-send retries failed"
+	}
+	return "some chat auto-send retries failed"
+}
+
 func resolveEvolutionPresenceContactKey(data EvolutionMessageData) string {
 	if value := strings.TrimSpace(data.ID); value != "" {
 		return value
@@ -944,4 +1697,33 @@ func stringValue(value interface{}) string {
 		return ""
 	}
 	return typed
+}
+
+func firstNonEmptyString(values ...interface{}) string {
+	for _, value := range values {
+		if text := strings.TrimSpace(stringValue(value)); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func intValue(value interface{}) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return int(parsed)
+		}
+	}
+	return 0
 }

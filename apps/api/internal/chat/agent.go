@@ -12,9 +12,24 @@ const (
 	agentStatusReadyForAutomation   = "READY_FOR_AUTOMATION"
 	messageStatusAutomationDraft    = "AUTOMATION_DRAFT"
 	messageStatusAutomationReviewed = "AUTOMATION_REVIEWED"
+	messageStatusAutomationSent     = "AUTOMATION_SENT"
 	agentStatusDraftGenerated       = "DRAFT_GENERATED"
 	agentStatusDraftReviewed        = "DRAFT_REVIEWED"
+	agentStatusDraftAutoSent        = "DRAFT_AUTO_SENT"
+	draftAutoSendStatusEligible     = "AUTO_SEND_ELIGIBLE"
+	draftAutoSendStatusRetryPending = "AUTO_SEND_RETRY_PENDING"
+	draftAutoSendStatusBlockedHuman = "AUTO_SEND_BLOCKED_HUMAN"
+	draftAutoSendStatusReviewNeeded = "REVIEW_REQUIRED"
+	draftAutoSendReasonToolCall     = "tool_call_present"
+	draftAutoSendReasonNonTextTurn  = "non_text_turn"
+	draftAutoSendReasonDeliveryFail = "delivery_failed"
+	draftAutoSendReasonHumanHandoff = "human_handoff_active"
 )
+
+type draftAutoSendPolicy struct {
+	Status  string
+	Reasons []string
+}
 
 func selectReprocessCandidateMessages(history []Message) []Message {
 	candidates := make([]Message, 0, 4)
@@ -54,7 +69,7 @@ func isReprocessableInboundStatus(status string) bool {
 
 func isAutomationDraftStatus(status string) bool {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
-	case messageStatusAutomationDraft, messageStatusAutomationReviewed:
+	case messageStatusAutomationDraft, messageStatusAutomationReviewed, messageStatusAutomationSent:
 		return true
 	default:
 		return false
@@ -164,7 +179,44 @@ func buildAgentDraftIdempotencyKey(sessionID string, messageIDs []string) string
 	return "chat-agent-draft-" + uuid.NewSHA1(uuid.Nil, []byte(sessionID+"|"+strings.Join(messageIDs, ","))).String()
 }
 
-func buildDraftGeneratedAgentState(metadata map[string]interface{}, candidates []Message, draftID string, run RunAgentResult, toolCalls []ToolCall, observedAt time.Time) map[string]interface{} {
+func buildAutoSendReplyIdempotencyKey(draftID string) string {
+	return "chat-auto-reply-" + strings.TrimSpace(draftID)
+}
+
+func evaluateDraftAutoSendPolicy(candidates []Message, toolCalls []ToolCall) draftAutoSendPolicy {
+	reasons := make([]string, 0, 2)
+	if len(toolCalls) > 0 {
+		reasons = append(reasons, draftAutoSendReasonToolCall)
+	}
+	if hasNonTextCandidate(candidates) {
+		reasons = append(reasons, draftAutoSendReasonNonTextTurn)
+	}
+
+	policy := draftAutoSendPolicy{Status: draftAutoSendStatusEligible}
+	if len(reasons) > 0 {
+		policy.Status = draftAutoSendStatusReviewNeeded
+		policy.Reasons = reasons
+	}
+	return policy
+}
+
+func hasNonTextCandidate(candidates []Message) bool {
+	for _, message := range candidates {
+		kind := strings.ToUpper(strings.TrimSpace(message.Kind))
+		if kind != "" && kind != "TEXT" {
+			return true
+		}
+		normalized := message.NormalizedPayload
+		if strings.TrimSpace(asString(normalized["document_file_name"])) != "" ||
+			strings.TrimSpace(asString(normalized["document_url"])) != "" ||
+			strings.TrimSpace(asString(normalized["document_mime_type"])) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func buildDraftGeneratedAgentState(metadata map[string]interface{}, candidates []Message, draftID string, run RunAgentResult, toolCalls []ToolCall, autoSend draftAutoSendPolicy, observedAt time.Time) map[string]interface{} {
 	state := cloneNestedMetadataMap(metadata, "agent")
 	state["status"] = agentStatusDraftGenerated
 	state["draft_idempotency_key"] = draftID
@@ -173,9 +225,13 @@ func buildDraftGeneratedAgentState(metadata map[string]interface{}, candidates [
 	state["draft_model"] = strings.TrimSpace(run.Model)
 	state["provider_response_id"] = strings.TrimSpace(run.ProviderResponseID)
 	state["tool_calls_count"] = len(toolCalls)
+	state["auto_send_status"] = autoSend.Status
 	if len(toolCalls) > 0 {
 		state["tool_names"] = toolCallNames(toolCalls)
 		state["tool_call_ids"] = toolCallIDs(toolCalls)
+	}
+	if len(autoSend.Reasons) > 0 {
+		state["auto_send_reasons"] = autoSend.Reasons
 	}
 	return state
 }
@@ -200,7 +256,142 @@ func buildDraftReviewedAgentState(metadata map[string]interface{}, draft Message
 	return state
 }
 
-func buildAgentDraftPayload(session Session, candidates []Message, draftID string, systemPrompt string, userPrompt string, run RunAgentResult, tools agentToolContext, observedAt time.Time) (map[string]interface{}, map[string]interface{}) {
+func buildDraftAutoSentAgentState(metadata map[string]interface{}, draft Message, reply Message, outbound ReplyOutbound, observedAt time.Time) map[string]interface{} {
+	state := cloneNestedMetadataMap(metadata, "agent")
+	state["status"] = agentStatusDraftAutoSent
+	state["auto_sent_draft_message_id"] = draft.ID
+	state["auto_sent_message_id"] = reply.ID
+	state["auto_sent_outbound_id"] = outbound.ID
+	state["auto_sent_at"] = observedAt.UTC().Format(time.RFC3339Nano)
+	state["auto_send_status"] = draftAutoSendStatusEligible
+	if strings.TrimSpace(outbound.ProviderMessageID) != "" {
+		state["auto_sent_provider_message_id"] = strings.TrimSpace(outbound.ProviderMessageID)
+	}
+	return state
+}
+
+func buildDraftAutoSendRetryPendingAgentState(metadata map[string]interface{}, draft Message, reply Message, outbound ReplyOutbound, errorText string, observedAt time.Time) map[string]interface{} {
+	state := cloneNestedMetadataMap(metadata, "agent")
+	state["status"] = agentStatusDraftGenerated
+	state["draft_idempotency_key"] = firstNonEmpty(
+		asString(draft.NormalizedPayload["draft_idempotency_key"]),
+		asString(draft.Payload["draft_idempotency_key"]),
+		strings.TrimSpace(draft.IdempotencyKey),
+		asString(state["draft_idempotency_key"]),
+	)
+	state["draft_generated_at"] = firstNonEmpty(
+		asString(draft.NormalizedPayload["generated_at"]),
+		asString(draft.Payload["generated_at"]),
+		asString(state["draft_generated_at"]),
+	)
+	state["auto_send_status"] = draftAutoSendStatusRetryPending
+	state["auto_send_reasons"] = mergeDistinctStrings(
+		firstNonEmptyStringSlice(
+			asStringSlice(draft.NormalizedPayload["auto_send_reasons"]),
+			asStringSlice(draft.Payload["auto_send_reasons"]),
+			asStringSlice(state["auto_send_reasons"]),
+		),
+		draftAutoSendReasonDeliveryFail,
+	)
+	state["auto_send_last_attempt_at"] = observedAt.UTC().Format(time.RFC3339Nano)
+	state["auto_send_last_error_text"] = strings.TrimSpace(errorText)
+	state["auto_send_last_reply_message_id"] = reply.ID
+	state["auto_send_last_outbound_id"] = outbound.ID
+	return state
+}
+
+func buildDraftAutoSendRetryRequestedPayload(draft Message, input RetryDraftAutoSendInput, observedAt time.Time) map[string]interface{} {
+	payload := map[string]interface{}{
+		"auto_send_status":             draftAutoSendStatusRetryPending,
+		"auto_send_retry_requested_at": observedAt.UTC().Format(time.RFC3339Nano),
+		"auto_send_retry_request_count": maxInts(
+			asInt(draft.NormalizedPayload["auto_send_retry_request_count"]),
+			asInt(draft.Payload["auto_send_retry_request_count"]),
+		) + 1,
+	}
+	if requestedBy := strings.TrimSpace(input.RequestedBy); requestedBy != "" {
+		payload["auto_send_retry_requested_by"] = requestedBy
+	}
+	if reason := strings.TrimSpace(input.Reason); reason != "" {
+		payload["auto_send_retry_request_reason"] = reason
+	}
+	if len(input.Metadata) > 0 {
+		payload["auto_send_retry_request_metadata"] = cloneMap(input.Metadata)
+	}
+	return payload
+}
+
+func buildDraftAutoSendRetryRequestedAgentState(metadata map[string]interface{}, draft Message, input RetryDraftAutoSendInput, observedAt time.Time) map[string]interface{} {
+	state := cloneNestedMetadataMap(metadata, "agent")
+	state["status"] = agentStatusDraftGenerated
+	state["draft_idempotency_key"] = firstNonEmpty(
+		asString(draft.NormalizedPayload["draft_idempotency_key"]),
+		asString(draft.Payload["draft_idempotency_key"]),
+		strings.TrimSpace(draft.IdempotencyKey),
+		asString(state["draft_idempotency_key"]),
+	)
+	state["draft_generated_at"] = firstNonEmpty(
+		asString(draft.NormalizedPayload["generated_at"]),
+		asString(draft.Payload["generated_at"]),
+		asString(state["draft_generated_at"]),
+	)
+	state["auto_send_status"] = draftAutoSendStatusRetryPending
+	state["auto_send_reasons"] = firstNonEmptyStringSlice(
+		asStringSlice(draft.NormalizedPayload["auto_send_reasons"]),
+		asStringSlice(draft.Payload["auto_send_reasons"]),
+		asStringSlice(state["auto_send_reasons"]),
+	)
+	state["auto_send_retry_requested_at"] = observedAt.UTC().Format(time.RFC3339Nano)
+	state["auto_send_retry_request_count"] = maxInts(
+		asInt(draft.NormalizedPayload["auto_send_retry_request_count"]),
+		asInt(draft.Payload["auto_send_retry_request_count"]),
+		asInt(state["auto_send_retry_request_count"]),
+	) + 1
+	if requestedBy := strings.TrimSpace(input.RequestedBy); requestedBy != "" {
+		state["auto_send_retry_requested_by"] = requestedBy
+	}
+	if reason := strings.TrimSpace(input.Reason); reason != "" {
+		state["auto_send_retry_request_reason"] = reason
+	}
+	if len(input.Metadata) > 0 {
+		state["auto_send_retry_request_metadata"] = cloneMap(input.Metadata)
+	}
+	return state
+}
+
+func buildDraftAutoSendBlockedAgentState(metadata map[string]interface{}, draft Message, session Session, observedAt time.Time) map[string]interface{} {
+	state := cloneNestedMetadataMap(metadata, "agent")
+	state["status"] = agentStatusDraftGenerated
+	state["draft_idempotency_key"] = firstNonEmpty(
+		asString(draft.NormalizedPayload["draft_idempotency_key"]),
+		asString(draft.Payload["draft_idempotency_key"]),
+		strings.TrimSpace(draft.IdempotencyKey),
+		asString(state["draft_idempotency_key"]),
+	)
+	state["draft_generated_at"] = firstNonEmpty(
+		asString(draft.NormalizedPayload["generated_at"]),
+		asString(draft.Payload["generated_at"]),
+		asString(state["draft_generated_at"]),
+	)
+	state["auto_send_status"] = draftAutoSendStatusBlockedHuman
+	state["auto_send_reasons"] = mergeDistinctStrings(
+		firstNonEmptyStringSlice(
+			asStringSlice(draft.NormalizedPayload["auto_send_reasons"]),
+			asStringSlice(draft.Payload["auto_send_reasons"]),
+			asStringSlice(state["auto_send_reasons"]),
+		),
+		draftAutoSendReasonHumanHandoff,
+	)
+	state["auto_send_blocked_at"] = observedAt.UTC().Format(time.RFC3339Nano)
+	state["auto_send_block_reason"] = draftAutoSendReasonHumanHandoff
+	state["handoff_status"] = session.HandoffStatus
+	if strings.TrimSpace(session.CurrentOwnerUserID) != "" {
+		state["current_owner_user_id"] = strings.TrimSpace(session.CurrentOwnerUserID)
+	}
+	return state
+}
+
+func buildAgentDraftPayload(session Session, candidates []Message, draftID string, systemPrompt string, userPrompt string, run RunAgentResult, tools agentToolContext, autoSend draftAutoSendPolicy, observedAt time.Time) (map[string]interface{}, map[string]interface{}) {
 	payload := map[string]interface{}{
 		"mode":                     "AUTOMATION_DRAFT",
 		"draft_idempotency_key":    draftID,
@@ -208,6 +399,7 @@ func buildAgentDraftPayload(session Session, candidates []Message, draftID strin
 		"current_turn_message_ids": candidateMessageIDs(candidates),
 		"model":                    strings.TrimSpace(run.Model),
 		"provider_response_id":     strings.TrimSpace(run.ProviderResponseID),
+		"auto_send_status":         autoSend.Status,
 		"request_payload":          run.RequestPayload,
 		"response_payload":         run.ResponsePayload,
 		"system_prompt":            systemPrompt,
@@ -218,7 +410,10 @@ func buildAgentDraftPayload(session Session, candidates []Message, draftID strin
 	if len(tools.Calls) > 0 {
 		payload["tool_calls"] = serializeToolCalls(tools.Calls)
 	}
-	if tools.Availability != nil || tools.Pricing != nil || tools.Booking != nil || tools.Payments != nil {
+	if len(autoSend.Reasons) > 0 {
+		payload["auto_send_reasons"] = autoSend.Reasons
+	}
+	if tools.Availability != nil || tools.Pricing != nil || tools.Booking != nil || tools.BookingCreate != nil || tools.Payments != nil || tools.PaymentCreate != nil || tools.BookingCancel != nil {
 		toolContext := map[string]interface{}{}
 		if tools.Availability != nil {
 			toolContext[toolNameAvailabilitySearch] = buildAvailabilityToolResponsePayload(*tools.Availability)
@@ -229,8 +424,17 @@ func buildAgentDraftPayload(session Session, candidates []Message, draftID strin
 		if tools.Booking != nil {
 			toolContext[toolNameBookingLookup] = buildBookingLookupResponsePayload(*tools.Booking)
 		}
+		if tools.BookingCreate != nil {
+			toolContext[toolNameBookingCreate] = buildBookingCreateResponsePayload(*tools.BookingCreate)
+		}
 		if tools.Payments != nil {
 			toolContext[toolNamePaymentStatus] = buildPaymentStatusResponsePayload(*tools.Payments)
+		}
+		if tools.PaymentCreate != nil {
+			toolContext[toolNamePaymentCreate] = buildPaymentCreateResponsePayload(*tools.PaymentCreate)
+		}
+		if tools.BookingCancel != nil {
+			toolContext[toolNameBookingCancel] = buildBookingCancelResponsePayload(*tools.BookingCancel)
 		}
 		payload["tool_context"] = toolContext
 	}
@@ -242,10 +446,14 @@ func buildAgentDraftPayload(session Session, candidates []Message, draftID strin
 		"current_turn_message_ids": candidateMessageIDs(candidates),
 		"model":                    strings.TrimSpace(run.Model),
 		"provider_response_id":     strings.TrimSpace(run.ProviderResponseID),
+		"auto_send_status":         autoSend.Status,
 		"tool_call_count":          len(tools.Calls),
 	}
 	if len(tools.Calls) > 0 {
 		normalized["tool_names"] = toolCallNames(tools.Calls)
+	}
+	if len(autoSend.Reasons) > 0 {
+		normalized["auto_send_reasons"] = autoSend.Reasons
 	}
 	return payload, normalized
 }
@@ -260,6 +468,61 @@ func cloneNestedMetadataMap(metadata map[string]interface{}, key string) map[str
 		cloned[nestedKey] = value
 	}
 	return cloned
+}
+
+func cloneMap(input map[string]interface{}) map[string]interface{} {
+	if len(input) == 0 {
+		return map[string]interface{}{}
+	}
+	cloned := make(map[string]interface{}, len(input))
+	for key, value := range input {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func mergeDistinctStrings(base []string, extras ...string) []string {
+	seen := map[string]struct{}{}
+	items := make([]string, 0, len(base)+len(extras))
+	for _, item := range base {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		items = append(items, trimmed)
+	}
+	for _, item := range extras {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		items = append(items, trimmed)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return items
+}
+
+func maxInts(values ...int) int {
+	if len(values) == 0 {
+		return 0
+	}
+	best := values[0]
+	for _, value := range values[1:] {
+		if value > best {
+			best = value
+		}
+	}
+	return best
 }
 
 func toolCallNames(toolCalls []ToolCall) []string {

@@ -149,6 +149,113 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 		}
 	}
 
+	if tools.BookingCreate != nil {
+		builder.WriteString("\nRESULTADO DE FERRAMENTA\n")
+		builder.WriteString(fmt.Sprintf("- Tool: %s\n", toolNameBookingCreate))
+		builder.WriteString(fmt.Sprintf(
+			"- Tentativa de reserva: %s -> %s | data %s | saida %s | qtd %d\n",
+			strings.TrimSpace(tools.BookingCreate.Filter.OriginDisplayName),
+			strings.TrimSpace(tools.BookingCreate.Filter.DestinationDisplayName),
+			strings.TrimSpace(tools.BookingCreate.Filter.TripDate),
+			strings.TrimSpace(tools.BookingCreate.Filter.DepartureTime),
+			tools.BookingCreate.Filter.Qty,
+		))
+		builder.WriteString(fmt.Sprintf("- Resultado operacional: %s\n", strings.TrimSpace(tools.BookingCreate.Mode)))
+		if tools.BookingCreate.BookingID != "" || tools.BookingCreate.ReservationCode != "" {
+			builder.WriteString(fmt.Sprintf(
+				"- Reserva criada: booking %s | codigo %s | status %s | total R$ %.2f | sinal R$ %.2f | restante R$ %.2f\n",
+				strings.TrimSpace(tools.BookingCreate.BookingID),
+				strings.TrimSpace(tools.BookingCreate.ReservationCode),
+				strings.TrimSpace(tools.BookingCreate.Status),
+				tools.BookingCreate.TotalAmount,
+				tools.BookingCreate.DepositAmount,
+				tools.BookingCreate.RemainderAmount,
+			))
+			if tools.BookingCreate.ReservedUntil != nil {
+				builder.WriteString(fmt.Sprintf("- Reserva criada expira em: %s\n", tools.BookingCreate.ReservedUntil.UTC().Format(time.RFC3339)))
+			}
+		}
+		for index, item := range tools.BookingCreate.Passengers {
+			builder.WriteString(fmt.Sprintf(
+				"- Passageiro %d: %s | documento %s %s | assento %s\n",
+				index+1,
+				strings.TrimSpace(item.Name),
+				strings.TrimSpace(item.DocumentType),
+				strings.TrimSpace(item.Document),
+				strings.TrimSpace(item.SeatID),
+			))
+		}
+		for _, item := range tools.BookingCreate.Errors {
+			builder.WriteString(fmt.Sprintf("- Erro operacional: %s\n", strings.TrimSpace(item)))
+		}
+		if message := strings.TrimSpace(tools.BookingCreate.MessageForAgent); message != "" {
+			builder.WriteString(fmt.Sprintf("- Instrucao operacional: %s\n", message))
+		}
+		builder.WriteString("- Se a reserva ja foi criada, nao peca os mesmos dados de novo; informe o codigo de reserva e siga para pagamento.\n")
+	}
+
+	if tools.Reschedule != nil {
+		builder.WriteString("\nRESULTADO DE FERRAMENTA\n")
+		builder.WriteString(fmt.Sprintf("- Tool: %s\n", toolNameRescheduleLookup))
+		if tools.Reschedule.Booking != nil {
+			builder.WriteString(fmt.Sprintf("- Booking consultado: %s | codigo %s | status %s\n",
+				strings.TrimSpace(tools.Reschedule.Booking.ID),
+				strings.TrimSpace(tools.Reschedule.Booking.ReservationCode),
+				strings.TrimSpace(tools.Reschedule.Booking.Status),
+			))
+		}
+		if tools.Reschedule.Current.Origin != "" || tools.Reschedule.Current.Destination != "" || tools.Reschedule.Current.TripDate != "" {
+			builder.WriteString(fmt.Sprintf(
+				"- Viagem atual: %s -> %s | data %s | passageiros %d\n",
+				strings.TrimSpace(tools.Reschedule.Current.Origin),
+				strings.TrimSpace(tools.Reschedule.Current.Destination),
+				strings.TrimSpace(tools.Reschedule.Current.TripDate),
+				tools.Reschedule.Current.PassengerCount,
+			))
+		}
+		builder.WriteString(fmt.Sprintf(
+			"- Pedido de reagendamento: %s -> %s | nova data %s | qtd %d\n",
+			strings.TrimSpace(tools.Reschedule.Requested.Origin),
+			strings.TrimSpace(tools.Reschedule.Requested.Destination),
+			strings.TrimSpace(tools.Reschedule.Requested.TripDate),
+			tools.Reschedule.Requested.Qty,
+		))
+		builder.WriteString(fmt.Sprintf("- Resultado operacional: %s\n", strings.TrimSpace(tools.Reschedule.Mode)))
+		if len(tools.Reschedule.Errors) > 0 {
+			for _, item := range tools.Reschedule.Errors {
+				builder.WriteString(fmt.Sprintf("- Erro operacional: %s\n", strings.TrimSpace(item)))
+			}
+		}
+		if len(tools.Reschedule.Options) == 0 {
+			builder.WriteString("- Resultado: nenhuma opcao valida retornada para concluir o reagendamento nesta etapa.\n")
+		} else {
+			for index, item := range tools.Reschedule.Options {
+				builder.WriteString(fmt.Sprintf(
+					"- Opcao %d: %s -> %s | data %s | saida %s | %d assentos | R$ %.2f %s | pacote %s\n",
+					index+1,
+					strings.TrimSpace(item.Origin),
+					strings.TrimSpace(item.Destination),
+					strings.TrimSpace(item.TripDate),
+					strings.TrimSpace(item.DepartureTime),
+					item.SeatsAvailable,
+					item.Price,
+					strings.TrimSpace(item.Currency),
+					strings.TrimSpace(item.PackageName),
+				))
+			}
+		}
+		if len(tools.Reschedule.FieldsRequiredForManualCompletion) > 0 {
+			builder.WriteString(fmt.Sprintf(
+				"- Campos para conclusao manual: %s\n",
+				strings.Join(tools.Reschedule.FieldsRequiredForManualCompletion, ", "),
+			))
+		}
+		if message := strings.TrimSpace(tools.Reschedule.MessageForAgent); message != "" {
+			builder.WriteString(fmt.Sprintf("- Instrucao operacional: %s\n", message))
+		}
+		builder.WriteString("- Nunca confirme o reagendamento como concluido; apresente contexto/opcoes e deixe claro que a troca depende de revisao humana.\n")
+	}
+
 	if tools.Payments != nil {
 		builder.WriteString("\nRESULTADO DE FERRAMENTA\n")
 		filter := tools.Payments.Filter
@@ -191,6 +298,73 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 			builder.WriteString(fmt.Sprintf("- Total efetivamente pago: R$ %.2f\n", paidAmount))
 			builder.WriteString("- Use apenas os dados acima para falar de pagamento, PIX, cobranca e confirmacao.\n")
 		}
+	}
+
+	if tools.PaymentCreate != nil {
+		builder.WriteString("\nRESULTADO DE FERRAMENTA\n")
+		builder.WriteString(fmt.Sprintf("- Tool: %s\n", toolNamePaymentCreate))
+		builder.WriteString(fmt.Sprintf(
+			"- Reserva alvo: booking %s | codigo %s | status %s\n",
+			strings.TrimSpace(tools.PaymentCreate.BookingID),
+			strings.TrimSpace(tools.PaymentCreate.ReservationCode),
+			strings.TrimSpace(tools.PaymentCreate.BookingStatus),
+		))
+		builder.WriteString(fmt.Sprintf(
+			"- Cobranca solicitada: tipo %s | etapa %s | total R$ %.2f | pago R$ %.2f | cobrar R$ %.2f\n",
+			strings.TrimSpace(tools.PaymentCreate.PaymentType),
+			strings.TrimSpace(tools.PaymentCreate.Stage),
+			tools.PaymentCreate.AmountTotal,
+			tools.PaymentCreate.AmountPaid,
+			tools.PaymentCreate.AmountDue,
+		))
+		builder.WriteString(fmt.Sprintf("- Resultado operacional: %s\n", strings.TrimSpace(tools.PaymentCreate.Mode)))
+		if tools.PaymentCreate.PaymentID != "" {
+			builder.WriteString(fmt.Sprintf(
+				"- Pagamento criado: id %s | status %s | provedor %s | referencia %s\n",
+				strings.TrimSpace(tools.PaymentCreate.PaymentID),
+				strings.TrimSpace(tools.PaymentCreate.PaymentStatus),
+				strings.TrimSpace(tools.PaymentCreate.Provider),
+				strings.TrimSpace(tools.PaymentCreate.ProviderRef),
+			))
+		}
+		if tools.PaymentCreate.PixCode != "" {
+			builder.WriteString(fmt.Sprintf("- PIX copia e cola: %s\n", strings.TrimSpace(tools.PaymentCreate.PixCode)))
+		}
+		for _, item := range tools.PaymentCreate.Errors {
+			builder.WriteString(fmt.Sprintf("- Erro operacional: %s\n", strings.TrimSpace(item)))
+		}
+		if message := strings.TrimSpace(tools.PaymentCreate.MessageForAgent); message != "" {
+			builder.WriteString(fmt.Sprintf("- Instrucao operacional: %s\n", message))
+		}
+		builder.WriteString("- Se houver PIX copia e cola, envie somente o codigo PIX ao cliente e nao envie link do provedor.\n")
+	}
+
+	if tools.BookingCancel != nil {
+		builder.WriteString("\nRESULTADO DE FERRAMENTA\n")
+		builder.WriteString(fmt.Sprintf("- Tool: %s\n", toolNameBookingCancel))
+		builder.WriteString(fmt.Sprintf(
+			"- Reserva alvo: booking %s | codigo %s | trip %s\n",
+			strings.TrimSpace(tools.BookingCancel.BookingID),
+			strings.TrimSpace(tools.BookingCancel.ReservationCode),
+			strings.TrimSpace(tools.BookingCancel.TripID),
+		))
+		builder.WriteString(fmt.Sprintf(
+			"- Resultado operacional: %s | status anterior %s | status atual %s | passageiros %d\n",
+			strings.TrimSpace(tools.BookingCancel.Mode),
+			strings.TrimSpace(tools.BookingCancel.PreviousStatus),
+			strings.TrimSpace(tools.BookingCancel.BookingStatus),
+			tools.BookingCancel.PassengerCount,
+		))
+		if reason := strings.TrimSpace(tools.BookingCancel.Reason); reason != "" {
+			builder.WriteString(fmt.Sprintf("- Motivo operacional: %s\n", reason))
+		}
+		for _, item := range tools.BookingCancel.Errors {
+			builder.WriteString(fmt.Sprintf("- Erro operacional: %s\n", strings.TrimSpace(item)))
+		}
+		if message := strings.TrimSpace(tools.BookingCancel.MessageForAgent); message != "" {
+			builder.WriteString(fmt.Sprintf("- Instrucao operacional: %s\n", message))
+		}
+		builder.WriteString("- Se o cancelamento ja tiver sido aplicado ou a reserva ja estiver encerrada, responda de forma idempotente e nao prometa nova alteracao.\n")
 	}
 
 	builder.WriteString("\nTAREFA\n")

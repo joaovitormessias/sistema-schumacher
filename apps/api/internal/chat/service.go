@@ -13,38 +13,43 @@ import (
 )
 
 var (
-	ErrContactKeyRequired   = errors.New("contact_key is required")
-	ErrDirectionRequired    = errors.New("message.direction is required")
-	ErrInvalidDirection     = errors.New("message.direction must be INBOUND or OUTBOUND")
-	ErrDraftBodyRequired    = errors.New("automation draft body is required")
-	ErrPresenceRequired     = errors.New("presence_status is required")
-	ErrSessionNotFound      = errors.New("chat session not found")
-	ErrHandoffAlreadyActive = errors.New("chat session already waiting for human handoff")
-	ErrNoActiveHandoff      = errors.New("chat session has no active human handoff")
-	ErrInvalidAssignedUser  = errors.New("assigned_user_id must be a valid uuid")
-	ErrReplyBodyRequired    = errors.New("reply.body is required")
-	ErrReplyOwnerRequired   = errors.New("owner_user_id is required")
-	ErrInvalidReplyOwner    = errors.New("owner_user_id must be a valid uuid")
-	ErrInvalidReplyDraft    = errors.New("draft_message_id must be a valid uuid")
-	ErrReplyRequiresHuman   = errors.New("chat session reply requires active human ownership")
-	ErrReplyOwnerMismatch   = errors.New("owner_user_id does not match current session owner")
-	ErrReplyDraftNotAllowed = errors.New("draft_message_id is not an active automation draft in this session")
-	ErrDraftNotFound        = errors.New("chat session has no automation draft")
-	ErrReplyDeliveryFailed  = errors.New("chat reply delivery failed")
-	ErrReprocessRequiresBot = errors.New("chat session reprocess requires bot ownership")
-	ErrReprocessNoMessages  = errors.New("chat session has no pending messages to reprocess")
-	ErrAgentRunFailed       = errors.New("chat agent run failed")
+	ErrContactKeyRequired           = errors.New("contact_key is required")
+	ErrDirectionRequired            = errors.New("message.direction is required")
+	ErrInvalidDirection             = errors.New("message.direction must be INBOUND or OUTBOUND")
+	ErrDraftBodyRequired            = errors.New("automation draft body is required")
+	ErrPresenceRequired             = errors.New("presence_status is required")
+	ErrSessionNotFound              = errors.New("chat session not found")
+	ErrHandoffAlreadyActive         = errors.New("chat session already waiting for human handoff")
+	ErrNoActiveHandoff              = errors.New("chat session has no active human handoff")
+	ErrInvalidAssignedUser          = errors.New("assigned_user_id must be a valid uuid")
+	ErrReplyBodyRequired            = errors.New("reply.body is required")
+	ErrReplyOwnerRequired           = errors.New("owner_user_id is required")
+	ErrInvalidReplyOwner            = errors.New("owner_user_id must be a valid uuid")
+	ErrInvalidReplyDraft            = errors.New("draft_message_id must be a valid uuid")
+	ErrReplyRequiresHuman           = errors.New("chat session reply requires active human ownership")
+	ErrReplyOwnerMismatch           = errors.New("owner_user_id does not match current session owner")
+	ErrReplyDraftNotAllowed         = errors.New("draft_message_id is not an active automation draft in this session")
+	ErrDraftNotFound                = errors.New("chat session has no automation draft")
+	ErrDraftAutoSendRetryNotAllowed = errors.New("current draft is not waiting for auto-send retry")
+	ErrReplyDeliveryFailed          = errors.New("chat reply delivery failed")
+	ErrReprocessRequiresBot         = errors.New("chat session reprocess requires bot ownership")
+	ErrReprocessNoMessages          = errors.New("chat session has no pending messages to reprocess")
+	ErrAgentRunFailed               = errors.New("chat agent run failed")
 )
 
 type Service struct {
-	store        Store
-	cfg          config.Config
-	sender       ReplySender
-	runner       AgentRunner
-	availability AvailabilitySearcher
-	pricing      PricingQuoteSearcher
-	bookings     BookingLookupSearcher
-	payments     PaymentStatusSearcher
+	store         Store
+	cfg           config.Config
+	sender        ReplySender
+	runner        AgentRunner
+	availability  AvailabilitySearcher
+	pricing       PricingQuoteSearcher
+	bookings      BookingLookupSearcher
+	bookingCreate BookingCreator
+	reschedules   RescheduleAssistSearcher
+	payments      PaymentStatusSearcher
+	paymentCreate PaymentCreator
+	bookingCancel BookingCanceler
 }
 
 func NewService(store Store, cfg config.Config, deps ...interface{}) *Service {
@@ -53,7 +58,11 @@ func NewService(store Store, cfg config.Config, deps ...interface{}) *Service {
 	var availability AvailabilitySearcher
 	var pricing PricingQuoteSearcher
 	var bookings BookingLookupSearcher
+	var bookingCreate BookingCreator
+	var reschedules RescheduleAssistSearcher
 	var payments PaymentStatusSearcher
+	var paymentCreate PaymentCreator
+	var bookingCancel BookingCanceler
 	for _, dep := range deps {
 		switch typed := dep.(type) {
 		case ReplySender:
@@ -76,21 +85,41 @@ func NewService(store Store, cfg config.Config, deps ...interface{}) *Service {
 			if bookings == nil {
 				bookings = typed
 			}
+		case BookingCreator:
+			if bookingCreate == nil {
+				bookingCreate = typed
+			}
+		case RescheduleAssistSearcher:
+			if reschedules == nil {
+				reschedules = typed
+			}
 		case PaymentStatusSearcher:
 			if payments == nil {
 				payments = typed
 			}
+		case PaymentCreator:
+			if paymentCreate == nil {
+				paymentCreate = typed
+			}
+		case BookingCanceler:
+			if bookingCancel == nil {
+				bookingCancel = typed
+			}
 		}
 	}
 	return &Service{
-		store:        store,
-		cfg:          cfg,
-		sender:       sender,
-		runner:       runner,
-		availability: availability,
-		pricing:      pricing,
-		bookings:     bookings,
-		payments:     payments,
+		store:         store,
+		cfg:           cfg,
+		sender:        sender,
+		runner:        runner,
+		availability:  availability,
+		pricing:       pricing,
+		bookings:      bookings,
+		bookingCreate: bookingCreate,
+		reschedules:   reschedules,
+		payments:      payments,
+		paymentCreate: paymentCreate,
+		bookingCancel: bookingCancel,
 	}
 }
 
@@ -342,6 +371,7 @@ func (s *Service) GetSessionsSummary(ctx context.Context, filter ListSessionsFil
 	filter.Offset = 0
 	filter.AgentStatus = ""
 	filter.DraftReviewStatus = ""
+	filter.DraftAutoSendStatus = ""
 	filter.OrderBy = ""
 	summary, err := s.store.CountSessionsSummary(ctx, filter, s.chatReviewSLASeconds())
 	if err != nil {
@@ -526,6 +556,16 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 
 	candidates := selectReprocessCandidateMessages(history)
 	if len(candidates) == 0 {
+		if existingDraft := findLatestDraftMessage(history); existingDraft != nil {
+			result := ReprocessResult{
+				Session:    session,
+				Status:     "accepted",
+				Reason:     "draft_already_generated",
+				Draft:      existingDraft,
+				Idempotent: true,
+			}
+			return s.maybeAutoSendDraft(ctx, result)
+		}
 		return ReprocessResult{}, ErrReprocessNoMessages
 	}
 
@@ -575,7 +615,7 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	draftID := buildAgentDraftIdempotencyKey(sessionID, candidateMessageIDs(candidates))
 	if existing, err := s.store.FindMessageByKeys(ctx, "", draftID); err != nil {
 		return ReprocessResult{}, err
-	} else if existing != nil && existing.SessionID == sessionID && existing.Direction == "OUTBOUND" && strings.EqualFold(existing.ProcessingStatus, messageStatusAutomationDraft) {
+	} else if existing != nil && existing.SessionID == sessionID && existing.Direction == "OUTBOUND" && isAutomationDraftStatus(existing.ProcessingStatus) {
 		currentSession, getErr := s.GetSession(ctx, sessionID)
 		if getErr != nil {
 			return ReprocessResult{}, getErr
@@ -584,10 +624,10 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		result.Draft = existing
 		result.Idempotent = true
 		result.Reason = "draft_already_generated"
-		return result, nil
+		return s.maybeAutoSendDraft(ctx, result)
 	}
 
-	toolContext, err := s.resolveAgentToolContext(ctx, persisted.Session, memory)
+	toolContext, err := s.resolveAgentToolContext(ctx, persisted.Session, history, memory)
 	if err != nil {
 		return ReprocessResult{}, err
 	}
@@ -607,9 +647,10 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	}
 
 	runAt := time.Now().UTC()
-	draftAgentState := buildDraftGeneratedAgentState(persisted.Session.Metadata, candidates, draftID, run, toolContext.Calls, runAt)
+	autoSendPolicy := evaluateDraftAutoSendPolicy(candidates, toolContext.Calls)
+	draftAgentState := buildDraftGeneratedAgentState(persisted.Session.Metadata, candidates, draftID, run, toolContext.Calls, autoSendPolicy, runAt)
 	draftBuffer := buildDraftGeneratedBufferState(persisted.Session.Metadata, candidates, draftID, runAt)
-	draftPayload, draftNormalizedPayload := buildAgentDraftPayload(persisted.Session, candidates, draftID, systemPrompt, userPrompt, run, toolContext, runAt)
+	draftPayload, draftNormalizedPayload := buildAgentDraftPayload(persisted.Session, candidates, draftID, systemPrompt, userPrompt, run, toolContext, autoSendPolicy, runAt)
 	draft, err := s.store.SaveAgentDraft(ctx, SaveAgentDraftInput{
 		SessionID:         sessionID,
 		IdempotencyKey:    draftID,
@@ -647,7 +688,109 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	result.ToolCalls = toolContext.Calls
 	result.Draft = &draft.Message
 	result.Reason = "draft_generated"
-	return result, nil
+	return s.maybeAutoSendDraft(ctx, result)
+}
+
+func (s *Service) RetryDraftAutoSend(ctx context.Context, input RetryDraftAutoSendInput) (RetryDraftAutoSendResult, error) {
+	sessionID := strings.TrimSpace(input.SessionID)
+	session, err := s.GetSession(ctx, sessionID)
+	if err != nil {
+		return RetryDraftAutoSendResult{}, err
+	}
+
+	messages, err := s.store.ListMessages(ctx, sessionID, normalizeListMessagesFilter(ListMessagesFilter{Limit: 100}))
+	if err != nil {
+		return RetryDraftAutoSendResult{}, err
+	}
+
+	draft := findLatestDraftMessage(messages)
+	if draft == nil {
+		return RetryDraftAutoSendResult{}, ErrDraftNotFound
+	}
+	if !strings.EqualFold(readDraftAutoSendStatus(*draft), draftAutoSendStatusRetryPending) {
+		return RetryDraftAutoSendResult{}, ErrDraftAutoSendRetryNotAllowed
+	}
+
+	if s.shouldBlockDraftAutoSend(session, *draft) {
+		blocked, err := s.markDraftAutoSendBlocked(ctx, ReprocessResult{
+			Session: session,
+			Draft:   draft,
+		}, session)
+		if err != nil {
+			return RetryDraftAutoSendResult{}, err
+		}
+		return RetryDraftAutoSendResult{
+			Session:    blocked.Session,
+			Status:     "blocked",
+			Reason:     blocked.Reason,
+			Draft:      blocked.Draft,
+			Idempotent: true,
+		}, nil
+	}
+
+	idempotencyKey := buildAutoSendReplyIdempotencyKey(draft.ID)
+	existing, err := s.store.FindReplyByIdempotency(ctx, sessionID, idempotencyKey)
+	if err != nil {
+		return RetryDraftAutoSendResult{}, err
+	}
+	if existing == nil {
+		return RetryDraftAutoSendResult{}, ErrDraftAutoSendRetryNotAllowed
+	}
+	existing.Draft = draft
+
+	if strings.TrimSpace(existing.Outbound.ProviderMessageID) != "" || strings.EqualFold(existing.Outbound.Status, "SENT") {
+		return RetryDraftAutoSendResult{
+			Session:    existing.Session,
+			Status:     "skipped",
+			Reason:     "draft_auto_send_already_sent",
+			Draft:      draft,
+			Message:    &existing.Message,
+			Outbound:   &existing.Outbound,
+			Idempotent: true,
+		}, nil
+	}
+
+	observedAt := time.Now().UTC()
+	updatedDraft, err := s.store.UpdateDraftAutoSendState(ctx, UpdateDraftAutoSendStateInput{
+		SessionID:       sessionID,
+		DraftMessageID:  draft.ID,
+		AutoSendStatus:  draftAutoSendStatusRetryPending,
+		AutoSendReasons: readDraftAutoSendReasons(*draft),
+		Payload:         buildDraftAutoSendRetryRequestedPayload(*draft, input, observedAt),
+		Agent:           buildDraftAutoSendRetryRequestedAgentState(session.Metadata, *draft, input, observedAt),
+	})
+	if err != nil {
+		return RetryDraftAutoSendResult{}, err
+	}
+	draft = &updatedDraft.Message
+	existing.Session = updatedDraft.Session
+	existing.Draft = draft
+
+	if !s.canDeliverReply(existing.Outbound) {
+		return RetryDraftAutoSendResult{
+			Session:    existing.Session,
+			Status:     "skipped",
+			Reason:     "draft_auto_send_not_deliverable",
+			Draft:      draft,
+			Message:    &existing.Message,
+			Outbound:   &existing.Outbound,
+			Idempotent: true,
+		}, nil
+	}
+
+	delivered, err := s.deliverReply(ctx, *existing)
+	if err != nil {
+		return RetryDraftAutoSendResult{}, err
+	}
+
+	return RetryDraftAutoSendResult{
+		Session:  delivered.Session,
+		Status:   "accepted",
+		Reason:   "draft_auto_send_retried",
+		Draft:    delivered.Draft,
+		Message:  &delivered.Message,
+		Outbound: &delivered.Outbound,
+	}, nil
 }
 
 func (s *Service) ApplyPresenceSignal(ctx context.Context, input ApplyPresenceSignalInput) (ApplyPresenceSignalResult, error) {
@@ -776,6 +919,55 @@ func (s *Service) GetCurrentDraft(ctx context.Context, sessionID string) (Curren
 		ReviewAction:        firstNonEmpty(asString(draft.NormalizedPayload["review_action"]), asString(draft.Payload["review_action"])),
 		Model:               firstNonEmpty(asString(draft.NormalizedPayload["model"]), asString(draft.Payload["model"])),
 		ProviderResponseID:  firstNonEmpty(asString(draft.NormalizedPayload["provider_response_id"]), asString(draft.Payload["provider_response_id"])),
+		AutoSendStatus:      firstNonEmpty(asString(draft.NormalizedPayload["auto_send_status"]), asString(draft.Payload["auto_send_status"])),
+		AutoSendReasons: firstNonEmptyStringSlice(
+			asStringSlice(draft.NormalizedPayload["auto_send_reasons"]),
+			asStringSlice(draft.Payload["auto_send_reasons"]),
+		),
+		AutoSendLastAttemptAt: firstParsedTime(
+			draft.NormalizedPayload["auto_send_last_attempt_at"],
+			draft.Payload["auto_send_last_attempt_at"],
+		),
+		AutoSendRetryAt: firstParsedTime(
+			draft.NormalizedPayload["auto_send_retry_pending_at"],
+			draft.Payload["auto_send_retry_pending_at"],
+		),
+		AutoSendRetryRequestedAt: firstParsedTime(
+			draft.NormalizedPayload["auto_send_retry_requested_at"],
+			draft.Payload["auto_send_retry_requested_at"],
+		),
+		AutoSendRetryRequestedBy: firstNonEmpty(
+			asString(draft.NormalizedPayload["auto_send_retry_requested_by"]),
+			asString(draft.Payload["auto_send_retry_requested_by"]),
+		),
+		AutoSendRetryRequestCount: maxInt(
+			asInt(draft.NormalizedPayload["auto_send_retry_request_count"]),
+			asInt(draft.Payload["auto_send_retry_request_count"]),
+		),
+		AutoSendRetryRequestReason: firstNonEmpty(
+			asString(draft.NormalizedPayload["auto_send_retry_request_reason"]),
+			asString(draft.Payload["auto_send_retry_request_reason"]),
+		),
+		AutoSendBlockedAt: firstParsedTime(
+			draft.NormalizedPayload["auto_send_blocked_at"],
+			draft.Payload["auto_send_blocked_at"],
+		),
+		AutoSendLastErrorText: firstNonEmpty(
+			asString(draft.NormalizedPayload["auto_send_last_error_text"]),
+			asString(draft.Payload["auto_send_last_error_text"]),
+		),
+		AutoSendBlockReason: firstNonEmpty(
+			asString(draft.NormalizedPayload["auto_send_block_reason"]),
+			asString(draft.Payload["auto_send_block_reason"]),
+		),
+		AutoSendLastReplyID: firstNonEmpty(
+			asString(draft.NormalizedPayload["auto_send_last_reply_message_id"]),
+			asString(draft.Payload["auto_send_last_reply_message_id"]),
+		),
+		AutoSendLastOutboundID: firstNonEmpty(
+			asString(draft.NormalizedPayload["auto_send_last_outbound_id"]),
+			asString(draft.Payload["auto_send_last_outbound_id"]),
+		),
 		CurrentTurnMessageIDs: firstNonEmptyStringSlice(
 			asStringSlice(draft.NormalizedPayload["current_turn_message_ids"]),
 			asStringSlice(draft.Payload["current_turn_message_ids"]),
@@ -793,6 +985,7 @@ func (s *Service) GetCurrentDraft(ctx context.Context, sessionID string) (Curren
 			result.ToolCallCount = len(result.ToolCalls)
 		}
 	}
+	result.AutoSendIssueActive = isProblematicDraftAutoSendStatus(result.AutoSendStatus)
 	if linked := findLinkedReplyMessage(messages, draft.ID); linked != nil {
 		result.LinkedReply = linked
 	}
@@ -812,6 +1005,7 @@ func normalizeListSessionsFilter(filter ListSessionsFilter) ListSessionsFilter {
 	filter.ContactKey = strings.TrimSpace(filter.ContactKey)
 	filter.AgentStatus = strings.ToUpper(strings.TrimSpace(filter.AgentStatus))
 	filter.DraftReviewStatus = strings.ToUpper(strings.TrimSpace(filter.DraftReviewStatus))
+	filter.DraftAutoSendStatus = strings.ToUpper(strings.TrimSpace(filter.DraftAutoSendStatus))
 	filter.OrderBy = strings.ToUpper(strings.TrimSpace(filter.OrderBy))
 	return filter
 }
@@ -883,6 +1077,8 @@ func decorateSessionDraftSummary(session Session, reviewSLASeconds int, observed
 	session.DraftToolCallCount = readInt(agent["tool_calls_count"])
 	session.DraftModel = firstNonEmpty(asString(agent["draft_model"]), asString(agent["model"]))
 	session.DraftProviderResponseID = firstNonEmpty(asString(agent["provider_response_id"]))
+	session.DraftAutoSendStatus = firstNonEmpty(asString(agent["auto_send_status"]))
+	session.DraftAutoSendReasons = firstNonEmptyStringSlice(asStringSlice(agent["auto_send_reasons"]))
 	session.DraftReviewSLASeconds = reviewSLASeconds
 
 	switch session.AgentStatus {
@@ -904,9 +1100,22 @@ func decorateSessionDraftSummary(session Session, reviewSLASeconds int, observed
 	case agentStatusDraftReviewed:
 		session.HasAutomationDraft = true
 		session.DraftReviewStatus = "REVIEWED"
+	case agentStatusDraftAutoSent:
+		session.HasAutomationDraft = true
+		session.DraftReviewStatus = "AUTO_SENT"
+		session.DraftReviewPriority = "REVIEWED"
 	}
 
 	return session
+}
+
+func isProblematicDraftAutoSendStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case draftAutoSendStatusRetryPending, draftAutoSendStatusBlockedHuman:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) chatReviewSLASeconds() int {
@@ -1151,7 +1360,7 @@ func (s *Service) canDeliverReply(outbound ReplyOutbound) bool {
 		return false
 	}
 	switch strings.ToUpper(strings.TrimSpace(outbound.Status)) {
-	case "", "MANUAL_PENDING", "SEND_FAILED":
+	case "", "MANUAL_PENDING", "AUTOMATION_PENDING", "SEND_FAILED":
 		return true
 	default:
 		return false
@@ -1163,6 +1372,17 @@ func (s *Service) canRunAgent() bool {
 }
 
 func (s *Service) deliverReply(ctx context.Context, result ReplyResult) (ReplyResult, error) {
+	if result.Draft != nil && isBotAutoReplyMessage(result.Message) {
+		currentSession, err := s.GetSession(ctx, result.Session.ID)
+		if err != nil {
+			return ReplyResult{}, err
+		}
+		result.Session = currentSession
+		if s.shouldBlockDraftAutoSend(currentSession, *result.Draft) {
+			return s.blockAutoSendAttempt(ctx, result, currentSession)
+		}
+	}
+
 	delivery, err := s.sender.SendReply(ctx, SendReplyInput{
 		Session:  result.Session,
 		Message:  result.Message,
@@ -1192,9 +1412,219 @@ func (s *Service) deliverReply(ctx context.Context, result ReplyResult) (ReplyRe
 	if err != nil {
 		return ReplyResult{}, err
 	}
-	updated.Draft = result.Draft
+	if updated.Draft == nil {
+		updated.Draft = result.Draft
+	}
 
 	return updated, nil
+}
+
+func (s *Service) maybeAutoSendDraft(ctx context.Context, result ReprocessResult) (ReprocessResult, error) {
+	if result.Draft == nil {
+		return result, nil
+	}
+	currentSession, err := s.GetSession(ctx, result.Session.ID)
+	if err != nil {
+		return ReprocessResult{}, err
+	}
+	result.Session = currentSession
+	if s.shouldBlockDraftAutoSend(currentSession, *result.Draft) {
+		return s.markDraftAutoSendBlocked(ctx, result, currentSession)
+	}
+	if !s.canAutoSendDraft(result.Session, *result.Draft) {
+		return result, nil
+	}
+
+	idempotencyKey := buildAutoSendReplyIdempotencyKey(result.Draft.ID)
+	if existing, err := s.store.FindReplyByIdempotency(ctx, result.Session.ID, idempotencyKey); err != nil {
+		return ReprocessResult{}, err
+	} else if existing != nil {
+		if existing.Draft == nil {
+			existing.Draft = result.Draft
+		}
+		if s.canDeliverReply(existing.Outbound) {
+			delivered, err := s.deliverReply(ctx, *existing)
+			if err != nil {
+				return ReprocessResult{}, err
+			}
+			result.Session = delivered.Session
+			if delivered.Draft != nil {
+				result.Draft = delivered.Draft
+			}
+			result.Reason = "draft_auto_sent"
+			return result, nil
+		}
+		result.Session = existing.Session
+		if existing.Draft != nil {
+			result.Draft = existing.Draft
+		}
+		if strings.TrimSpace(existing.Outbound.ProviderMessageID) != "" || strings.EqualFold(existing.Outbound.Status, "SENT") {
+			result.Reason = "draft_auto_sent"
+		}
+		return result, nil
+	}
+
+	reply, err := s.store.CreateAutomationReply(ctx, CreateAutomationReplyInput{
+		SessionID:      result.Session.ID,
+		DraftMessageID: result.Draft.ID,
+		IdempotencyKey: idempotencyKey,
+		SenderName:     firstNonEmpty(strings.TrimSpace(result.Draft.SenderName), "SHABAS"),
+		Metadata: map[string]interface{}{
+			"automation_trigger": "AUTO_SEND_ELIGIBLE",
+		},
+	}, time.Duration(s.cfg.ChatDebounceWindowMS)*time.Millisecond)
+	if err != nil {
+		if IsUniqueViolation(err) {
+			return s.maybeAutoSendDraft(ctx, result)
+		}
+		if errors.Is(err, ErrReprocessRequiresBot) {
+			return s.markDraftAutoSendBlocked(ctx, result, currentSession)
+		}
+		return ReprocessResult{}, err
+	}
+	reply.Draft = result.Draft
+	if s.canDeliverReply(reply.Outbound) {
+		delivered, err := s.deliverReply(ctx, reply)
+		if err != nil {
+			return ReprocessResult{}, err
+		}
+		result.Session = delivered.Session
+		if delivered.Draft != nil {
+			result.Draft = delivered.Draft
+		}
+		result.Reason = "draft_auto_sent"
+		return result, nil
+	}
+
+	result.Session = reply.Session
+	result.Reason = "draft_auto_send_pending"
+	return result, nil
+}
+
+func (s *Service) canAutoSendDraft(session Session, draft Message) bool {
+	if s.sender == nil || !s.sender.Enabled() {
+		return false
+	}
+	if session.HandoffStatus != "BOT" || strings.TrimSpace(session.CurrentOwnerUserID) != "" {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(draft.Direction), "OUTBOUND") {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(draft.ProcessingStatus), messageStatusAutomationDraft) {
+		return false
+	}
+	if strings.TrimSpace(draft.Body) == "" {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(readDraftAutoSendStatus(draft))) {
+	case draftAutoSendStatusEligible, draftAutoSendStatusRetryPending:
+		return true
+	default:
+		return false
+	}
+}
+
+func readDraftAutoSendStatus(draft Message) string {
+	return firstNonEmpty(
+		asString(draft.NormalizedPayload["auto_send_status"]),
+		asString(draft.Payload["auto_send_status"]),
+	)
+}
+
+func readDraftAutoSendReasons(draft Message) []string {
+	return firstNonEmptyStringSlice(
+		asStringSlice(draft.NormalizedPayload["auto_send_reasons"]),
+		asStringSlice(draft.Payload["auto_send_reasons"]),
+	)
+}
+
+func isBotAutoReplyMessage(message Message) bool {
+	return strings.EqualFold(
+		firstNonEmpty(asString(message.Payload["mode"]), asString(message.NormalizedPayload["mode"])),
+		"BOT_AUTO_REPLY",
+	)
+}
+
+func (s *Service) shouldBlockDraftAutoSend(session Session, draft Message) bool {
+	if s.sender == nil || !s.sender.Enabled() {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(readDraftAutoSendStatus(draft))) {
+	case draftAutoSendStatusEligible, draftAutoSendStatusRetryPending:
+		return session.HandoffStatus != "BOT" || strings.TrimSpace(session.CurrentOwnerUserID) != ""
+	default:
+		return false
+	}
+}
+
+func (s *Service) markDraftAutoSendBlocked(ctx context.Context, result ReprocessResult, session Session) (ReprocessResult, error) {
+	observedAt := time.Now().UTC()
+	updated, err := s.store.UpdateDraftAutoSendState(ctx, UpdateDraftAutoSendStateInput{
+		SessionID:      session.ID,
+		DraftMessageID: result.Draft.ID,
+		AutoSendStatus: draftAutoSendStatusBlockedHuman,
+		AutoSendReasons: mergeDistinctStrings(
+			readDraftAutoSendReasons(*result.Draft),
+			draftAutoSendReasonHumanHandoff,
+		),
+		Payload: map[string]interface{}{
+			"auto_send_blocked":      true,
+			"auto_send_blocked_at":   observedAt.UTC().Format(time.RFC3339Nano),
+			"auto_send_block_reason": draftAutoSendReasonHumanHandoff,
+			"handoff_status":         session.HandoffStatus,
+		},
+		Agent: buildDraftAutoSendBlockedAgentState(session.Metadata, *result.Draft, session, observedAt),
+	})
+	if err != nil {
+		return ReprocessResult{}, err
+	}
+	result.Session = updated.Session
+	result.Draft = &updated.Message
+	result.Reason = "draft_auto_send_blocked_human"
+	result.Idempotent = true
+	return result, nil
+}
+
+func (s *Service) blockAutoSendAttempt(ctx context.Context, result ReplyResult, session Session) (ReplyResult, error) {
+	errorText := "auto-send blocked by active human handoff"
+	if strings.TrimSpace(result.Outbound.ProviderMessageID) == "" && !strings.EqualFold(strings.TrimSpace(result.Outbound.Status), "SEND_FAILED") {
+		failed, err := s.store.MarkReplyDeliveryFailure(ctx, MarkReplyDeliveryFailureInput{
+			SessionID:  session.ID,
+			MessageID:  result.Message.ID,
+			OutboundID: result.Outbound.ID,
+			ErrorText:  errorText,
+		})
+		if err != nil {
+			return ReplyResult{}, err
+		}
+		result.Message = failed.Message
+		result.Outbound = failed.Outbound
+	}
+
+	updated, err := s.store.UpdateDraftAutoSendState(ctx, UpdateDraftAutoSendStateInput{
+		SessionID:      session.ID,
+		DraftMessageID: result.Draft.ID,
+		AutoSendStatus: draftAutoSendStatusBlockedHuman,
+		AutoSendReasons: mergeDistinctStrings(
+			readDraftAutoSendReasons(*result.Draft),
+			draftAutoSendReasonHumanHandoff,
+		),
+		Payload: map[string]interface{}{
+			"auto_send_blocked":      true,
+			"auto_send_blocked_at":   time.Now().UTC().Format(time.RFC3339Nano),
+			"auto_send_block_reason": draftAutoSendReasonHumanHandoff,
+			"handoff_status":         session.HandoffStatus,
+		},
+		Agent: buildDraftAutoSendBlockedAgentState(session.Metadata, *result.Draft, session, time.Now().UTC()),
+	})
+	if err != nil {
+		return ReplyResult{}, err
+	}
+	result.Session = updated.Session
+	draft := updated.Message
+	result.Draft = &draft
+	return result, nil
 }
 
 func normalizeReplyProviderStatus(status string) string {

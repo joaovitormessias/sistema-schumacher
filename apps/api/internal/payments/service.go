@@ -13,16 +13,14 @@ import (
 )
 
 type Service struct {
-	repo     *Repository
-	client   *Client
-	notifier paymentConfirmationNotifier
+	repo   *Repository
+	client *Client
 }
 
 func NewService(repo *Repository, cfg config.Config) *Service {
 	return &Service{
-		repo:     repo,
-		client:   NewClient(cfg.PagarmeBaseURL, cfg.PagarmeSecretKey),
-		notifier: newPaymentConfirmationNotifier(cfg),
+		repo:   repo,
+		client: NewClient(cfg.PagarmeBaseURL, cfg.PagarmeSecretKey),
 	}
 }
 
