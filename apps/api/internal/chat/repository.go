@@ -2408,11 +2408,15 @@ func scanHandoff(scanner interface {
 	return item, nil
 }
 
-func encodeMap(input map[string]interface{}) ([]byte, error) {
+func encodeMap(input map[string]interface{}) (string, error) {
 	if len(input) == 0 {
-		return []byte("{}"), nil
+		return "{}", nil
 	}
-	return json.Marshal(input)
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 func decodeMap(raw []byte) map[string]interface{} {

@@ -211,11 +211,15 @@ func (r *Repository) ListJobRuns(ctx context.Context, input ListJobRunsInput) ([
 	return items, nil
 }
 
-func encodePayload(input map[string]interface{}) ([]byte, error) {
+func encodePayload(input map[string]interface{}) (string, error) {
 	if len(input) == 0 {
-		return []byte("{}"), nil
+		return "{}", nil
 	}
-	return json.Marshal(input)
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 type jobRunScanner interface {
