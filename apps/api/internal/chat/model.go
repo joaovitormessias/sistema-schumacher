@@ -469,6 +469,7 @@ type AvailabilitySearcher interface {
 type AvailabilitySearchInput struct {
 	Origin      string
 	Destination string
+	PackageName string
 	TripDate    *time.Time
 	Qty         int
 	Limit       int

@@ -3161,7 +3161,7 @@ func TestReprocessSkipsAvailabilityToolWhenTurnIsBroad(t *testing.T) {
 	runner := &fakeAgentRunner{
 		enabled: true,
 		result: RunAgentResult{
-			ReplyText:          "Qual cidade voce quer consultar?",
+			ReplyText:          "Fraiburgo: R$ 950. Monte Carlo: R$ 950. Videira: R$ 950.",
 			Model:              "gpt-test",
 			ProviderResponseID: "resp_tool_2",
 		},
@@ -3203,6 +3203,98 @@ func TestReprocessSkipsAvailabilityToolWhenTurnIsBroad(t *testing.T) {
 	}
 	if searcher.calls != 0 {
 		t.Fatalf("expected no availability search, got %d", searcher.calls)
+	}
+	if !strings.Contains(runner.lastInput.SystemPrompt, "Se a consulta ampla for sobre Santa Catarina ou SC, responda direto com a tabela publica") {
+		t.Fatalf("expected system prompt to include broad Santa Catarina policy")
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "Caso atual: consulta ampla sobre Santa Catarina") {
+		t.Fatalf("expected user prompt to include broad SC guidance, got %q", runner.lastInput.UserPrompt)
+	}
+	if strings.Contains(runner.lastInput.UserPrompt, "Qual cidade voce quer consultar?") {
+		t.Fatalf("prompt should guide against asking unrelated city question")
+	}
+}
+
+func TestReprocessUsesPackageAvailabilityForBroadStateDateLookup(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Tenho datas disponiveis para Santa Catarina.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_tool_sc_dates_1",
+		},
+	}
+	searcher := &fakeAvailabilitySearcher{
+		enabled: true,
+		result: AvailabilitySearchResult{
+			Results: []AvailabilitySearchItem{
+				{
+					SegmentID:              "seg-sc-1",
+					TripID:                 "trip-sc-1",
+					RouteID:                "route-sc-1",
+					OriginDisplayName:      "Santa Ines/MA",
+					DestinationDisplayName: "Videira/SC",
+					OriginDepartTime:       "18:30",
+					TripDate:               "2026-05-10",
+					SeatsAvailable:         9,
+					Price:                  950,
+					Currency:               "BRL",
+					Status:                 "ACTIVE",
+					TripStatus:             "SCHEDULED",
+					PackageName:            packageToSantaCatarina,
+				},
+			},
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-tool-sc-dates-1",
+			IdempotencyKey:    "idem-tool-sc-dates-1",
+			Body:              "quais datas para Santa Catarina?",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out.ToolCalls))
+	}
+	if searcher.calls != 1 {
+		t.Fatalf("expected one availability search, got %d", searcher.calls)
+	}
+	if searcher.lastInput.PackageName != packageToSantaCatarina {
+		t.Fatalf("expected package search %q, got %+v", packageToSantaCatarina, searcher.lastInput)
+	}
+	if searcher.lastInput.Origin != "" || searcher.lastInput.Destination != "" {
+		t.Fatalf("expected package-level search without fixed route, got %+v", searcher.lastInput)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "Package consultado: "+packageToSantaCatarina) {
+		t.Fatalf("expected prompt to expose package-level availability context")
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "priorize listar ate 5 datas futuras") {
+		t.Fatalf("expected prompt to instruct date listing without re-opening collection")
 	}
 }
 
@@ -4841,7 +4933,11 @@ func (f *fakeAvailabilitySearcher) Search(_ context.Context, input AvailabilityS
 	if f.err != nil {
 		return AvailabilitySearchResult{}, f.err
 	}
-	return f.result, nil
+	result := f.result
+	if result.Filter == (AvailabilitySearchInput{}) {
+		result.Filter = input
+	}
+	return result, nil
 }
 
 func (f *fakePricingQuoteSearcher) Enabled() bool {

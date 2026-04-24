@@ -32,6 +32,9 @@ const toolNameRescheduleLookup = "reschedule_lookup"
 const toolNamePaymentStatus = "payment_status"
 const toolNamePaymentCreate = "payment_create"
 
+const packageToSantaCatarina = "Pacote p/ Santa Catarina"
+const packageToMaranhao = "Pacote p/ Maranhao"
+
 type agentToolContext struct {
 	Calls         []ToolCall
 	Availability  *AvailabilitySearchResult
@@ -42,6 +45,14 @@ type agentToolContext struct {
 	Reschedule    *RescheduleAssistResult
 	Payments      *PaymentStatusResult
 	PaymentCreate *PaymentCreateResult
+}
+
+type inferredRouteContext struct {
+	Origin         string
+	Destination    string
+	PackageName    string
+	RouteDirection string
+	BroadState     string
 }
 
 func (s *Service) canSearchAvailability() bool {
@@ -234,7 +245,7 @@ func (s *Service) resolveAgentToolContext(ctx context.Context, session Session, 
 		return context, nil
 	}
 
-	searchInput, ok := parseAvailabilitySearchInput(currentTurn, time.Now().UTC())
+	searchInput, ok := parseAvailabilitySearchInput(history, currentTurn, time.Now().UTC())
 	if !ok {
 		return context, nil
 	}
@@ -511,12 +522,45 @@ func (s *Service) executeBookingCancelTool(ctx context.Context, session Session,
 	return context, nil
 }
 
-func parseAvailabilitySearchInput(text string, observedAt time.Time) (AvailabilitySearchInput, bool) {
+func parseAvailabilitySearchInput(history []Message, text string, observedAt time.Time) (AvailabilitySearchInput, bool) {
 	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 	if body == "" {
 		return AvailabilitySearchInput{}, false
 	}
 
+	if input, ok := parseDirectAvailabilitySearchInput(body, observedAt); ok {
+		return input, true
+	}
+
+	if !looksLikePackageLevelAvailabilityIntent(body) {
+		return AvailabilitySearchInput{}, false
+	}
+
+	context := mergeInferredRouteContext(
+		inferRouteContextFromText(body),
+		inferLatestRouteContextFromHistory(history),
+	)
+	if strings.TrimSpace(context.PackageName) == "" {
+		return AvailabilitySearchInput{}, false
+	}
+
+	input := AvailabilitySearchInput{
+		PackageName: context.PackageName,
+		TripDate:    extractTripDate(body, observedAt),
+		Qty:         extractPassengerQuantity(body),
+		Limit:       8,
+	}
+	if input.Qty <= 0 {
+		input.Qty = 1
+	}
+	return input, true
+}
+
+func parseDirectAvailabilitySearchInput(text string, observedAt time.Time) (AvailabilitySearchInput, bool) {
+	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if body == "" {
+		return AvailabilitySearchInput{}, false
+	}
 	locations := extractCanonicalLocations(body)
 	if !looksLikeAvailabilityIntent(body, len(locations)) {
 		return AvailabilitySearchInput{}, false
@@ -549,6 +593,14 @@ func parseAvailabilitySearchInput(text string, observedAt time.Time) (Availabili
 		input.Qty = 1
 	}
 	return input, true
+}
+
+func looksLikePackageLevelAvailabilityIntent(text string) bool {
+	folded := foldChatText(text)
+	if folded == "" {
+		return false
+	}
+	return looksLikeShortDateFollowUp(text) || looksLikeBroadStateScheduleLookup(text)
 }
 
 func looksLikeAvailabilityIntent(text string, locationCount int) bool {
@@ -623,6 +675,178 @@ func extractCanonicalLocations(text string) []string {
 		items = append(items, location)
 	}
 	return items
+}
+
+func inferLatestRouteContextFromHistory(history []Message) inferredRouteContext {
+	for i := len(history) - 1; i >= 0; i-- {
+		body := strings.TrimSpace(history[i].Body)
+		if body == "" {
+			continue
+		}
+		context := inferRouteContextFromText(body)
+		if context.Origin != "" || context.Destination != "" || context.PackageName != "" {
+			return context
+		}
+	}
+	return inferredRouteContext{}
+}
+
+func inferRouteContextFromText(text string) inferredRouteContext {
+	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if body == "" {
+		return inferredRouteContext{}
+	}
+
+	context := inferredRouteContext{}
+	if match := routeFromToPattern.FindStringSubmatch(body); len(match) == 3 {
+		context.Origin = normalizeLocationDisplayName(match[1])
+		context.Destination = normalizeLocationDisplayName(match[2])
+	}
+	if context.Origin == "" || context.Destination == "" {
+		locations := extractCanonicalLocations(body)
+		if len(locations) >= 2 {
+			context.Origin = locations[0]
+			context.Destination = locations[1]
+		}
+	}
+	if context.Destination != "" {
+		context.RouteDirection = inferRouteDirectionFromDestination(context.Destination)
+		context.PackageName = packageNameForRouteDirection(context.RouteDirection)
+	}
+	if context.PackageName == "" {
+		foldedContext := inferRouteContextFromFoldedText(foldChatText(body))
+		context = mergeInferredRouteContext(context, foldedContext)
+	}
+	return context
+}
+
+func inferRouteContextFromFoldedText(folded string) inferredRouteContext {
+	context := inferredRouteContext{}
+	switch detectBroadTravelState(folded) {
+	case "SC":
+		context.BroadState = "SC"
+		context.RouteDirection = "TO_SC"
+		context.PackageName = packageToSantaCatarina
+	case "MA":
+		context.BroadState = "MA"
+		context.RouteDirection = "TO_MA"
+		context.PackageName = packageToMaranhao
+	}
+	return context
+}
+
+func mergeInferredRouteContext(primary inferredRouteContext, fallback inferredRouteContext) inferredRouteContext {
+	merged := primary
+	if merged.Origin == "" {
+		merged.Origin = fallback.Origin
+	}
+	if merged.Destination == "" {
+		merged.Destination = fallback.Destination
+	}
+	if merged.PackageName == "" {
+		merged.PackageName = fallback.PackageName
+	}
+	if merged.RouteDirection == "" {
+		merged.RouteDirection = fallback.RouteDirection
+	}
+	if merged.BroadState == "" {
+		merged.BroadState = fallback.BroadState
+	}
+	return merged
+}
+
+func inferRouteDirectionFromDestination(destination string) string {
+	upper := strings.ToUpper(strings.TrimSpace(destination))
+	switch {
+	case strings.HasSuffix(upper, "/SC"):
+		return "TO_SC"
+	case strings.HasSuffix(upper, "/MA"):
+		return "TO_MA"
+	default:
+		return ""
+	}
+}
+
+func packageNameForRouteDirection(direction string) string {
+	switch strings.ToUpper(strings.TrimSpace(direction)) {
+	case "TO_SC":
+		return packageToSantaCatarina
+	case "TO_MA":
+		return packageToMaranhao
+	default:
+		return ""
+	}
+}
+
+func looksLikeShortDateFollowUp(text string) bool {
+	folded := foldChatText(text)
+	if folded == "" {
+		return false
+	}
+	patterns := []string{
+		"pra quando",
+		"para quando",
+		"quais datas",
+		"que datas",
+		"datas disponiveis",
+		"tem vaga quando",
+		"tem vagas quando",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(folded, pattern) {
+			return true
+		}
+	}
+	return folded == "datas" || folded == "quando"
+}
+
+func looksLikeBroadStateScheduleLookup(text string) bool {
+	folded := foldChatText(text)
+	if folded == "" {
+		return false
+	}
+	keywords := []string{
+		"data",
+		"datas",
+		"quando",
+		"horario",
+		"horarios",
+		"saida",
+		"saidas",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(folded, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectBroadTravelState(folded string) string {
+	switch {
+	case strings.Contains(folded, "santa catarina") || strings.Contains(folded, " sc "):
+		return "SC"
+	case strings.Contains(folded, "maranhao") || strings.Contains(folded, " ma "):
+		return "MA"
+	default:
+		return ""
+	}
+}
+
+func foldChatText(text string) string {
+	replacer := strings.NewReplacer(
+		"á", "a", "à", "a", "â", "a", "ã", "a",
+		"é", "e", "ê", "e",
+		"í", "i",
+		"ó", "o", "ô", "o", "õ", "o",
+		"ú", "u",
+		"ç", "c",
+		"/", " ", ",", " ", ".", " ", "?", " ", "!", " ", "(", " ", ")", " ", "-", " ", ":", " ", ";", " ",
+	)
+	folded := strings.ToLower(strings.TrimSpace(text))
+	folded = replacer.Replace(folded)
+	folded = strings.Join(strings.Fields(folded), " ")
+	return " " + folded + " "
 }
 
 func normalizeLocationDisplayName(value string) string {
@@ -708,6 +932,9 @@ func buildAvailabilityToolRequestPayload(input AvailabilitySearchInput) map[stri
 	if input.TripDate != nil {
 		payload["trip_date"] = input.TripDate.UTC().Format("2006-01-02")
 	}
+	if input.PackageName != "" {
+		payload["package_name"] = input.PackageName
+	}
 	return payload
 }
 
@@ -744,6 +971,9 @@ func buildAvailabilityToolResponsePayload(result AvailabilitySearchResult) map[s
 	}
 	if result.Filter.Destination != "" {
 		payload["destination"] = result.Filter.Destination
+	}
+	if result.Filter.PackageName != "" {
+		payload["package_name"] = result.Filter.PackageName
 	}
 	if result.Filter.TripDate != nil {
 		payload["trip_date"] = result.Filter.TripDate.UTC().Format("2006-01-02")

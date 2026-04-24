@@ -30,6 +30,7 @@ func (t *AvailabilityTool) Search(ctx context.Context, input AvailabilitySearchI
 	filter := availability.SearchFilter{
 		Origin:      input.Origin,
 		Destination: input.Destination,
+		PackageName: input.PackageName,
 		TripDate:    input.TripDate,
 		Qty:         input.Qty,
 		Limit:       input.Limit,
