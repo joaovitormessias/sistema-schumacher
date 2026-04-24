@@ -1,0 +1,144 @@
+package chat
+
+import (
+	"testing"
+	"time"
+)
+
+func TestParseBookingCreateInputUsesHistorySelectionAndPassengerDetailsOnConfirmation(t *testing.T) {
+	now := time.Now().UTC()
+	session := Session{
+		ContactKey:    "5549988709047",
+		CustomerPhone: "5549988709047",
+		CustomerName:  "Messias",
+	}
+	history := []Message{
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Achei estas opcoes para Petrolandia/SC.",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-6 * time.Minute),
+			Payload: map[string]interface{}{
+				"tool_context": map[string]interface{}{
+					toolNameAvailabilitySearch: buildAvailabilityToolResponsePayload(AvailabilitySearchResult{
+						Filter: AvailabilitySearchInput{
+							Destination: "Petrolandia/SC",
+							Qty:         1,
+							Limit:       5,
+						},
+						Results: []AvailabilitySearchItem{
+							{
+								TripID:                 "trip-1",
+								BoardStopID:            "board-1",
+								AlightStopID:           "alight-1",
+								OriginDisplayName:      "Moncao/MA",
+								DestinationDisplayName: "Petrolandia/SC",
+								OriginDepartTime:       "09:00",
+								TripDate:               "2026-04-26",
+							},
+							{
+								TripID:                 "trip-2",
+								BoardStopID:            "board-2",
+								AlightStopID:           "alight-2",
+								OriginDisplayName:      "Igarape do Meio/MA",
+								DestinationDisplayName: "Petrolandia/SC",
+								OriginDepartTime:       "11:00",
+								TripDate:               "2026-05-11",
+							},
+							{
+								TripID:                 "trip-3",
+								BoardStopID:            "board-3",
+								AlightStopID:           "alight-3",
+								OriginDisplayName:      "Santa Ines/MA",
+								DestinationDisplayName: "Petrolandia/SC",
+								OriginDepartTime:       "12:00",
+								TripDate:               "2026-05-25",
+							},
+						},
+					}),
+				},
+			},
+		},
+		{
+			Direction:        "INBOUND",
+			Body:             "a primeira",
+			ProcessingStatus: "PROCESSED",
+			ReceivedAt:       now.Add(-5 * time.Minute),
+		},
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Perfeito - confirmei a primeira opcao: 26/04/2026, saida de Moncao as 09:00 para Petrolandia/SC. A passagem e so para voce ou tem mais pessoas, e ha crianca de ate 5 anos viajando?",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-4 * time.Minute),
+		},
+		{
+			Direction:        "INBOUND",
+			Body:             "sim eu e minha filha",
+			ProcessingStatus: "PROCESSED",
+			ReceivedAt:       now.Add(-3 * time.Minute),
+		},
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Perfeito - voce e sua filha. A sua filha tem ate 5 anos?",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-150 * time.Second),
+		},
+		{
+			Direction:        "INBOUND",
+			Body:             "sim",
+			ProcessingStatus: "PROCESSED",
+			ReceivedAt:       now.Add(-120 * time.Second),
+		},
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Pode enviar os nomes completos e os documentos dos dois.",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-90 * time.Second),
+		},
+		{
+			Direction:        "INBOUND",
+			Body:             "joao vitor messias 06645648103\nmarina messias 46643591104",
+			ProcessingStatus: "PROCESSED",
+			ReceivedAt:       now.Add(-60 * time.Second),
+		},
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Perfeito - os numeros enviados sao os CPFs do Joao Vitor e da Marina?",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-30 * time.Second),
+		},
+	}
+
+	input, ok := parseBookingCreateInput(session, history, "isso", nil)
+	if !ok {
+		t.Fatalf(
+			"expected booking create input from confirmation history: selected_option=%d availability=%v passenger_text=%q passengers=%+v lap_child_count=%d",
+			findLatestSelectedOptionIndex(history),
+			findLatestAvailabilityContext(history) != nil,
+			findLatestPassengerDetailsText(history, session),
+			extractBookingCreatePassengers(findLatestPassengerDetailsText(history, session), session),
+			inferLapChildCount(history),
+		)
+	}
+	if input.SelectedOptionIndex != 1 {
+		t.Fatalf("expected selected option 1, got %d", input.SelectedOptionIndex)
+	}
+	if input.TripID != "trip-1" || input.BoardStopID != "board-1" || input.AlightStopID != "alight-1" {
+		t.Fatalf("unexpected selected trip data: %+v", input)
+	}
+	if input.OriginDisplayName != "Moncao/MA" || input.DestinationDisplayName != "Petrolandia/SC" {
+		t.Fatalf("unexpected route: %+v", input)
+	}
+	if input.Qty != 2 {
+		t.Fatalf("expected qty 2, got %d", input.Qty)
+	}
+	if len(input.Passengers) != 2 {
+		t.Fatalf("expected two passengers, got %+v", input.Passengers)
+	}
+	if input.Passengers[0].Document != "06645648103" || input.Passengers[1].Document != "46643591104" {
+		t.Fatalf("unexpected passengers: %+v", input.Passengers)
+	}
+	if input.Passengers[1].IsLapChild != true {
+		t.Fatalf("expected second passenger marked as lap child, got %+v", input.Passengers)
+	}
+}

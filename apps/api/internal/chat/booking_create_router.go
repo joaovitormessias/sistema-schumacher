@@ -16,11 +16,16 @@ var (
 	passengerRGPattern          = regexp.MustCompile(`(?i)\brg\b[^A-Z0-9]*([A-Z0-9.\-]{4,20})`)
 	passengerCNHPattern         = regexp.MustCompile(`(?i)\bcnh\b[^A-Z0-9]*([A-Z0-9.\-]{4,20})`)
 	passengerBirthRecordPattern = regexp.MustCompile(`(?i)\b(?:certid[aã]o(?: de nascimento)?|matr[ií]cula)\b[^A-Z0-9]*([A-Z0-9.\-]{8,40})`)
+	passengerLooseCPFLinePattern = regexp.MustCompile(`(?i)^\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' ]{3,100}?)\s+([0-9.\-]{11,14})\s*$`)
 )
 
 func parseBookingCreateInput(session Session, history []Message, text string, currentAvailability *AvailabilitySearchResult) (BookingCreateInput, bool) {
 	body := strings.TrimSpace(text)
-	if body == "" || !looksLikeCreateBookingIntent(body) {
+	if body == "" {
+		return BookingCreateInput{}, false
+	}
+	confirmationOnly := looksLikeBookingCreateConfirmation(body)
+	if !looksLikeCreateBookingIntent(body) && !confirmationOnly {
 		return BookingCreateInput{}, false
 	}
 
@@ -29,18 +34,27 @@ func parseBookingCreateInput(session Session, history []Message, text string, cu
 		return BookingCreateInput{}, false
 	}
 
-	passengers := extractBookingCreatePassengers(body, session)
+	passengerSource := body
+	passengers := extractBookingCreatePassengers(passengerSource, session)
+	if len(passengers) == 0 && confirmationOnly {
+		passengerSource = findLatestPassengerDetailsText(history, session)
+		passengers = extractBookingCreatePassengers(passengerSource, session)
+	}
 	if len(passengers) == 0 {
 		return BookingCreateInput{}, false
 	}
 
 	qty := extractPassengerQuantity(body)
 	if qty <= 0 {
+		qty = extractPassengerQuantity(passengerSource)
+	}
+	if qty <= 0 {
 		qty = len(passengers)
 	}
 	if qty != len(passengers) {
 		return BookingCreateInput{}, false
 	}
+	applyLapChildFlags(passengers, inferLapChildCount(history))
 
 	input := BookingCreateInput{
 		SelectedOptionIndex:    selectedOptionIndex,
@@ -58,6 +72,16 @@ func parseBookingCreateInput(session Session, history []Message, text string, cu
 	}
 	input.IdempotencyKey = buildBookingCreateIdempotencyKey(session, input)
 	return input, true
+}
+
+func looksLikeBookingCreateConfirmation(text string) bool {
+	folded := strings.TrimSpace(foldChatText(text))
+	switch folded {
+	case "sim", "isso", "isso mesmo", "pode seguir", "pode reservar", "confirmo", "confirmado", "ok", "certo":
+		return true
+	default:
+		return false
+	}
 }
 
 func looksLikeCreateBookingIntent(text string) bool {
@@ -107,6 +131,9 @@ func resolveBookingCreateSelection(text string, history []Message, currentAvaila
 	}
 
 	index := extractSelectedOptionIndex(text)
+	if index <= 0 {
+		index = findLatestSelectedOptionIndex(history)
+	}
 	if index > 0 {
 		if index > len(options) {
 			return 0, AvailabilitySearchItem{}, false
@@ -136,6 +163,9 @@ func extractSelectedOptionIndex(text string) int {
 }
 
 func extractBookingCreatePassengers(text string, session Session) []BookingCreatePassengerInput {
+	if passengers := extractBookingCreatePassengersByLines(text, session); len(passengers) > 0 {
+		return passengers
+	}
 	document, documentType := extractBookingPassengerDocument(text)
 	if document == "" || documentType == "" {
 		return nil
@@ -152,6 +182,54 @@ func extractBookingCreatePassengers(text string, session Session) []BookingCreat
 			Phone:        strings.TrimSpace(session.CustomerPhone),
 		},
 	}
+}
+
+func extractBookingCreatePassengersByLines(text string, session Session) []BookingCreatePassengerInput {
+	segments := splitPassengerSegments(text)
+	if len(segments) == 0 {
+		return nil
+	}
+
+	passengers := make([]BookingCreatePassengerInput, 0, len(segments))
+	for _, segment := range segments {
+		match := passengerLooseCPFLinePattern.FindStringSubmatch(segment)
+		if len(match) != 3 {
+			return nil
+		}
+		name := normalizePassengerName(match[1])
+		document := normalizeDigits(match[2])
+		if name == "" || len(document) != 11 {
+			return nil
+		}
+		passengers = append(passengers, BookingCreatePassengerInput{
+			Name:         name,
+			Document:     document,
+			DocumentType: "CPF",
+			Phone:        strings.TrimSpace(session.CustomerPhone),
+		})
+	}
+	if len(passengers) == 0 {
+		return nil
+	}
+	return passengers
+}
+
+func splitPassengerSegments(text string) []string {
+	candidates := strings.FieldsFunc(text, func(r rune) bool {
+		return r == '\n' || r == ';'
+	})
+	segments := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		segments = append(segments, candidate)
+	}
+	if len(segments) > 1 {
+		return segments
+	}
+	return nil
 }
 
 func extractBookingPassengerName(text string, fallback string) string {
@@ -219,6 +297,71 @@ func normalizeAlphaNumeric(value string) string {
 		}
 	}
 	return builder.String()
+}
+
+func findLatestSelectedOptionIndex(history []Message) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		body := strings.TrimSpace(history[i].Body)
+		if body == "" {
+			continue
+		}
+		if index := extractSelectedOptionIndex(body); index > 0 {
+			return index
+		}
+	}
+	return 0
+}
+
+func findLatestPassengerDetailsText(history []Message, session Session) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		message := history[i]
+		if message.Direction != "INBOUND" {
+			continue
+		}
+		body := strings.TrimSpace(message.Body)
+		if body == "" || looksLikeBookingCreateConfirmation(body) {
+			continue
+		}
+		if len(extractBookingCreatePassengers(body, session)) > 0 {
+			return body
+		}
+	}
+	return ""
+}
+
+func inferLapChildCount(history []Message) int {
+	for i := len(history) - 1; i >= 0; i-- {
+		message := history[i]
+		if message.Direction != "INBOUND" || !looksLikeBookingCreateConfirmation(message.Body) {
+			continue
+		}
+		for j := i - 1; j >= 0; j-- {
+			previous := history[j]
+			if previous.Direction != "OUTBOUND" {
+				continue
+			}
+			folded := foldChatText(previous.Body)
+			if strings.Contains(folded, "ate 5 anos") || strings.Contains(folded, "crianca de 5 anos ou menos") {
+				return 1
+			}
+			break
+		}
+	}
+	return 0
+}
+
+func applyLapChildFlags(passengers []BookingCreatePassengerInput, lapChildCount int) {
+	if lapChildCount <= 0 || len(passengers) == 0 {
+		return
+	}
+	if lapChildCount > len(passengers)-1 {
+		lapChildCount = len(passengers) - 1
+	}
+	for i := len(passengers) - lapChildCount; i < len(passengers); i++ {
+		if i >= 0 && i < len(passengers) {
+			passengers[i].IsLapChild = true
+		}
+	}
 }
 
 func buildBookingCreateIdempotencyKey(session Session, input BookingCreateInput) string {
