@@ -91,6 +91,14 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 		if context.ShortDateFollowUp {
 			builder.WriteString("- Caso atual: follow-up curto sobre datas/disponibilidade. Reutilize o contexto acima e nao volte a perguntar origem ou destino se isso ja estiver implicito.\n")
 		}
+		if context.DestinationChosenNow {
+			builder.WriteString("- Caso atual: o cliente acabou de escolher a cidade de destino dentro do pacote. Proximo passo correto: listar ate 5 datas futuras para esse destino e perguntar se ele deseja alguma dessas opcoes.\n")
+			builder.WriteString("- Guardrail deste turno: nao perguntar ainda a cidade de saida.\n")
+		}
+		if context.DateChosenForDestination {
+			builder.WriteString("- Caso atual: o cliente escolheu uma data para um destino ja definido. Proximo passo correto: listar as opcoes de saida/origem com horarios para essa data e perguntar qual delas ele deseja.\n")
+			builder.WriteString("- Guardrail deste turno: nao fazer pergunta generica sobre cidade de saida se houver opcoes retornadas pela ferramenta.\n")
+		}
 		if context.ShouldRespondWithSCTable {
 			builder.WriteString("- Caso atual: consulta ampla sobre Santa Catarina. Resposta esperada neste turno: devolver a tabela publica de cidades e valores e encerrar sem pergunta adicional.\n")
 		}
@@ -137,6 +145,12 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 			}
 			builder.WriteString("- Use apenas os itens acima para falar de data, horario, preco e disponibilidade.\n")
 			builder.WriteString("- Se a busca foi por package ou follow-up curto sobre datas, priorize listar ate 5 datas futuras e nao reabra a coleta de origem/destino nesse turno.\n")
+			if filter.PackageName != "" && filter.Destination != "" && filter.Origin == "" && filter.TripDate == nil {
+				builder.WriteString("- Fluxo correto com este resultado: listar ate 5 datas futuras para esse destino e perguntar se o cliente deseja alguma dessas opcoes.\n")
+			}
+			if filter.PackageName != "" && filter.Destination != "" && filter.Origin == "" && filter.TripDate != nil {
+				builder.WriteString("- Fluxo correto com este resultado: listar as opcoes de saida/origem com horarios para essa data e perguntar qual delas o cliente deseja.\n")
+			}
 		}
 	}
 
@@ -433,6 +447,8 @@ type promptConversationContext struct {
 	PackageName              string
 	RouteDirection           string
 	ShortDateFollowUp        bool
+	DestinationChosenNow     bool
+	DateChosenForDestination bool
 	ShouldRespondWithSCTable bool
 	ShouldAskSCOriginForMA   bool
 }
@@ -448,8 +464,12 @@ func derivePromptConversationContext(currentTurn string, recentMessages []map[st
 	}
 	currentContext := inferRouteContextFromText(currentTurn)
 	historyContext := inferLatestRouteContextFromTexts(texts)
+	currentContext = inferConversationTurnRouteContext(currentTurn, historyContext)
 	merged := mergeInferredRouteContext(currentContext, historyContext)
 	folded := foldChatText(currentTurn)
+	tripDate := extractTripDate(currentTurn, time.Now().UTC())
+	destinationChosenNow := currentContext.Destination != "" && !strings.EqualFold(currentContext.Destination, historyContext.Destination)
+	dateChosenForDestination := tripDate != nil && merged.Destination != "" && merged.PackageName != "" && merged.Origin == "" && (historyContext.Destination != "" || destinationChosenNow)
 
 	return promptConversationContext{
 		Origin:                   merged.Origin,
@@ -457,6 +477,8 @@ func derivePromptConversationContext(currentTurn string, recentMessages []map[st
 		PackageName:              merged.PackageName,
 		RouteDirection:           merged.RouteDirection,
 		ShortDateFollowUp:        looksLikeShortDateFollowUp(currentTurn),
+		DestinationChosenNow:     destinationChosenNow && tripDate == nil,
+		DateChosenForDestination: dateChosenForDestination,
 		ShouldRespondWithSCTable: detectBroadTravelState(folded) == "SC" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
 		ShouldAskSCOriginForMA:   detectBroadTravelState(folded) == "MA" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
 	}
@@ -482,11 +504,10 @@ func normalizeRecentMemoryMessages(value interface{}) []map[string]interface{} {
 }
 
 func inferLatestRouteContextFromTexts(texts []string) inferredRouteContext {
-	for i := len(texts) - 1; i >= 0; i-- {
-		context := inferRouteContextFromText(texts[i])
-		if context.Origin != "" || context.Destination != "" || context.PackageName != "" {
-			return context
-		}
+	context := inferredRouteContext{}
+	for _, text := range texts {
+		turnContext := inferConversationTurnRouteContext(text, context)
+		context = mergeInferredRouteContext(turnContext, context)
 	}
-	return inferredRouteContext{}
+	return context
 }

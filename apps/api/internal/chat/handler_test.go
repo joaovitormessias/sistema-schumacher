@@ -3298,6 +3298,228 @@ func TestReprocessUsesPackageAvailabilityForBroadStateDateLookup(t *testing.T) {
 	}
 }
 
+func TestReprocessUsesDestinationAvailabilityAfterBroadStateCitySelection(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Tenho datas disponiveis para Seara.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_tool_sc_city_1",
+		},
+	}
+	searcher := &fakeAvailabilitySearcher{
+		enabled: true,
+		result: AvailabilitySearchResult{
+			Results: []AvailabilitySearchItem{
+				{
+					SegmentID:              "seg-sc-city-1",
+					TripID:                 "trip-sc-city-1",
+					RouteID:                "route-sc-city-1",
+					OriginDisplayName:      "Santa Ines/MA",
+					DestinationDisplayName: "Seara/SC",
+					OriginDepartTime:       "18:30",
+					TripDate:               "2026-05-10",
+					SeatsAvailable:         6,
+					Price:                  1100,
+					Currency:               "BRL",
+					Status:                 "ACTIVE",
+					TripStatus:             "SCHEDULED",
+					PackageName:            packageToSantaCatarina,
+				},
+			},
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
+
+	if _, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-tool-sc-city-ctx-1",
+			IdempotencyKey:    "idem-tool-sc-city-ctx-1",
+			Body:              "quero passagem para sc",
+		},
+	}); err != nil {
+		t.Fatalf("ingest broad state message: %v", err)
+	}
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-tool-sc-city-1",
+			IdempotencyKey:    "idem-tool-sc-city-1",
+			Body:              "para Seara",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest city selection message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out.ToolCalls))
+	}
+	if searcher.calls != 1 {
+		t.Fatalf("expected one availability search, got %d", searcher.calls)
+	}
+	if searcher.lastInput.PackageName != packageToSantaCatarina {
+		t.Fatalf("expected package search %q, got %+v", packageToSantaCatarina, searcher.lastInput)
+	}
+	if searcher.lastInput.Destination != "Seara/SC" {
+		t.Fatalf("expected destination Seara/SC, got %+v", searcher.lastInput)
+	}
+	if searcher.lastInput.Origin != "" {
+		t.Fatalf("expected no origin yet for city selection flow, got %+v", searcher.lastInput)
+	}
+	if searcher.lastInput.TripDate != nil {
+		t.Fatalf("expected no trip date yet, got %+v", searcher.lastInput.TripDate)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "Destino inferido: Seara/SC") {
+		t.Fatalf("expected prompt to include inferred destination, got %q", runner.lastInput.UserPrompt)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "listar ate 5 datas futuras para esse destino") {
+		t.Fatalf("expected prompt to instruct date listing for chosen destination")
+	}
+}
+
+func TestReprocessUsesDateSelectionToListOriginsAfterDestinationChoice(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Para 10/05 tenho estas saidas do Maranhao para Seara.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_tool_sc_date_choice_1",
+		},
+	}
+	searcher := &fakeAvailabilitySearcher{
+		enabled: true,
+		result: AvailabilitySearchResult{
+			Results: []AvailabilitySearchItem{
+				{
+					SegmentID:              "seg-sc-date-1",
+					TripID:                 "trip-sc-date-1",
+					RouteID:                "route-sc-date-1",
+					OriginDisplayName:      "Santa Ines/MA",
+					DestinationDisplayName: "Seara/SC",
+					OriginDepartTime:       "18:30",
+					TripDate:               "2026-05-10",
+					SeatsAvailable:         6,
+					Price:                  1100,
+					Currency:               "BRL",
+					Status:                 "ACTIVE",
+					TripStatus:             "SCHEDULED",
+					PackageName:            packageToSantaCatarina,
+				},
+				{
+					SegmentID:              "seg-sc-date-2",
+					TripID:                 "trip-sc-date-2",
+					RouteID:                "route-sc-date-2",
+					OriginDisplayName:      "Moncao/MA",
+					DestinationDisplayName: "Seara/SC",
+					OriginDepartTime:       "20:15",
+					TripDate:               "2026-05-10",
+					SeatsAvailable:         4,
+					Price:                  1100,
+					Currency:               "BRL",
+					Status:                 "ACTIVE",
+					TripStatus:             "SCHEDULED",
+					PackageName:            packageToSantaCatarina,
+				},
+			},
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
+
+	messages := []IngestMessagePayload{
+		{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-tool-sc-date-ctx-1",
+			IdempotencyKey:    "idem-tool-sc-date-ctx-1",
+			Body:              "quero passagem para sc",
+		},
+		{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-tool-sc-date-ctx-2",
+			IdempotencyKey:    "idem-tool-sc-date-ctx-2",
+			Body:              "para Seara",
+		},
+		{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-tool-sc-date-1",
+			IdempotencyKey:    "idem-tool-sc-date-1",
+			Body:              "10/05",
+		},
+	}
+
+	var ingested IngestMessageResult
+	var err error
+	for _, message := range messages {
+		ingested, err = svc.Ingest(context.Background(), IngestMessageInput{
+			ContactKey: "5511999999999",
+			Message:    message,
+		})
+		if err != nil {
+			t.Fatalf("ingest message %q: %v", message.Body, err)
+		}
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(out.ToolCalls))
+	}
+	if searcher.calls != 1 {
+		t.Fatalf("expected one availability search, got %d", searcher.calls)
+	}
+	if searcher.lastInput.PackageName != packageToSantaCatarina || searcher.lastInput.Destination != "Seara/SC" {
+		t.Fatalf("expected destination package search for Seara/SC, got %+v", searcher.lastInput)
+	}
+	if searcher.lastInput.Origin != "" {
+		t.Fatalf("expected no fixed origin for date choice flow, got %+v", searcher.lastInput)
+	}
+	if searcher.lastInput.TripDate == nil || searcher.lastInput.TripDate.UTC().Format("2006-01-02") != "2026-05-10" {
+		t.Fatalf("expected selected date 2026-05-10, got %+v", searcher.lastInput.TripDate)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "Data consultada: 2026-05-10") {
+		t.Fatalf("expected prompt to include chosen date, got %q", runner.lastInput.UserPrompt)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "listar as opcoes de saida/origem com horarios para essa data") {
+		t.Fatalf("expected prompt to instruct origin/time listing after date choice")
+	}
+}
+
 func TestReprocessReturnsBadGatewayWhenAvailabilityToolFails(t *testing.T) {
 	store := newFakeStore()
 	runner := &fakeAgentRunner{

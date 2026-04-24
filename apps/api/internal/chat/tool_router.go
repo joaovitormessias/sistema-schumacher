@@ -35,6 +35,25 @@ const toolNamePaymentCreate = "payment_create"
 const packageToSantaCatarina = "Pacote p/ Santa Catarina"
 const packageToMaranhao = "Pacote p/ Maranhao"
 
+var scPackageDestinations = map[string]string{
+	"fraiburgo":    "Fraiburgo/SC",
+	"monte carlo":  "Monte Carlo/SC",
+	"videira":      "Videira/SC",
+	"campos novos": "Campos Novos/SC",
+	"chapeco":      "Chapeco/SC",
+	"concordia":    "Concordia/SC",
+	"ipumirim":     "Ipumirim/SC",
+	"petrolandia":  "Petrolandia/SC",
+	"ituporanga":   "Ituporanga/SC",
+	"seara":        "Seara/SC",
+}
+
+var maPackageDestinations = map[string]string{
+	"moncao":          "Moncao/MA",
+	"santa ines":      "Santa Ines/MA",
+	"igarape do meio": "Igarape do Meio/MA",
+}
+
 type agentToolContext struct {
 	Calls         []ToolCall
 	Availability  *AvailabilitySearchResult
@@ -527,8 +546,13 @@ func parseAvailabilitySearchInput(history []Message, text string, observedAt tim
 	if body == "" {
 		return AvailabilitySearchInput{}, false
 	}
+	historyContext := inferLatestRouteContextFromHistory(history)
 
 	if input, ok := parseDirectAvailabilitySearchInput(body, observedAt); ok {
+		return input, true
+	}
+
+	if input, ok := parseContextualAvailabilitySearchInput(historyContext, body, observedAt); ok {
 		return input, true
 	}
 
@@ -537,8 +561,8 @@ func parseAvailabilitySearchInput(history []Message, text string, observedAt tim
 	}
 
 	context := mergeInferredRouteContext(
-		inferRouteContextFromText(body),
-		inferLatestRouteContextFromHistory(history),
+		inferConversationTurnRouteContext(body, historyContext),
+		historyContext,
 	)
 	if strings.TrimSpace(context.PackageName) == "" {
 		return AvailabilitySearchInput{}, false
@@ -547,6 +571,40 @@ func parseAvailabilitySearchInput(history []Message, text string, observedAt tim
 	input := AvailabilitySearchInput{
 		PackageName: context.PackageName,
 		TripDate:    extractTripDate(body, observedAt),
+		Qty:         extractPassengerQuantity(body),
+		Limit:       8,
+	}
+	if input.Qty <= 0 {
+		input.Qty = 1
+	}
+	return input, true
+}
+
+func parseContextualAvailabilitySearchInput(historyContext inferredRouteContext, text string, observedAt time.Time) (AvailabilitySearchInput, bool) {
+	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if body == "" {
+		return AvailabilitySearchInput{}, false
+	}
+
+	currentContext := inferConversationTurnRouteContext(body, historyContext)
+	merged := mergeInferredRouteContext(currentContext, historyContext)
+	if strings.TrimSpace(merged.PackageName) == "" || strings.TrimSpace(merged.Destination) == "" {
+		return AvailabilitySearchInput{}, false
+	}
+	if strings.TrimSpace(merged.Origin) != "" {
+		return AvailabilitySearchInput{}, false
+	}
+
+	tripDate := extractTripDate(body, observedAt)
+	destinationContextPresent := currentContext.Destination != ""
+	if !destinationContextPresent && tripDate == nil && !looksLikeShortDateFollowUp(body) {
+		return AvailabilitySearchInput{}, false
+	}
+
+	input := AvailabilitySearchInput{
+		Destination: merged.Destination,
+		PackageName: merged.PackageName,
+		TripDate:    tripDate,
 		Qty:         extractPassengerQuantity(body),
 		Limit:       8,
 	}
@@ -678,17 +736,16 @@ func extractCanonicalLocations(text string) []string {
 }
 
 func inferLatestRouteContextFromHistory(history []Message) inferredRouteContext {
-	for i := len(history) - 1; i >= 0; i-- {
-		body := strings.TrimSpace(history[i].Body)
+	context := inferredRouteContext{}
+	for _, message := range history {
+		body := strings.TrimSpace(message.Body)
 		if body == "" {
 			continue
 		}
-		context := inferRouteContextFromText(body)
-		if context.Origin != "" || context.Destination != "" || context.PackageName != "" {
-			return context
-		}
+		turnContext := inferConversationTurnRouteContext(body, context)
+		context = mergeInferredRouteContext(turnContext, context)
 	}
-	return inferredRouteContext{}
+	return context
 }
 
 func inferRouteContextFromText(text string) inferredRouteContext {
@@ -718,6 +775,69 @@ func inferRouteContextFromText(text string) inferredRouteContext {
 		context = mergeInferredRouteContext(context, foldedContext)
 	}
 	return context
+}
+
+func inferConversationTurnRouteContext(text string, base inferredRouteContext) inferredRouteContext {
+	context := inferRouteContextFromText(text)
+	selection := inferDestinationSelectionContext(text, mergeInferredRouteContext(context, base))
+	return mergeInferredRouteContext(context, selection)
+}
+
+func inferDestinationSelectionContext(text string, base inferredRouteContext) inferredRouteContext {
+	if strings.TrimSpace(base.RouteDirection) == "" && strings.TrimSpace(base.PackageName) == "" {
+		return inferredRouteContext{}
+	}
+	if match := routeFromToPattern.FindStringSubmatch(text); len(match) == 3 {
+		return inferredRouteContext{}
+	}
+	if len(extractCanonicalLocations(text)) >= 2 {
+		return inferredRouteContext{}
+	}
+
+	direction := strings.TrimSpace(base.RouteDirection)
+	if direction == "" {
+		direction = strings.TrimSpace(base.RouteDirection)
+	}
+	destination := inferKnownPackageDestination(text, direction)
+	if destination == "" {
+		return inferredRouteContext{}
+	}
+	return inferredRouteContext{
+		Destination:    destination,
+		PackageName:    packageNameForRouteDirection(direction),
+		RouteDirection: direction,
+		BroadState:     base.BroadState,
+	}
+}
+
+func inferKnownPackageDestination(text string, direction string) string {
+	folded := foldChatText(text)
+	if folded == "" {
+		return ""
+	}
+
+	var candidates map[string]string
+	switch strings.ToUpper(strings.TrimSpace(direction)) {
+	case "TO_SC":
+		candidates = scPackageDestinations
+	case "TO_MA":
+		candidates = maPackageDestinations
+	default:
+		return ""
+	}
+
+	matchCount := 0
+	selected := ""
+	for key, canonical := range candidates {
+		if strings.Contains(folded, " "+key+" ") {
+			matchCount++
+			selected = canonical
+		}
+	}
+	if matchCount != 1 {
+		return ""
+	}
+	return selected
 }
 
 func inferRouteContextFromFoldedText(folded string) inferredRouteContext {
