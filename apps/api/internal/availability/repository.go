@@ -67,12 +67,12 @@ func (r *Repository) Search(ctx context.Context, filter SearchFilter) ([]SearchR
 		clauses = append(clauses, "upper(coalesce(rsp.status, 'ACTIVE')) = 'ACTIVE'")
 	}
 	if filter.Origin != "" {
-		args = append(args, filter.Origin)
-		clauses = append(clauses, fmt.Sprintf("lower(origin_stop.display_name) = lower($%d)", len(args)))
+		args = append(args, normalizeSearchText(filter.Origin))
+		clauses = append(clauses, fmt.Sprintf("%s = $%d", normalizedSearchColumnSQL("origin_stop.display_name"), len(args)))
 	}
 	if filter.Destination != "" {
-		args = append(args, filter.Destination)
-		clauses = append(clauses, fmt.Sprintf("lower(destination_stop.display_name) = lower($%d)", len(args)))
+		args = append(args, normalizeSearchText(filter.Destination))
+		clauses = append(clauses, fmt.Sprintf("%s = $%d", normalizedSearchColumnSQL("destination_stop.display_name"), len(args)))
 	}
 	if filter.TripDate != nil {
 		args = append(args, filter.TripDate.Format("2006-01-02"))
@@ -141,4 +141,35 @@ func normalizedTripStatusSQL(column string) string {
       when upper(coalesce(%s, '')) in ('ATIVO', 'ACTIVE') then 'SCHEDULED'
       else upper(coalesce(%s, ''))
     end`, column, column)
+}
+
+func normalizedSearchColumnSQL(column string) string {
+	return fmt.Sprintf(
+		"translate(lower(coalesce(%s, '')), 'áàâãäéèêëíìîïóòôõöúùûüçñ', 'aaaaaeeeeiiiiooooouuuucn')",
+		column,
+	)
+}
+
+func normalizeSearchText(value string) string {
+	replacer := strings.NewReplacer(
+		"Á", "A", "À", "A", "Â", "A", "Ã", "A", "Ä", "A",
+		"á", "a", "à", "a", "â", "a", "ã", "a", "ä", "a",
+		"É", "E", "È", "E", "Ê", "E", "Ë", "E",
+		"é", "e", "è", "e", "ê", "e", "ë", "e",
+		"Í", "I", "Ì", "I", "Î", "I", "Ï", "I",
+		"í", "i", "ì", "i", "î", "i", "ï", "i",
+		"Ó", "O", "Ò", "O", "Ô", "O", "Õ", "O", "Ö", "O",
+		"ó", "o", "ò", "o", "ô", "o", "õ", "o", "ö", "o",
+		"Ú", "U", "Ù", "U", "Û", "U", "Ü", "U",
+		"ú", "u", "ù", "u", "û", "u", "ü", "u",
+		"Ç", "C", "ç", "c",
+		"Ñ", "N", "ñ", "n",
+	)
+	normalized := strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if normalized == "" {
+		return ""
+	}
+	normalized = strings.ReplaceAll(normalized, " /", "/")
+	normalized = strings.ReplaceAll(normalized, "/ ", "/")
+	return strings.ToLower(replacer.Replace(normalized))
 }

@@ -2,21 +2,22 @@ package availability
 
 import "testing"
 
-func TestActiveTripStatusClauseAcceptsLegacyActiveStatus(t *testing.T) {
-	got := activeTripStatusClause("t.status")
-	want := "upper(coalesce(t.status, '')) in ('SCHEDULED', 'IN_PROGRESS', 'ATIVO', 'ACTIVE')"
-	if got != want {
-		t.Fatalf("activeTripStatusClause() = %q, want %q", got, want)
+func TestNormalizeSearchTextFoldsAccents(t *testing.T) {
+	if got := normalizeSearchText("Concórdia/SC"); got != "concordia/sc" {
+		t.Fatalf("expected folded concordia/sc, got %q", got)
+	}
+	if got := normalizeSearchText("Santa Ines/MA"); got != "santa ines/ma" {
+		t.Fatalf("expected santa ines/ma, got %q", got)
+	}
+	if got := normalizeSearchText("  Chapecó  /SC "); got != "chapeco/sc" {
+		t.Fatalf("expected folded chapeco/sc, got %q", got)
 	}
 }
 
-func TestNormalizedTripStatusSQLMapsLegacyStatuses(t *testing.T) {
-	got := normalizedTripStatusSQL("t.status")
-	want := `case
-      when upper(coalesce(t.status, '')) in ('ATIVO', 'ACTIVE') then 'SCHEDULED'
-      else upper(coalesce(t.status, ''))
-    end`
+func TestNormalizedSearchColumnSQLUsesAccentInsensitiveTranslation(t *testing.T) {
+	got := normalizedSearchColumnSQL("destination_stop.display_name")
+	want := "translate(lower(coalesce(destination_stop.display_name, '')), 'áàâãäéèêëíìîïóòôõöúùûüçñ', 'aaaaaeeeeiiiiooooouuuucn')"
 	if got != want {
-		t.Fatalf("normalizedTripStatusSQL() = %q, want %q", got, want)
+		t.Fatalf("unexpected sql expression: %q", got)
 	}
 }

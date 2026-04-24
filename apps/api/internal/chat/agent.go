@@ -185,7 +185,7 @@ func buildAutoSendReplyIdempotencyKey(draftID string) string {
 
 func evaluateDraftAutoSendPolicy(candidates []Message, toolCalls []ToolCall) draftAutoSendPolicy {
 	reasons := make([]string, 0, 2)
-	if len(toolCalls) > 0 {
+	if len(toolCalls) > 0 && !hasOnlyAutoSendSafeToolCalls(toolCalls) {
 		reasons = append(reasons, draftAutoSendReasonToolCall)
 	}
 	if hasNonTextCandidate(candidates) {
@@ -198,6 +198,30 @@ func evaluateDraftAutoSendPolicy(candidates []Message, toolCalls []ToolCall) dra
 		policy.Reasons = reasons
 	}
 	return policy
+}
+
+func hasOnlyAutoSendSafeToolCalls(toolCalls []ToolCall) bool {
+	if len(toolCalls) == 0 {
+		return false
+	}
+	for _, call := range toolCalls {
+		if !isAutoSendSafeToolCall(call) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAutoSendSafeToolCall(call ToolCall) bool {
+	if !strings.EqualFold(strings.TrimSpace(call.Status), "COMPLETED") {
+		return false
+	}
+	switch strings.TrimSpace(call.ToolName) {
+	case toolNameAvailabilitySearch:
+		return true
+	default:
+		return false
+	}
 }
 
 func hasNonTextCandidate(candidates []Message) bool {

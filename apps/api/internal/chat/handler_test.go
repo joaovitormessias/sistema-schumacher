@@ -272,11 +272,11 @@ func TestGetCurrentDraftReturnsObservabilityForGeneratedDraft(t *testing.T) {
 	if out.ProviderResponseID != "resp-draft-view-1" {
 		t.Fatalf("expected provider response id resp-draft-view-1, got %s", out.ProviderResponseID)
 	}
-	if out.AutoSendStatus != draftAutoSendStatusReviewNeeded {
-		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusReviewNeeded, out.AutoSendStatus)
+	if out.AutoSendStatus != draftAutoSendStatusEligible {
+		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusEligible, out.AutoSendStatus)
 	}
-	if len(out.AutoSendReasons) != 1 || out.AutoSendReasons[0] != draftAutoSendReasonToolCall {
-		t.Fatalf("expected auto_send_reasons [%s], got %+v", draftAutoSendReasonToolCall, out.AutoSendReasons)
+	if len(out.AutoSendReasons) != 0 {
+		t.Fatalf("expected no auto_send_reasons for safe availability draft, got %+v", out.AutoSendReasons)
 	}
 	if len(out.CurrentTurnMessageIDs) != 1 || out.CurrentTurnMessageIDs[0] == "" {
 		t.Fatalf("expected current_turn_message_ids, got %+v", out.CurrentTurnMessageIDs)
@@ -657,11 +657,11 @@ func TestListSessionsIncludesDraftReviewSummary(t *testing.T) {
 	if sessions[0].DraftProviderResponseID != "resp-session-summary-1" {
 		t.Fatalf("expected provider response id resp-session-summary-1, got %s", sessions[0].DraftProviderResponseID)
 	}
-	if sessions[0].DraftAutoSendStatus != draftAutoSendStatusReviewNeeded {
-		t.Fatalf("expected draft auto send status %s, got %s", draftAutoSendStatusReviewNeeded, sessions[0].DraftAutoSendStatus)
+	if sessions[0].DraftAutoSendStatus != draftAutoSendStatusEligible {
+		t.Fatalf("expected draft auto send status %s, got %s", draftAutoSendStatusEligible, sessions[0].DraftAutoSendStatus)
 	}
-	if len(sessions[0].DraftAutoSendReasons) != 1 || sessions[0].DraftAutoSendReasons[0] != draftAutoSendReasonToolCall {
-		t.Fatalf("expected draft auto send reasons [%s], got %+v", draftAutoSendReasonToolCall, sessions[0].DraftAutoSendReasons)
+	if len(sessions[0].DraftAutoSendReasons) != 0 {
+		t.Fatalf("expected no draft auto send reasons for safe availability draft, got %+v", sessions[0].DraftAutoSendReasons)
 	}
 }
 
@@ -2597,7 +2597,7 @@ func TestReprocessDoesNotAutoSendReviewRequiredDraft(t *testing.T) {
 	runner := &fakeAgentRunner{
 		enabled: true,
 		result: RunAgentResult{
-			ReplyText:          "Encontrei uma opcao para esse trecho.",
+			ReplyText:          "Encontrei o valor confirmado para esse trecho.",
 			Model:              "gpt-test",
 			ProviderResponseID: "resp_tool_auto_skip_1",
 		},
@@ -2621,7 +2621,30 @@ func TestReprocessDoesNotAutoSendReviewRequiredDraft(t *testing.T) {
 			}},
 		},
 	}
-	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, runner, searcher)
+	pricingSearcher := &fakePricingQuoteSearcher{
+		enabled: true,
+		result: PricingQuoteResult{
+			Filter: PricingQuoteInput{FareMode: "AUTO"},
+			Results: []PricingQuoteItem{{
+				TripID:                 "trip-1",
+				RouteID:                "route-1",
+				BoardStopID:            "board-1",
+				AlightStopID:           "alight-1",
+				OriginStopID:           "origin-1",
+				DestinationStopID:      "destination-1",
+				OriginDisplayName:      "Videira/SC",
+				DestinationDisplayName: "Sao Luis/MA",
+				OriginDepartTime:       "18:30",
+				TripDate:               "2026-05-10",
+				BaseAmount:             250,
+				CalcAmount:             250,
+				FinalAmount:            250,
+				Currency:               "BRL",
+				FareMode:               "AUTO",
+			}},
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, runner, searcher, pricingSearcher)
 
 	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
 		ContactKey: "5511999999999",
@@ -2629,7 +2652,7 @@ func TestReprocessDoesNotAutoSendReviewRequiredDraft(t *testing.T) {
 			Direction:         "INBOUND",
 			ProviderMessageID: "msg-auto-send-skip-1",
 			IdempotencyKey:    "idem-auto-send-skip-1",
-			Body:              "quais horarios e o valor de Videira/SC para Sao Luis/MA em 10/05?",
+			Body:              "qual o valor de Videira/SC para Sao Luis/MA em 10/05?",
 		},
 	})
 	if err != nil {
@@ -2658,11 +2681,125 @@ func TestReprocessDoesNotAutoSendReviewRequiredDraft(t *testing.T) {
 	if out.Draft.ProcessingStatus != messageStatusAutomationDraft {
 		t.Fatalf("expected draft status %s, got %s", messageStatusAutomationDraft, out.Draft.ProcessingStatus)
 	}
+	if got := readDraftAutoSendStatus(*out.Draft); got != draftAutoSendStatusReviewNeeded {
+		t.Fatalf("expected draft auto_send_status %s, got %s", draftAutoSendStatusReviewNeeded, got)
+	}
+	if reasons := readDraftAutoSendReasons(*out.Draft); len(reasons) != 1 || reasons[0] != draftAutoSendReasonToolCall {
+		t.Fatalf("expected draft auto_send_reasons [%s], got %+v", draftAutoSendReasonToolCall, reasons)
+	}
 	if sender.calls != 0 {
 		t.Fatalf("expected zero sender calls, got %d", sender.calls)
 	}
 	if len(store.outbounds) != 0 {
 		t.Fatalf("expected no outbound records, got %d", len(store.outbounds))
+	}
+}
+
+func TestReprocessAutoSendsAvailabilitySearchDraftWhenSenderIsEnabled(t *testing.T) {
+	store := newFakeStore()
+	sender := &fakeReplySender{
+		enabled: true,
+		result: SendReplyResult{
+			ProviderMessageID: "MSG-AUTO-AVAIL-1",
+			ProviderStatus:    "SENT",
+			Payload:           map[string]interface{}{"provider": "EVOLUTION"},
+			SentAt:            time.Now().UTC(),
+		},
+	}
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Tenho datas disponiveis para Concordia.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_auto_availability_1",
+		},
+	}
+	searcher := &fakeAvailabilitySearcher{
+		enabled: true,
+		result: AvailabilitySearchResult{
+			Results: []AvailabilitySearchItem{{
+				SegmentID:              "seg-sc-auto-1",
+				TripID:                 "trip-sc-auto-1",
+				RouteID:                "route-sc-auto-1",
+				OriginDisplayName:      "Santa Ines/MA",
+				DestinationDisplayName: "Concordia/SC",
+				OriginDepartTime:       "18:30",
+				TripDate:               "2026-05-10",
+				SeatsAvailable:         8,
+				Price:                  1100,
+				Currency:               "BRL",
+				Status:                 "ACTIVE",
+				TripStatus:             "SCHEDULED",
+				PackageName:            packageToSantaCatarina,
+			}},
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, sender, runner, searcher)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999@s.whatsapp.net",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-auto-send-availability-1",
+			IdempotencyKey:    "idem-auto-send-availability-1",
+			Body:              "quero para concordia",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	store.sessions[ingested.Session.ID] = Session{
+		ID:            ingested.Session.ID,
+		Channel:       ingested.Session.Channel,
+		ContactKey:    ingested.Session.ContactKey,
+		CustomerPhone: ingested.Session.CustomerPhone,
+		CustomerName:  ingested.Session.CustomerName,
+		Status:        ingested.Session.Status,
+		HandoffStatus: ingested.Session.HandoffStatus,
+		Metadata: map[string]interface{}{
+			"memory": map[string]interface{}{
+				"recent_messages": []map[string]interface{}{
+					{"direction": "INBOUND", "body": "quero passagem para sc"},
+					{"direction": "OUTBOUND", "body": "Fraiburgo R$ 950; Concordia R$ 1100."},
+				},
+			},
+		},
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+ingested.Session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Reason != "draft_auto_sent" {
+		t.Fatalf("expected reason draft_auto_sent, got %s", out.Reason)
+	}
+	if out.Draft == nil {
+		t.Fatalf("expected draft to be present")
+	}
+	if out.Draft.ProcessingStatus != messageStatusAutomationSent {
+		t.Fatalf("expected draft status %s, got %s", messageStatusAutomationSent, out.Draft.ProcessingStatus)
+	}
+	if got := readDraftAutoSendStatus(*out.Draft); got != draftAutoSendStatusEligible {
+		t.Fatalf("expected draft auto_send_status %s, got %s", draftAutoSendStatusEligible, got)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected one sender call, got %d", sender.calls)
+	}
+	if len(store.outbounds) != 1 {
+		t.Fatalf("expected one outbound record, got %d", len(store.outbounds))
 	}
 }
 
