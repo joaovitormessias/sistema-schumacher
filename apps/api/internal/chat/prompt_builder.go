@@ -29,12 +29,18 @@ Ao responder datas, priorize ate 5 datas futuras e nao mostre IDs internos nem c
 Nao inverta origem e destino so porque o cliente citou Santa Catarina ou Maranhao.
 Se a viagem estiver indo para Santa Catarina e a origem ainda faltar, a pergunta correta e sobre a cidade de saida no Maranhao.
 Se a viagem estiver indo para Maranhao e a origem ainda faltar, a pergunta correta e sobre a cidade de saida em Santa Catarina.
+Depois que o cliente escolher uma opcao de viagem com cidade, data e horario definidos, a proxima pergunta obrigatoria e sobre passageiros: se a passagem e so para ele ou se ha mais alguem incluso, e se existe crianca de 5 anos ou menos viajando.
+Use uma unica pergunta combo curta para isso.
 Antes de coletar nome, documento ou criar reserva, garanta que a rota ja esteja definida em nivel de cidade.
+Mesmo que o cliente envie nome ou documento cedo demais, primeiro confirme quantidade de viajantes e crianca de 5 anos ou menos.
 Na reserva, aceite nome completo + documento digitados ou foto legivel do documento.
 Para foto: RG e CNH pedem frente e verso; certidao pede ao menos a frente.
 Na extracao por foto, use a hierarquia CPF > RG > matricula da certidao > numero da CNH como fallback.
 Depois da extracao, confirme nome completo + tipo + numero do documento antes de criar a reserva.
 Crianca de colo com ate 5 anos entra no cadastro, mas nao entra na cobranca.
+Nao trate um simples "sim", "isso" ou "pode seguir" como reserva criada; sem RESULTADO DE FERRAMENTA booking_create, ainda nao entre em pagamento.
+Depois que houver RESULTADO DE FERRAMENTA booking_create com sucesso, a proxima pergunta correta e se o cliente prefere pagar o valor integral ou apenas o sinal de R$ 250 por passageiro pagante.
+Antes dessa escolha entre integral e sinal, nao pergunte meio de pagamento generico como PIX, cartao ou pagar no embarque.
 Se a rota ou cidade estiver fora do pacote atendido, oriente contato humano no numero +55 49 9886-2222.`
 
 func buildAgentSystemPrompt() string {
@@ -74,7 +80,7 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 	}
 
 	context := derivePromptConversationContext(currentTurn, recentMessages)
-	if context.PackageName != "" || context.Origin != "" || context.Destination != "" || context.RouteDirection != "" || context.ShouldRespondWithSCTable || context.ShortDateFollowUp {
+	if context.PackageName != "" || context.Origin != "" || context.Destination != "" || context.RouteDirection != "" || context.ShouldRespondWithSCTable || context.ShortDateFollowUp || context.TravelOptionChosenNow {
 		builder.WriteString("\nCONTEXTO DERIVADO\n")
 		if context.Origin != "" {
 			builder.WriteString(fmt.Sprintf("- Origem inferida: %s\n", context.Origin))
@@ -98,6 +104,10 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 		if context.DateChosenForDestination {
 			builder.WriteString("- Caso atual: o cliente escolheu uma data para um destino ja definido. Proximo passo correto: listar as opcoes de saida/origem com horarios para essa data e perguntar qual delas ele deseja.\n")
 			builder.WriteString("- Guardrail deste turno: nao fazer pergunta generica sobre cidade de saida se houver opcoes retornadas pela ferramenta.\n")
+		}
+		if context.TravelOptionChosenNow {
+			builder.WriteString("- Caso atual: o cliente acabou de escolher uma opcao de viagem. Proximo passo correto: perguntar se a passagem e so para ele ou se ha mais alguem incluso, e se existe crianca de 5 anos ou menos viajando.\n")
+			builder.WriteString("- Guardrail deste turno: nao pedir documento nem falar de pagamento ainda.\n")
 		}
 		if context.ShouldRespondWithSCTable {
 			builder.WriteString("- Caso atual: consulta ampla sobre Santa Catarina. Resposta esperada neste turno: devolver a tabela publica de cidades e valores e encerrar sem pergunta adicional.\n")
@@ -150,6 +160,9 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 			}
 			if filter.PackageName != "" && filter.Destination != "" && filter.Origin == "" && filter.TripDate != nil {
 				builder.WriteString("- Fluxo correto com este resultado: listar as opcoes de saida/origem com horarios para essa data e perguntar qual delas o cliente deseja.\n")
+			}
+			if filter.Origin != "" && filter.Destination != "" && filter.TripDate != nil {
+				builder.WriteString("- Fluxo correto com este resultado: a rota ja esta definida em nivel de cidade, data e horario. Antes de pedir documento, pergunte se a passagem e so para o cliente ou se ha mais alguem incluso e se existe crianca de 5 anos ou menos.\n")
 			}
 		}
 	}
@@ -258,6 +271,8 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 			builder.WriteString(fmt.Sprintf("- Instrucao operacional: %s\n", message))
 		}
 		builder.WriteString("- Se a reserva ja foi criada, nao peca os mesmos dados de novo; informe o codigo de reserva e siga para pagamento.\n")
+		builder.WriteString("- Proximo passo correto apos a reserva criada: perguntar se o cliente prefere o valor integral ou apenas o sinal de R$ 250 por passageiro pagante.\n")
+		builder.WriteString("- Guardrail deste turno: nao perguntar PIX, cartao ou pagar no embarque antes de o cliente escolher entre integral e sinal.\n")
 	}
 
 	if tools.Reschedule != nil {
@@ -449,6 +464,7 @@ type promptConversationContext struct {
 	ShortDateFollowUp        bool
 	DestinationChosenNow     bool
 	DateChosenForDestination bool
+	TravelOptionChosenNow    bool
 	ShouldRespondWithSCTable bool
 	ShouldAskSCOriginForMA   bool
 }
@@ -470,6 +486,7 @@ func derivePromptConversationContext(currentTurn string, recentMessages []map[st
 	tripDate := extractTripDate(currentTurn, time.Now().UTC())
 	destinationChosenNow := currentContext.Destination != "" && !strings.EqualFold(currentContext.Destination, historyContext.Destination)
 	dateChosenForDestination := tripDate != nil && merged.Destination != "" && merged.PackageName != "" && merged.Origin == "" && (historyContext.Destination != "" || destinationChosenNow)
+	travelOptionChosenNow := extractSelectedOptionIndex(currentTurn) > 0 || strings.Contains(folded, "essa opcao") || strings.Contains(folded, "essa viagem")
 
 	return promptConversationContext{
 		Origin:                   merged.Origin,
@@ -479,6 +496,7 @@ func derivePromptConversationContext(currentTurn string, recentMessages []map[st
 		ShortDateFollowUp:        looksLikeShortDateFollowUp(currentTurn),
 		DestinationChosenNow:     destinationChosenNow && tripDate == nil,
 		DateChosenForDestination: dateChosenForDestination,
+		TravelOptionChosenNow:    travelOptionChosenNow,
 		ShouldRespondWithSCTable: detectBroadTravelState(folded) == "SC" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
 		ShouldAskSCOriginForMA:   detectBroadTravelState(folded) == "MA" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
 	}

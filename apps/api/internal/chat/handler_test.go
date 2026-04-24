@@ -4531,6 +4531,9 @@ func TestReprocessUsesBookingCreateToolWhenCustomerChoosesPreviousOption(t *test
 	if !strings.Contains(runner.lastInput.UserPrompt, "codigo ABC12345") && !strings.Contains(runner.lastInput.UserPrompt, "ABC12345") {
 		t.Fatalf("expected prompt to include reservation code")
 	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "valor integral ou apenas o sinal de R$ 250 por passageiro pagante") {
+		t.Fatalf("expected prompt to guide integral-or-deposit choice after booking create")
+	}
 }
 
 func TestReprocessUsesPaymentCreateToolWhenCustomerAsksToGeneratePix(t *testing.T) {
