@@ -1320,11 +1320,37 @@ func extractEvolutionText(data EvolutionMessageData) string {
 
 func extractEvolutionMessageMetadata(data EvolutionMessageData) map[string]interface{} {
 	switch strings.TrimSpace(data.MessageType) {
+	case "imageMessage":
+		return extractEvolutionImageMetadata(data.Message.ImageMessage)
 	case "documentMessage":
 		return extractEvolutionDocumentMetadata(data.Message.DocumentMessage)
 	default:
 		return nil
 	}
+}
+
+func extractEvolutionImageMetadata(payload *EvolutionMediaMessage) map[string]interface{} {
+	if payload == nil {
+		return nil
+	}
+
+	metadata := map[string]interface{}{}
+	if caption := strings.TrimSpace(payload.Caption); caption != "" {
+		metadata["image_caption"] = caption
+	}
+	if mimeType := strings.TrimSpace(payload.MimeType); mimeType != "" {
+		metadata["image_mime_type"] = mimeType
+	}
+	if payload.FileLength > 0 {
+		metadata["image_file_length"] = int(payload.FileLength)
+	}
+	if url := firstNonEmptyString(payload.URL, payload.DirectPath); url != "" {
+		metadata["image_url"] = url
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
 }
 
 func extractEvolutionDocumentMetadata(payload map[string]interface{}) map[string]interface{} {

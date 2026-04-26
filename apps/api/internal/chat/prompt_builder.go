@@ -58,14 +58,31 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 	builder.WriteString(fmt.Sprintf("- Data/Hora UTC: %s\n", now))
 	currentTurn := strings.TrimSpace(asString(memory["current_turn_body"]))
 	builder.WriteString(fmt.Sprintf("- Mensagem atual do cliente: %q\n", currentTurn))
+	currentTurnKinds := asStringSlice(memory["current_turn_kinds"])
+	currentTurnMedia := normalizeMediaMemoryItems(memory["current_turn_media"])
+	if len(currentTurnKinds) > 0 {
+		builder.WriteString(fmt.Sprintf("- Tipos da mensagem atual: %s\n", strings.Join(currentTurnKinds, ", ")))
+	}
+	if len(currentTurnMedia) > 0 {
+		builder.WriteString(fmt.Sprintf("- Midia recebida no turno atual: %d arquivo(s)\n", len(currentTurnMedia)))
+	}
 
 	recentMessages := normalizeRecentMemoryMessages(memory["recent_messages"])
 	if len(recentMessages) > 0 {
 		builder.WriteString("\nHISTORICO RECENTE\n")
 		for _, message := range recentMessages {
 			direction := strings.TrimSpace(asString(message["direction"]))
+			kind := strings.ToUpper(strings.TrimSpace(asString(message["kind"])))
 			body := strings.TrimSpace(asString(message["body"]))
+			if body == "" && (kind == "" || kind == "TEXT") {
+				continue
+			}
 			if body == "" {
+				builder.WriteString(fmt.Sprintf("- %s [%s]: [sem texto]\n", direction, firstNonEmpty(kind, "TEXT")))
+				continue
+			}
+			if kind != "" && kind != "TEXT" {
+				builder.WriteString(fmt.Sprintf("- %s [%s]: %s\n", direction, kind, body))
 				continue
 			}
 			builder.WriteString(fmt.Sprintf("- %s: %s\n", direction, body))
@@ -514,6 +531,25 @@ func normalizeRecentMemoryMessages(value interface{}) []map[string]interface{} {
 				continue
 			}
 			items = append(items, message)
+		}
+		return items
+	default:
+		return nil
+	}
+}
+
+func normalizeMediaMemoryItems(value interface{}) []map[string]interface{} {
+	switch typed := value.(type) {
+	case []map[string]interface{}:
+		return typed
+	case []interface{}:
+		items := make([]map[string]interface{}, 0, len(typed))
+		for _, raw := range typed {
+			item, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			items = append(items, item)
 		}
 		return items
 	default:

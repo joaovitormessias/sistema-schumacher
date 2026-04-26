@@ -142,3 +142,77 @@ func TestParseBookingCreateInputUsesHistorySelectionAndPassengerDetailsOnConfirm
 		t.Fatalf("expected second passenger marked as lap child, got %+v", input.Passengers)
 	}
 }
+
+func TestParseBookingCreateInputUsesAssistantExtractedPassengerConfirmationOnHistory(t *testing.T) {
+	now := time.Now().UTC()
+	session := Session{
+		ContactKey:    "5549988709047",
+		CustomerPhone: "5549988709047",
+		CustomerName:  "Messias",
+	}
+	history := []Message{
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Achei estas opcoes para Ituporanga/SC.",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-4 * time.Minute),
+			Payload: map[string]interface{}{
+				"tool_context": map[string]interface{}{
+					toolNameAvailabilitySearch: buildAvailabilityToolResponsePayload(AvailabilitySearchResult{
+						Filter: AvailabilitySearchInput{
+							Destination: "Ituporanga/SC",
+							Qty:         1,
+							Limit:       5,
+						},
+						Results: []AvailabilitySearchItem{
+							{
+								TripID:                 "trip-1",
+								BoardStopID:            "board-1",
+								AlightStopID:           "alight-1",
+								OriginDisplayName:      "Moncao/MA",
+								DestinationDisplayName: "Ituporanga/SC",
+								OriginDepartTime:       "09:00",
+								TripDate:               "2026-04-26",
+							},
+						},
+					}),
+				},
+			},
+		},
+		{
+			Direction:        "INBOUND",
+			Body:             "a primeira",
+			ProcessingStatus: "PROCESSED",
+			ReceivedAt:       now.Add(-3 * time.Minute),
+		},
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Consegui identificar estes dados. Eles conferem?\n- Passageiro 1: Joao Vitor Messias | CPF | 06645648103",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-2 * time.Minute),
+		},
+	}
+
+	input, ok := parseBookingCreateInput(session, history, "isso", nil)
+	if !ok {
+		assistantBody := history[len(history)-1].Body
+		t.Fatalf(
+			"expected booking create input from assistant extraction history: selected_option=%d availability=%v assistant_passengers=%+v passenger_text=%q passengers=%+v qty=%d",
+			findLatestSelectedOptionIndex(history),
+			findLatestAvailabilityContext(history) != nil,
+			extractBookingCreatePassengers(assistantBody, session),
+			findLatestPassengerDetailsText(history, session),
+			extractBookingCreatePassengers(findLatestPassengerDetailsText(history, session), session),
+			extractPassengerQuantity(findLatestPassengerDetailsText(history, session)),
+		)
+	}
+	if len(input.Passengers) != 1 {
+		t.Fatalf("expected one passenger, got %+v", input.Passengers)
+	}
+	if input.Passengers[0].Name != "Joao Vitor Messias" {
+		t.Fatalf("unexpected passenger name: %+v", input.Passengers[0])
+	}
+	if input.Passengers[0].DocumentType != "CPF" || input.Passengers[0].Document != "06645648103" {
+		t.Fatalf("unexpected passenger document: %+v", input.Passengers[0])
+	}
+}

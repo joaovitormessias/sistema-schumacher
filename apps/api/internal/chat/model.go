@@ -445,12 +445,20 @@ type AgentRunner interface {
 	Run(ctx context.Context, input RunAgentInput) (RunAgentResult, error)
 }
 
+type AgentMediaInput struct {
+	Kind      string
+	URL       string
+	MimeType  string
+	MessageID string
+}
+
 type RunAgentInput struct {
-	Session        Session
-	CurrentTurnIDs []string
-	SystemPrompt   string
-	UserPrompt     string
-	IdempotencyKey string
+	Session          Session
+	CurrentTurnIDs   []string
+	CurrentTurnMedia []AgentMediaInput
+	SystemPrompt     string
+	UserPrompt       string
+	IdempotencyKey   string
 }
 
 type RunAgentResult struct {

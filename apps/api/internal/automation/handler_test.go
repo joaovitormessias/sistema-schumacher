@@ -1992,7 +1992,7 @@ func TestHandleEvolutionMessagesResponseBody(t *testing.T) {
 		"event":"messages.upsert",
 		"data":{
 			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-4"},
-			"message":{"imageMessage":{"caption":"foto do documento"}},
+			"message":{"imageMessage":{"caption":"foto do documento","mimetype":"image/jpeg","url":"https://files.example.test/doc.jpg"}},
 			"messageType":"imageMessage"
 		}
 	}`))
@@ -2009,6 +2009,15 @@ func TestHandleEvolutionMessagesResponseBody(t *testing.T) {
 	}
 	if out.MessageType != "imageMessage" {
 		t.Fatalf("expected imageMessage type, got %s", out.MessageType)
+	}
+	if chatSvc.lastInput.Message.Kind != "IMAGE" {
+		t.Fatalf("unexpected kind: %s", chatSvc.lastInput.Message.Kind)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["image_url"]; got != "https://files.example.test/doc.jpg" {
+		t.Fatalf("unexpected image url: %#v", got)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["image_mime_type"]; got != "image/jpeg" {
+		t.Fatalf("unexpected image mime type: %#v", got)
 	}
 }
 

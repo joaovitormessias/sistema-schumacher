@@ -315,8 +315,8 @@ type EvolutionMessageKey struct {
 type EvolutionMessageContent struct {
 	Conversation        string                        `json:"conversation"`
 	ExtendedTextMessage *EvolutionExtendedTextMessage `json:"extendedTextMessage"`
-	ImageMessage        *EvolutionCaptionMessage      `json:"imageMessage"`
-	VideoMessage        *EvolutionCaptionMessage      `json:"videoMessage"`
+	ImageMessage        *EvolutionMediaMessage        `json:"imageMessage"`
+	VideoMessage        *EvolutionMediaMessage        `json:"videoMessage"`
 	AudioMessage        map[string]interface{}        `json:"audioMessage"`
 	DocumentMessage     map[string]interface{}        `json:"documentMessage"`
 }
@@ -325,8 +325,12 @@ type EvolutionExtendedTextMessage struct {
 	Text string `json:"text"`
 }
 
-type EvolutionCaptionMessage struct {
-	Caption string `json:"caption"`
+type EvolutionMediaMessage struct {
+	Caption    string `json:"caption"`
+	URL        string `json:"url"`
+	DirectPath string `json:"directPath"`
+	MimeType   string `json:"mimetype"`
+	FileLength int64  `json:"fileLength"`
 }
 
 type EvolutionWebhookResult struct {

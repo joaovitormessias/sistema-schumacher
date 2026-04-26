@@ -50,8 +50,25 @@ func (r *OpenAIRunner) Run(ctx context.Context, input RunAgentInput) (RunAgentRe
 	requestPayload := map[string]interface{}{
 		"model":        r.model,
 		"instructions": input.SystemPrompt,
+		"input":        buildOpenAIInputContent(input),
+	}
+	result, err := r.runRequest(ctx, requestPayload, input.IdempotencyKey)
+	if err == nil {
+		return result, nil
+	}
+	if len(input.CurrentTurnMedia) == 0 {
+		return RunAgentResult{}, err
+	}
+
+	fallbackPayload := map[string]interface{}{
+		"model":        r.model,
+		"instructions": input.SystemPrompt,
 		"input":        input.UserPrompt,
 	}
+	return r.runRequest(ctx, fallbackPayload, input.IdempotencyKey)
+}
+
+func (r *OpenAIRunner) runRequest(ctx context.Context, requestPayload map[string]interface{}, idempotencyKey string) (RunAgentResult, error) {
 	body, err := json.Marshal(requestPayload)
 	if err != nil {
 		return RunAgentResult{}, err
@@ -63,7 +80,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, input RunAgentInput) (RunAgentRe
 	}
 	req.Header.Set("Authorization", "Bearer "+r.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	if trimmed := strings.TrimSpace(input.IdempotencyKey); trimmed != "" {
+	if trimmed := strings.TrimSpace(idempotencyKey); trimmed != "" {
 		req.Header.Set("X-Client-Request-Id", trimmed)
 	}
 
@@ -98,6 +115,37 @@ func (r *OpenAIRunner) Run(ctx context.Context, input RunAgentInput) (RunAgentRe
 		RequestPayload:     requestPayload,
 		ResponsePayload:    responsePayload,
 	}, nil
+}
+
+func buildOpenAIInputContent(input RunAgentInput) interface{} {
+	content := []map[string]interface{}{
+		{
+			"type": "input_text",
+			"text": input.UserPrompt,
+		},
+	}
+	for _, item := range input.CurrentTurnMedia {
+		if !strings.EqualFold(strings.TrimSpace(item.Kind), "IMAGE") {
+			continue
+		}
+		url := strings.TrimSpace(item.URL)
+		if url == "" {
+			continue
+		}
+		content = append(content, map[string]interface{}{
+			"type":      "input_image",
+			"image_url": url,
+		})
+	}
+	if len(content) == 1 {
+		return input.UserPrompt
+	}
+	return []map[string]interface{}{
+		{
+			"role":    "user",
+			"content": content,
+		},
+	}
 }
 
 func extractOpenAIResponseText(payload map[string]interface{}) string {

@@ -71,3 +71,34 @@ func TestBuildAgentUserPromptGuidesIntegralOrDepositAfterBookingCreate(t *testin
 		t.Fatalf("expected prompt to block generic payment-method question, got %q", prompt)
 	}
 }
+
+func TestBuildAgentUserPromptMentionsCurrentTurnMediaWithoutText(t *testing.T) {
+	session := Session{
+		Channel:       "WHATSAPP",
+		CustomerPhone: "5549988709047",
+		CustomerName:  "Messias",
+	}
+	memory := map[string]interface{}{
+		"current_turn_body":  "",
+		"current_turn_kinds": []string{"IMAGE"},
+		"current_turn_media": []map[string]interface{}{
+			{"kind": "IMAGE", "url": "https://files.example.test/rg.jpg", "mime_type": "image/jpeg"},
+		},
+		"recent_messages": []map[string]interface{}{
+			{"direction": "OUTBOUND", "kind": "TEXT", "body": "Pode enviar a foto legivel do documento."},
+			{"direction": "INBOUND", "kind": "IMAGE", "body": ""},
+		},
+	}
+
+	prompt := buildAgentUserPrompt(session, memory, agentToolContext{})
+
+	if !strings.Contains(prompt, "Tipos da mensagem atual: IMAGE") {
+		t.Fatalf("expected prompt to mention current turn kind, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Midia recebida no turno atual: 1 arquivo(s)") {
+		t.Fatalf("expected prompt to mention media count, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "INBOUND [IMAGE]: [sem texto]") {
+		t.Fatalf("expected prompt to preserve non-text history, got %q", prompt)
+	}
+}

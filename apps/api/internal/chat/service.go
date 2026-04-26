@@ -636,11 +636,12 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	systemPrompt := buildAgentSystemPrompt()
 	userPrompt := buildAgentUserPrompt(persisted.Session, memory, toolContext)
 	run, err := s.runner.Run(ctx, RunAgentInput{
-		Session:        persisted.Session,
-		CurrentTurnIDs: candidateMessageIDs(candidates),
-		SystemPrompt:   systemPrompt,
-		UserPrompt:     userPrompt,
-		IdempotencyKey: draftID,
+		Session:          persisted.Session,
+		CurrentTurnIDs:   candidateMessageIDs(candidates),
+		CurrentTurnMedia: collectCandidateMedia(candidates),
+		SystemPrompt:     systemPrompt,
+		UserPrompt:       userPrompt,
+		IdempotencyKey:   draftID,
 	})
 	if err != nil {
 		return ReprocessResult{}, fmt.Errorf("%w: %v", ErrAgentRunFailed, err)

@@ -90,6 +90,7 @@ func buildReprocessMemory(session Session, history []Message, candidates []Messa
 		items = append(items, map[string]interface{}{
 			"id":                message.ID,
 			"direction":         message.Direction,
+			"kind":              strings.TrimSpace(message.Kind),
 			"body":              truncateBufferBody(body),
 			"processing_status": message.ProcessingStatus,
 			"created_at":        message.CreatedAt.UTC().Format(time.RFC3339Nano),
@@ -107,6 +108,8 @@ func buildReprocessMemory(session Session, history []Message, candidates []Messa
 		"customer_phone":           session.CustomerPhone,
 		"customer_name":            session.CustomerName,
 		"current_turn_body":        joinCandidateBodies(candidates),
+		"current_turn_kinds":       candidateKinds(candidates),
+		"current_turn_media":       candidateMediaMemory(candidates),
 		"current_turn_message_ids": candidateMessageIDs(candidates),
 		"last_customer_message":    lastCustomerMessage,
 		"last_assistant_message":   lastAssistantMessage,
@@ -163,6 +166,31 @@ func candidateMessageIDs(messages []Message) []string {
 	return ids
 }
 
+func candidateKinds(messages []Message) []string {
+	kinds := make([]string, 0, len(messages))
+	for _, message := range messages {
+		kind := strings.ToUpper(strings.TrimSpace(message.Kind))
+		if kind == "" {
+			kind = "TEXT"
+		}
+		kinds = append(kinds, kind)
+	}
+	return kinds
+}
+
+func candidateMediaMemory(messages []Message) []map[string]interface{} {
+	items := make([]map[string]interface{}, 0, len(messages))
+	for _, item := range collectCandidateMedia(messages) {
+		items = append(items, map[string]interface{}{
+			"kind":       item.Kind,
+			"url":        item.URL,
+			"mime_type":  item.MimeType,
+			"message_id": item.MessageID,
+		})
+	}
+	return items
+}
+
 func joinCandidateBodies(messages []Message) string {
 	parts := make([]string, 0, len(messages))
 	for _, message := range messages {
@@ -173,6 +201,43 @@ func joinCandidateBodies(messages []Message) string {
 		parts = append(parts, body)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func collectCandidateMedia(messages []Message) []AgentMediaInput {
+	items := make([]AgentMediaInput, 0, len(messages))
+	for _, message := range messages {
+		kind := strings.ToUpper(strings.TrimSpace(message.Kind))
+		normalized := message.NormalizedPayload
+		switch kind {
+		case "IMAGE":
+			if url := strings.TrimSpace(asString(normalized["image_url"])); isHTTPURL(url) {
+				items = append(items, AgentMediaInput{
+					Kind:      "IMAGE",
+					URL:       url,
+					MimeType:  strings.TrimSpace(asString(normalized["image_mime_type"])),
+					MessageID: message.ID,
+				})
+			}
+		case "DOCUMENT":
+			mimeType := strings.TrimSpace(asString(normalized["document_mime_type"]))
+			if strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+				if url := strings.TrimSpace(asString(normalized["document_url"])); isHTTPURL(url) {
+					items = append(items, AgentMediaInput{
+						Kind:      "IMAGE",
+						URL:       url,
+						MimeType:  mimeType,
+						MessageID: message.ID,
+					})
+				}
+			}
+		}
+	}
+	return items
+}
+
+func isHTTPURL(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://")
 }
 
 func buildAgentDraftIdempotencyKey(sessionID string, messageIDs []string) string {
@@ -188,7 +253,7 @@ func evaluateDraftAutoSendPolicy(candidates []Message, toolCalls []ToolCall) dra
 	if len(toolCalls) > 0 && !hasOnlyAutoSendSafeToolCalls(toolCalls) {
 		reasons = append(reasons, draftAutoSendReasonToolCall)
 	}
-	if hasNonTextCandidate(candidates) {
+	if hasBlockingNonTextCandidate(candidates) {
 		reasons = append(reasons, draftAutoSendReasonNonTextTurn)
 	}
 
@@ -224,16 +289,20 @@ func isAutoSendSafeToolCall(call ToolCall) bool {
 	}
 }
 
-func hasNonTextCandidate(candidates []Message) bool {
+func hasBlockingNonTextCandidate(candidates []Message) bool {
 	for _, message := range candidates {
 		kind := strings.ToUpper(strings.TrimSpace(message.Kind))
-		if kind != "" && kind != "TEXT" {
-			return true
-		}
 		normalized := message.NormalizedPayload
-		if strings.TrimSpace(asString(normalized["document_file_name"])) != "" ||
-			strings.TrimSpace(asString(normalized["document_url"])) != "" ||
-			strings.TrimSpace(asString(normalized["document_mime_type"])) != "" {
+		switch kind {
+		case "", "TEXT":
+			if strings.TrimSpace(asString(normalized["document_file_name"])) != "" ||
+				strings.TrimSpace(asString(normalized["document_url"])) != "" ||
+				strings.TrimSpace(asString(normalized["document_mime_type"])) != "" {
+				return true
+			}
+		case "IMAGE":
+			continue
+		default:
 			return true
 		}
 	}

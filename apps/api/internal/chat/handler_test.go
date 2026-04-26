@@ -454,6 +454,66 @@ func TestGetCurrentDraftReturnsReviewRequiredForDocumentTurn(t *testing.T) {
 	}
 }
 
+func TestGetCurrentDraftAllowsAutoSendForImageTurn(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Consegui identificar estes dados. Eles conferem?",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp-draft-view-image-1",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner)
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511777000000",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			Kind:              "IMAGE",
+			ProviderMessageID: "msg-draft-view-image-1",
+			IdempotencyKey:    "idem-draft-view-image-1",
+			Body:              "",
+			NormalizedPayload: map[string]interface{}{
+				"image_url":       "https://files.example.test/rg-frente.jpg",
+				"image_mime_type": "image/jpeg",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+	reprocessed, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
+	if err != nil {
+		t.Fatalf("reprocess message: %v", err)
+	}
+	if reprocessed.Draft == nil {
+		t.Fatalf("expected draft to be generated")
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/chat/sessions/"+ingested.Session.ID+"/draft", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+
+	var out CurrentDraftResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal current draft: %v", err)
+	}
+	if out.AutoSendStatus != draftAutoSendStatusEligible {
+		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusEligible, out.AutoSendStatus)
+	}
+	if len(out.AutoSendReasons) != 0 {
+		t.Fatalf("expected no auto_send_reasons for image turn, got %+v", out.AutoSendReasons)
+	}
+}
+
 func TestGetCurrentDraftReturnsAutoSendRetryDetails(t *testing.T) {
 	store := newFakeStore()
 	now := time.Now().UTC()
