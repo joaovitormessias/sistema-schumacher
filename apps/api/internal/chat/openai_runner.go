@@ -21,17 +21,19 @@ var (
 )
 
 type OpenAIRunner struct {
-	baseURL string
-	apiKey  string
-	model   string
-	client  *http.Client
+	baseURL     string
+	apiKey      string
+	model       string
+	visionModel string
+	client      *http.Client
 }
 
 func NewOpenAIRunner(cfg config.Config) *OpenAIRunner {
 	return &OpenAIRunner{
-		baseURL: "https://api.openai.com/v1",
-		apiKey:  strings.TrimSpace(cfg.OpenAIAPIKey),
-		model:   strings.TrimSpace(cfg.OpenAIModel),
+		baseURL:     "https://api.openai.com/v1",
+		apiKey:      strings.TrimSpace(cfg.OpenAIAPIKey),
+		model:       strings.TrimSpace(cfg.OpenAIModel),
+		visionModel: strings.TrimSpace(cfg.OpenAIVisionModel),
 		client: &http.Client{
 			Timeout: 45 * time.Second,
 		},
@@ -48,7 +50,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, input RunAgentInput) (RunAgentRe
 	}
 
 	requestPayload := map[string]interface{}{
-		"model":        r.model,
+		"model":        r.requestModel(input),
 		"instructions": input.SystemPrompt,
 		"input":        buildOpenAIInputContent(input),
 	}
@@ -66,6 +68,15 @@ func (r *OpenAIRunner) Run(ctx context.Context, input RunAgentInput) (RunAgentRe
 		"input":        input.UserPrompt,
 	}
 	return r.runRequest(ctx, fallbackPayload, input.IdempotencyKey)
+}
+
+func (r *OpenAIRunner) requestModel(input RunAgentInput) string {
+	if len(input.CurrentTurnMedia) > 0 {
+		if model := strings.TrimSpace(r.visionModel); model != "" {
+			return model
+		}
+	}
+	return r.model
 }
 
 func (r *OpenAIRunner) runRequest(ctx context.Context, requestPayload map[string]interface{}, idempotencyKey string) (RunAgentResult, error) {
@@ -110,7 +121,7 @@ func (r *OpenAIRunner) runRequest(ctx context.Context, requestPayload map[string
 
 	return RunAgentResult{
 		ReplyText:          replyText,
-		Model:              strings.TrimSpace(r.model),
+		Model:              strings.TrimSpace(asString(requestPayload["model"])),
 		ProviderResponseID: strings.TrimSpace(asString(responsePayload["id"])),
 		RequestPayload:     requestPayload,
 		ResponsePayload:    responsePayload,

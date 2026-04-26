@@ -69,6 +69,9 @@ func TestOpenAIRunnerRunIncludesImageInputWhenCurrentTurnHasMedia(t *testing.T) 
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
+		if payload["model"] != "gpt-vision-test" {
+			t.Fatalf("expected vision model gpt-vision-test, got %v", payload["model"])
+		}
 
 		items, ok := payload["input"].([]interface{})
 		if !ok || len(items) != 1 {
@@ -95,8 +98,9 @@ func TestOpenAIRunnerRunIncludesImageInputWhenCurrentTurnHasMedia(t *testing.T) 
 	defer server.Close()
 
 	runner := NewOpenAIRunner(config.Config{
-		OpenAIAPIKey: "sk-test",
-		OpenAIModel:  "gpt-test",
+		OpenAIAPIKey:      "sk-test",
+		OpenAIModel:       "gpt-test",
+		OpenAIVisionModel: "gpt-vision-test",
 	})
 	runner.baseURL = server.URL
 
@@ -112,6 +116,9 @@ func TestOpenAIRunnerRunIncludesImageInputWhenCurrentTurnHasMedia(t *testing.T) 
 	}
 	if result.ReplyText != "Dados extraidos" {
 		t.Fatalf("expected image reply text, got %s", result.ReplyText)
+	}
+	if result.Model != "gpt-vision-test" {
+		t.Fatalf("expected result model gpt-vision-test, got %s", result.Model)
 	}
 }
 

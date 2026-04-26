@@ -326,11 +326,11 @@ type EvolutionExtendedTextMessage struct {
 }
 
 type EvolutionMediaMessage struct {
-	Caption    string `json:"caption"`
-	URL        string `json:"url"`
-	DirectPath string `json:"directPath"`
-	MimeType   string `json:"mimetype"`
-	FileLength int64  `json:"fileLength"`
+	Caption    string      `json:"caption"`
+	URL        string      `json:"url"`
+	DirectPath string      `json:"directPath"`
+	MimeType   string      `json:"mimetype"`
+	FileLength interface{} `json:"fileLength"`
 }
 
 type EvolutionWebhookResult struct {

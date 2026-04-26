@@ -1341,8 +1341,8 @@ func extractEvolutionImageMetadata(payload *EvolutionMediaMessage) map[string]in
 	if mimeType := strings.TrimSpace(payload.MimeType); mimeType != "" {
 		metadata["image_mime_type"] = mimeType
 	}
-	if payload.FileLength > 0 {
-		metadata["image_file_length"] = int(payload.FileLength)
+	if fileLength := intValue(payload.FileLength); fileLength > 0 {
+		metadata["image_file_length"] = fileLength
 	}
 	if url := firstNonEmptyString(payload.URL, payload.DirectPath); url != "" {
 		metadata["image_url"] = url

@@ -2021,6 +2021,44 @@ func TestHandleEvolutionMessagesResponseBody(t *testing.T) {
 	}
 }
 
+func TestHandleEvolutionMessagesAcceptsImageWithStructuredFileLength(t *testing.T) {
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-4A"},
+			"message":{"imageMessage":{
+				"caption":"foto do rg",
+				"mimetype":"image/jpeg",
+				"url":"https://files.example.test/doc-structured.jpg",
+				"fileLength":{"low":48123,"high":0,"unsigned":true}
+			}},
+			"messageType":"imageMessage"
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	if chatSvc.lastInput.Message.Kind != "IMAGE" {
+		t.Fatalf("unexpected kind: %s", chatSvc.lastInput.Message.Kind)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["image_url"]; got != "https://files.example.test/doc-structured.jpg" {
+		t.Fatalf("unexpected image url: %#v", got)
+	}
+	if _, ok := chatSvc.lastInput.Message.NormalizedPayload["image_file_length"]; ok {
+		t.Fatalf("did not expect structured file length to break into invalid numeric metadata: %#v", chatSvc.lastInput.Message.NormalizedPayload["image_file_length"])
+	}
+}
+
 func TestHandleEvolutionMessagesDocumentPDFMetadata(t *testing.T) {
 	chatSvc := &fakeChatIngestor{}
 	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{}))
