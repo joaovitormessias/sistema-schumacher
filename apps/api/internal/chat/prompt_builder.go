@@ -21,9 +21,11 @@ const defaultAgentSystemPrompt = `
 	- Se faltarem varios dados criticos, faca uma unica pergunta combo curta.
 	- Se faltar apenas um dado critico, pergunte apenas esse dado.
 	- Se a consulta for aberta, responda primeiro e refine depois.
-# CONSULTAS:
-	Se a rota ou cidade estiver fora do pacote atendido, oriente contato humano no numero +55 49 9886-2222.
-	Se a consulta ampla for sobre Santa Catarina ou SC, responda direto com a tabela publica:
+	# CONSULTAS:
+		Se a rota ou cidade estiver fora do pacote atendido, oriente contato humano no numero +55 49 9886-2222.
+		Se o cliente informar destino ou cidade fora de Santa Catarina/SC, Maranhao/MA ou das cidades suportadas desses pacotes, nao pergunte data, cidade ou disponibilidade.
+		Nesse caso, responda que a rota nao esta disponivel no atendimento automatico e oriente contato humano no numero +55 49 9886-2222.
+		Se a consulta ampla for sobre Santa Catarina ou SC, responda direto com a tabela publica:
 		- Fraiburgo R$ 950;
 		- Monte Carlo R$ 950;
 		- Videira R$ 950;
@@ -140,7 +142,7 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 			builder.WriteString("- Guardrail deste turno: nao fazer pergunta generica sobre cidade de saida se houver opcoes retornadas pela ferramenta.\n")
 		}
 		if context.TravelOptionChosenNow {
-			builder.WriteString("- Caso atual: o cliente acabou de escolher uma opcao de viagem. Proximo passo correto: perguntar se a passagem e so para ele ou se ha mais passageiros, e se existe crianca de 5 anos entre esses passageiros.\n")
+			builder.WriteString("- Caso atual: o cliente acabou de escolher uma opcao de viagem. Proximo passo correto: perguntar se a passagem e so para ele ou se ha mais alguem incluso, e se existe crianca de 5 anos entre esses passageiros.\n")
 			builder.WriteString("- Guardrail deste turno: nao pedir documento nem falar de pagamento ainda.\n")
 		}
 		if context.ShouldRespondWithSCTable {

@@ -3611,87 +3611,111 @@ func TestReprocessUsesPackageAvailabilityForBroadStateDateLookup(t *testing.T) {
 	}
 }
 
-func TestReprocessGeneratesSupportDraftForUnsupportedBroadState(t *testing.T) {
-	store := newFakeStore()
-	runner := &fakeAgentRunner{
-		enabled: true,
-		result: RunAgentResult{
-			ReplyText:          "Qual cidade voce quer consultar?",
-			Model:              "gpt-test",
-			ProviderResponseID: "resp-should-not-run",
-		},
-	}
-	searcher := &fakeAvailabilitySearcher{enabled: true}
-	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
-
-	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
-		ContactKey: "5511999999999",
-		Message: IngestMessagePayload{
-			Direction:         "INBOUND",
-			ProviderMessageID: "msg-unsupported-ba-1",
-			IdempotencyKey:    "idem-unsupported-ba-1",
-			Body:              "tem passagem para Bahia?",
-		},
-	})
-	if err != nil {
-		t.Fatalf("ingest message: %v", err)
+func TestReprocessGeneratesSupportDraftForUnsupportedExplicitDestinations(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "broad_state", body: "quero passagem para bahia"},
+		{name: "unsupported_city", body: "quero passagem pra ilheus"},
+		{name: "bare_from_to", body: "jaragua do sul para ilheus"},
+		{name: "travel_availability", body: "tem viagem para salvador"},
+		{name: "go_to_city", body: "quero ir para curitiba"},
 	}
 
-	out, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
-	if err != nil {
-		t.Fatalf("reprocess: %v", err)
-	}
-	if runner.calls != 0 {
-		t.Fatalf("expected deterministic support draft without agent run, got %d calls", runner.calls)
-	}
-	if searcher.calls != 0 {
-		t.Fatalf("expected no availability search for unsupported package, got %d calls", searcher.calls)
-	}
-	if len(out.ToolCalls) != 0 {
-		t.Fatalf("expected no tool calls for unsupported package, got %d", len(out.ToolCalls))
-	}
-	if out.Draft == nil {
-		t.Fatalf("expected support draft")
-	}
-	if !strings.Contains(out.Draft.Body, "nao ha passagens disponiveis para Bahia") {
-		t.Fatalf("expected Bahia support message, got %q", out.Draft.Body)
-	}
-	if !strings.Contains(out.Draft.Body, unsupportedPackageSupportPhone) {
-		t.Fatalf("expected support phone in message, got %q", out.Draft.Body)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			runner := &fakeAgentRunner{
+				enabled: true,
+				result: RunAgentResult{
+					ReplyText:          "Qual cidade voce quer consultar?",
+					Model:              "gpt-test",
+					ProviderResponseID: "resp-should-not-run",
+				},
+			}
+			searcher := &fakeAvailabilitySearcher{enabled: true}
+			pricingSearcher := &fakePricingQuoteSearcher{enabled: true}
+			svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher, pricingSearcher)
+
+			ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+				ContactKey: "5511999999999",
+				Message: IngestMessagePayload{
+					Direction:         "INBOUND",
+					ProviderMessageID: "msg-unsupported-" + tc.name,
+					IdempotencyKey:    "idem-unsupported-" + tc.name,
+					Body:              tc.body,
+				},
+			})
+			if err != nil {
+				t.Fatalf("ingest message: %v", err)
+			}
+
+			out, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
+			if err != nil {
+				t.Fatalf("reprocess: %v", err)
+			}
+			if runner.calls != 0 {
+				t.Fatalf("expected deterministic support draft without agent run, got %d calls", runner.calls)
+			}
+			if searcher.calls != 0 {
+				t.Fatalf("expected no availability search for unsupported destination, got %d calls", searcher.calls)
+			}
+			if pricingSearcher.calls != 0 {
+				t.Fatalf("expected no pricing search for unsupported destination, got %d calls", pricingSearcher.calls)
+			}
+			if len(out.ToolCalls) != 0 {
+				t.Fatalf("expected no tool calls for unsupported destination, got %d", len(out.ToolCalls))
+			}
+			if out.Draft == nil {
+				t.Fatalf("expected support draft")
+			}
+			if !strings.Contains(out.Draft.Body, "atendemos apenas viagens dos pacotes Santa Catarina e Maranhao") {
+				t.Fatalf("expected supported packages message, got %q", out.Draft.Body)
+			}
+			if !strings.Contains(out.Draft.Body, unsupportedPackageSupportPhone) {
+				t.Fatalf("expected support phone in message, got %q", out.Draft.Body)
+			}
+			for _, blockedTerm := range []string{"data", "cidade", "mes", "disponibilidade"} {
+				if strings.Contains(foldChatText(out.Draft.Body), " "+blockedTerm+" ") {
+					t.Fatalf("support draft should not ask about %s: %q", blockedTerm, out.Draft.Body)
+				}
+			}
+		})
 	}
 }
 
-func TestReprocessGeneratesSupportDraftForUnsupportedRouteUF(t *testing.T) {
-	store := newFakeStore()
-	runner := &fakeAgentRunner{enabled: true}
-	searcher := &fakeAvailabilitySearcher{enabled: true}
-	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
-
-	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
-		ContactKey: "5511999999999",
-		Message: IngestMessagePayload{
-			Direction:         "INBOUND",
-			ProviderMessageID: "msg-unsupported-salvador-1",
-			IdempotencyKey:    "idem-unsupported-salvador-1",
-			Body:              "quero passagem de Videira/SC para Salvador/BA",
-		},
-	})
-	if err != nil {
-		t.Fatalf("ingest message: %v", err)
+func TestInferUnsupportedPackageQueryAllowsGenericAndSupportedDestinations(t *testing.T) {
+	cases := []struct {
+		text        string
+		unsupported bool
+	}{
+		{text: "quero passagem"},
+		{text: "tem viagem?"},
+		{text: "quero viajar"},
+		{text: "quero passagem para Santa Catarina"},
+		{text: "quero passagem para SC"},
+		{text: "quero passagem para Maranhao"},
+		{text: "quero passagem para MA"},
+		{text: "quero passagem para Chapeco"},
+		{text: "quero passagem para Fraiburgo"},
+		{text: "quero passagem para Santa Ines"},
+		{text: "qual o valor de Videira/SC para Sao Luis/MA em 10/05 para 2 pessoas?"},
+		{text: "quero reagendar a reserva ABC12345 para 12/06/2026"},
+		{text: "quero passagem para Bahia", unsupported: true},
+		{text: "quero passagem pra Ilheus", unsupported: true},
+		{text: "Jaragua do Sul para Ilheus", unsupported: true},
+		{text: "tem viagem para Salvador", unsupported: true},
+		{text: "quero ir para Curitiba", unsupported: true},
 	}
 
-	out, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
-	if err != nil {
-		t.Fatalf("reprocess: %v", err)
-	}
-	if runner.calls != 0 {
-		t.Fatalf("expected deterministic support draft without agent run, got %d calls", runner.calls)
-	}
-	if searcher.calls != 0 {
-		t.Fatalf("expected no availability search for unsupported UF route, got %d calls", searcher.calls)
-	}
-	if out.Draft == nil || !strings.Contains(out.Draft.Body, "Salvador/BA") {
-		t.Fatalf("expected support draft mentioning Salvador/BA, got %+v", out.Draft)
+	for _, tc := range cases {
+		t.Run(tc.text, func(t *testing.T) {
+			_, unsupported := inferUnsupportedPackageQuery(tc.text)
+			if unsupported != tc.unsupported {
+				t.Fatalf("expected unsupported=%v for %q, got %v", tc.unsupported, tc.text, unsupported)
+			}
+		})
 	}
 }
 
