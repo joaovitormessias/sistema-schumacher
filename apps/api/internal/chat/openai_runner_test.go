@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -64,6 +65,12 @@ func TestOpenAIRunnerRun(t *testing.T) {
 }
 
 func TestOpenAIRunnerRunIncludesImageInputWhenCurrentTurnHasMedia(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("fake-image-binary"))
+	}))
+	defer imageServer.Close()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var payload map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -86,7 +93,8 @@ func TestOpenAIRunnerRunIncludesImageInputWhenCurrentTurnHasMedia(t *testing.T) 
 			t.Fatalf("expected text + image content, got %#v", message["content"])
 		}
 		image, ok := content[1].(map[string]interface{})
-		if !ok || image["type"] != "input_image" || image["image_url"] != "https://files.example.test/rg.jpg" {
+		expectedDataURL := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("fake-image-binary"))
+		if !ok || image["type"] != "input_image" || image["image_url"] != expectedDataURL {
 			t.Fatalf("unexpected image payload: %#v", content[1])
 		}
 
@@ -108,7 +116,7 @@ func TestOpenAIRunnerRunIncludesImageInputWhenCurrentTurnHasMedia(t *testing.T) 
 		SystemPrompt: "system",
 		UserPrompt:   "user",
 		CurrentTurnMedia: []AgentMediaInput{
-			{Kind: "IMAGE", URL: "https://files.example.test/rg.jpg", MimeType: "image/jpeg"},
+			{Kind: "IMAGE", URL: imageServer.URL, MimeType: "image/jpeg"},
 		},
 	})
 	if err != nil {

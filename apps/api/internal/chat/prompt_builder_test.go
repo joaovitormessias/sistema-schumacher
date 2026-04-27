@@ -102,3 +102,36 @@ func TestBuildAgentUserPromptMentionsCurrentTurnMediaWithoutText(t *testing.T) {
 		t.Fatalf("expected prompt to preserve non-text history, got %q", prompt)
 	}
 }
+
+func TestBuildAgentUserPromptGuidesImageExtractionAndMissingPassengerDocuments(t *testing.T) {
+	session := Session{
+		Channel:       "WHATSAPP",
+		CustomerPhone: "5549988709047",
+		CustomerName:  "Messias",
+	}
+	memory := map[string]interface{}{
+		"current_turn_body":  "",
+		"current_turn_kinds": []string{"IMAGE"},
+		"current_turn_media": []map[string]interface{}{
+			{"kind": "IMAGE", "url": "https://files.example.test/rg.jpg", "mime_type": "image/jpeg"},
+		},
+		"recent_messages": []map[string]interface{}{
+			{"direction": "INBOUND", "body": "primeira opcao"},
+			{"direction": "OUTBOUND", "body": "A passagem e so para voce ou ha mais passageiros? Tem crianca de ate 5 anos ou menos viajando?"},
+			{"direction": "INBOUND", "body": "eu e minha esposa"},
+			{"direction": "OUTBOUND", "body": "Pode enviar os nomes completos e os documentos dos dois. Se preferir, pode mandar foto legivel do documento."},
+		},
+	}
+
+	prompt := buildAgentUserPrompt(session, memory, agentToolContext{})
+
+	if !strings.Contains(prompt, "Primeiro tente extrair nome completo + tipo + numero") {
+		t.Fatalf("expected prompt to force extraction first, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Quantidad") || !strings.Contains(prompt, "2") {
+		t.Fatalf("expected prompt to mention expected passenger count, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "peca apenas o documento do(s) passageiro(s) restante(s)") {
+		t.Fatalf("expected prompt to ask only for missing passenger documents, got %q", prompt)
+	}
+}

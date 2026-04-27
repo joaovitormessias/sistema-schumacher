@@ -17,6 +17,7 @@ var (
 	passengerCNHPattern          = regexp.MustCompile(`(?i)\bcnh\b[^A-Z0-9]*([A-Z0-9.\-]{4,20})`)
 	passengerBirthRecordPattern  = regexp.MustCompile(`(?i)\b(?:certid[aã]o(?: de nascimento)?|matr[ií]cula)\b[^A-Z0-9]*([A-Z0-9.\-]{8,40})`)
 	passengerLooseCPFLinePattern = regexp.MustCompile(`(?i)^\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' ]{3,100}?)\s+([0-9.\-]{11,14})\s*$`)
+	passengerWordQtyPattern      = regexp.MustCompile(`\b(um|uma|dois|duas|tres|quatro|cinco)\s+(?:pessoas?|passageiros?|passagens?|assentos?|lugares?)\b`)
 )
 
 func parseBookingCreateInput(session Session, history []Message, text string, currentAvailability *AvailabilitySearchResult) (BookingCreateInput, bool) {
@@ -44,10 +45,7 @@ func parseBookingCreateInput(session Session, history []Message, text string, cu
 		return BookingCreateInput{}, false
 	}
 
-	qty := extractPassengerQuantity(body)
-	if qty <= 0 {
-		qty = extractPassengerQuantity(passengerSource)
-	}
+	qty := inferExpectedPassengerCount(history, body, passengerSource)
 	if qty <= 0 {
 		qty = len(passengers)
 	}
@@ -314,6 +312,95 @@ func extractBookingPassengerDocument(text string) (string, string) {
 		}
 	}
 	return "", ""
+}
+
+func inferExpectedPassengerCount(history []Message, texts ...string) int {
+	for _, text := range texts {
+		if qty := inferPassengerQuantityFromFreeText(text); qty > 0 {
+			return qty
+		}
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Direction != "INBOUND" {
+			continue
+		}
+		if qty := inferPassengerQuantityFromFreeText(history[i].Body); qty > 0 {
+			return qty
+		}
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if qty := inferPassengerQuantityFromFreeText(history[i].Body); qty > 0 {
+			return qty
+		}
+	}
+	return 0
+}
+
+func inferPassengerQuantityFromFreeText(text string) int {
+	if qty := extractPassengerQuantity(text); qty > 0 {
+		return qty
+	}
+
+	folded := foldChatText(text)
+	if folded == "" {
+		return 0
+	}
+
+	for _, pattern := range []string{
+		"so eu",
+		"so pra mim",
+		"so para mim",
+		"apenas eu",
+		"apenas pra mim",
+		"apenas para mim",
+		"somente eu",
+		"somente pra mim",
+		"somente para mim",
+		"sou eu",
+	} {
+		if strings.Contains(folded, pattern) {
+			return 1
+		}
+	}
+
+	for _, pattern := range []string{
+		"eu e minha",
+		"eu e meu",
+		"pra mim e minha",
+		"pra mim e meu",
+		"para mim e minha",
+		"para mim e meu",
+		"eu e mais uma pessoa",
+		"eu e mais um passageiro",
+		"eu e mais um acompanhante",
+		"os dois",
+		"as duas",
+		"dos dois",
+		"das duas",
+		"nos dois",
+		"nos duas",
+	} {
+		if strings.Contains(folded, pattern) {
+			return 2
+		}
+	}
+
+	if match := passengerWordQtyPattern.FindStringSubmatch(folded); len(match) == 2 {
+		switch match[1] {
+		case "um", "uma":
+			return 1
+		case "dois", "duas":
+			return 2
+		case "tres":
+			return 3
+		case "quatro":
+			return 4
+		case "cinco":
+			return 5
+		}
+	}
+
+	return 0
 }
 
 func normalizeDigits(value string) string {

@@ -3,6 +3,7 @@ package chat
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,8 @@ var (
 	ErrOpenAIRunFailed           = errors.New("openai agent run failed")
 	ErrOpenAIEmptyReply          = errors.New("openai agent returned empty reply")
 )
+
+const maxInlineImageBytes = 8 * 1024 * 1024
 
 type OpenAIRunner struct {
 	baseURL     string
@@ -52,7 +55,7 @@ func (r *OpenAIRunner) Run(ctx context.Context, input RunAgentInput) (RunAgentRe
 	requestPayload := map[string]interface{}{
 		"model":        r.requestModel(input),
 		"instructions": input.SystemPrompt,
-		"input":        buildOpenAIInputContent(input),
+		"input":        buildOpenAIInputContent(ctx, r.client, input),
 	}
 	result, err := r.runRequest(ctx, requestPayload, input.IdempotencyKey)
 	if err == nil {
@@ -128,7 +131,7 @@ func (r *OpenAIRunner) runRequest(ctx context.Context, requestPayload map[string
 	}, nil
 }
 
-func buildOpenAIInputContent(input RunAgentInput) interface{} {
+func buildOpenAIInputContent(ctx context.Context, client *http.Client, input RunAgentInput) interface{} {
 	content := []map[string]interface{}{
 		{
 			"type": "input_text",
@@ -139,13 +142,14 @@ func buildOpenAIInputContent(input RunAgentInput) interface{} {
 		if !strings.EqualFold(strings.TrimSpace(item.Kind), "IMAGE") {
 			continue
 		}
-		url := strings.TrimSpace(item.URL)
-		if url == "" {
+		imageURL := resolveOpenAIImageURL(ctx, client, item)
+		if imageURL == "" {
 			continue
 		}
 		content = append(content, map[string]interface{}{
 			"type":      "input_image",
-			"image_url": url,
+			"image_url": imageURL,
+			"detail":    "high",
 		})
 	}
 	if len(content) == 1 {
@@ -157,6 +161,60 @@ func buildOpenAIInputContent(input RunAgentInput) interface{} {
 			"content": content,
 		},
 	}
+}
+
+func resolveOpenAIImageURL(ctx context.Context, client *http.Client, item AgentMediaInput) string {
+	url := strings.TrimSpace(item.URL)
+	if url == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(url), "data:") {
+		return url
+	}
+	if client == nil || !isHTTPURL(url) {
+		return url
+	}
+	if dataURL, err := fetchImageAsDataURL(ctx, client, url, item.MimeType); err == nil {
+		return dataURL
+	}
+	return url
+}
+
+func fetchImageAsDataURL(ctx context.Context, client *http.Client, url string, mimeType string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxInlineImageBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) == 0 {
+		return "", errors.New("empty image body")
+	}
+	if len(body) > maxInlineImageBytes {
+		return "", errors.New("image too large to inline")
+	}
+
+	resolvedMime := strings.TrimSpace(mimeType)
+	if resolvedMime == "" {
+		resolvedMime = strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
+	}
+	if resolvedMime == "" {
+		resolvedMime = http.DetectContentType(body)
+	}
+
+	return "data:" + resolvedMime + ";base64," + base64.StdEncoding.EncodeToString(body), nil
 }
 
 func extractOpenAIResponseText(payload map[string]interface{}) string {

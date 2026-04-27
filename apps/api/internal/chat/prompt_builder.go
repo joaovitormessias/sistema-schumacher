@@ -36,7 +36,9 @@ Mesmo que o cliente envie nome ou documento cedo demais, primeiro confirme quant
 Na reserva, aceite nome completo + documento digitados ou foto legivel do documento.
 Para foto: RG e CNH pedem frente e verso; certidao pede ao menos a frente.
 Na extracao por foto, use a hierarquia CPF > RG > matricula da certidao > numero da CNH como fallback.
+Se o cliente enviar foto depois que voce pediu documento, tente extrair primeiro e confirmar os dados; nao volte a pedir nome, tipo ou numero manualmente sem antes tentar ler a imagem.
 Depois da extracao, confirme nome completo + tipo + numero do documento antes de criar a reserva.
+Se a conversa ja indicar mais de um passageiro e so chegar documento ou foto de uma parte deles, confirme o que foi extraido e peca apenas o documento faltante dos demais passageiros.
 Crianca de colo com ate 5 anos entra no cadastro, mas nao entra na cobranca.
 Nao trate um simples "sim", "isso" ou "pode seguir" como reserva criada; sem RESULTADO DE FERRAMENTA booking_create, ainda nao entre em pagamento.
 Depois que houver RESULTADO DE FERRAMENTA booking_create com sucesso, a proxima pergunta correta e se o cliente prefere pagar o valor integral ou apenas o sinal de R$ 250 por passageiro pagante.
@@ -96,7 +98,7 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 		builder.WriteString(fmt.Sprintf("ULTIMA RESPOSTA DO ATENDIMENTO: %q\n", last))
 	}
 
-	context := derivePromptConversationContext(currentTurn, recentMessages)
+	context := derivePromptConversationContext(currentTurn, recentMessages, currentTurnMedia)
 	if context.PackageName != "" || context.Origin != "" || context.Destination != "" || context.RouteDirection != "" || context.ShouldRespondWithSCTable || context.ShortDateFollowUp || context.TravelOptionChosenNow {
 		builder.WriteString("\nCONTEXTO DERIVADO\n")
 		if context.Origin != "" {
@@ -137,6 +139,26 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 		}
 		if context.RouteDirection == "TO_MA" {
 			builder.WriteString("- Guardrail de direcao: se ainda faltar a origem para essa viagem, a pergunta correta e sobre a cidade de saida em Santa Catarina.\n")
+		}
+	}
+	if context.WaitingForPassengerDocuments {
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		builder.WriteString("CONTEXTO DE DOCUMENTOS\n")
+		builder.WriteString("- O fluxo atual esta na coleta de documentos dos passageiros.\n")
+		if context.ExpectedPassengerCount > 0 {
+			builder.WriteString(fmt.Sprintf("- Quantidade esperada de passageiros neste fluxo: %d.\n", context.ExpectedPassengerCount))
+		}
+		if context.CurrentTurnHasImage {
+			builder.WriteString("- O cliente respondeu com foto/documento neste turno. Primeiro tente extrair nome completo + tipo + numero seguindo a ordem CPF > RG > CERTIDAO_NASCIMENTO > CNH.\n")
+			builder.WriteString("- Se a leitura estiver boa, responda no formato 'Consegui identificar estes dados. Eles conferem?' e nao peca nome/tipo manualmente de novo.\n")
+			builder.WriteString("- So peca nova foto ou digitacao manual se a imagem estiver ilegivel, ambigua ou incompleta.\n")
+		}
+		if context.ExpectedPassengerCount > 1 && context.CurrentTurnMediaCount > 0 {
+			builder.WriteString(fmt.Sprintf("- Neste turno chegaram %d arquivo(s) de documento. Se isso nao cobrir todos os %d passageiro(s), confirme o que conseguiu extrair e peca apenas o documento do(s) passageiro(s) restante(s).\n", context.CurrentTurnMediaCount, context.ExpectedPassengerCount))
+		} else if context.OutstandingPassengerCount > 0 {
+			builder.WriteString(fmt.Sprintf("- Ainda faltam documentos de %d passageiro(s). Depois de confirmar os dados ja extraidos, peca apenas os faltantes.\n", context.OutstandingPassengerCount))
 		}
 	}
 
@@ -474,19 +496,25 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 }
 
 type promptConversationContext struct {
-	Origin                   string
-	Destination              string
-	PackageName              string
-	RouteDirection           string
-	ShortDateFollowUp        bool
-	DestinationChosenNow     bool
-	DateChosenForDestination bool
-	TravelOptionChosenNow    bool
-	ShouldRespondWithSCTable bool
-	ShouldAskSCOriginForMA   bool
+	Origin                       string
+	Destination                  string
+	PackageName                  string
+	RouteDirection               string
+	ShortDateFollowUp            bool
+	DestinationChosenNow         bool
+	DateChosenForDestination     bool
+	TravelOptionChosenNow        bool
+	ShouldRespondWithSCTable     bool
+	ShouldAskSCOriginForMA       bool
+	ExpectedPassengerCount       int
+	CapturedPassengerCount       int
+	OutstandingPassengerCount    int
+	WaitingForPassengerDocuments bool
+	CurrentTurnHasImage          bool
+	CurrentTurnMediaCount        int
 }
 
-func derivePromptConversationContext(currentTurn string, recentMessages []map[string]interface{}) promptConversationContext {
+func derivePromptConversationContext(currentTurn string, recentMessages []map[string]interface{}, currentTurnMedia []map[string]interface{}) promptConversationContext {
 	texts := make([]string, 0, len(recentMessages))
 	for _, message := range recentMessages {
 		body := strings.TrimSpace(asString(message["body"]))
@@ -504,19 +532,87 @@ func derivePromptConversationContext(currentTurn string, recentMessages []map[st
 	destinationChosenNow := currentContext.Destination != "" && !strings.EqualFold(currentContext.Destination, historyContext.Destination)
 	dateChosenForDestination := tripDate != nil && merged.Destination != "" && merged.PackageName != "" && merged.Origin == "" && (historyContext.Destination != "" || destinationChosenNow)
 	travelOptionChosenNow := extractSelectedOptionIndex(currentTurn) > 0 || strings.Contains(folded, "essa opcao") || strings.Contains(folded, "essa viagem")
+	expectedPassengerCount := inferExpectedPassengerCountFromMemory(currentTurn, recentMessages)
+	capturedPassengerCount := inferKnownPassengerCountFromMemory(currentTurn, recentMessages)
+	outstandingPassengerCount := 0
+	if expectedPassengerCount > capturedPassengerCount {
+		outstandingPassengerCount = expectedPassengerCount - capturedPassengerCount
+	}
+	waitingForPassengerDocuments := isWaitingForPassengerDocuments(recentMessages)
 
 	return promptConversationContext{
-		Origin:                   merged.Origin,
-		Destination:              merged.Destination,
-		PackageName:              merged.PackageName,
-		RouteDirection:           merged.RouteDirection,
-		ShortDateFollowUp:        looksLikeShortDateFollowUp(currentTurn),
-		DestinationChosenNow:     destinationChosenNow && tripDate == nil,
-		DateChosenForDestination: dateChosenForDestination,
-		TravelOptionChosenNow:    travelOptionChosenNow,
-		ShouldRespondWithSCTable: detectBroadTravelState(folded) == "SC" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
-		ShouldAskSCOriginForMA:   detectBroadTravelState(folded) == "MA" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
+		Origin:                       merged.Origin,
+		Destination:                  merged.Destination,
+		PackageName:                  merged.PackageName,
+		RouteDirection:               merged.RouteDirection,
+		ShortDateFollowUp:            looksLikeShortDateFollowUp(currentTurn),
+		DestinationChosenNow:         destinationChosenNow && tripDate == nil,
+		DateChosenForDestination:     dateChosenForDestination,
+		TravelOptionChosenNow:        travelOptionChosenNow,
+		ShouldRespondWithSCTable:     detectBroadTravelState(folded) == "SC" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
+		ShouldAskSCOriginForMA:       detectBroadTravelState(folded) == "MA" && !looksLikeBroadStateScheduleLookup(currentTurn) && currentContext.Origin == "" && currentContext.Destination == "",
+		ExpectedPassengerCount:       expectedPassengerCount,
+		CapturedPassengerCount:       capturedPassengerCount,
+		OutstandingPassengerCount:    outstandingPassengerCount,
+		WaitingForPassengerDocuments: waitingForPassengerDocuments,
+		CurrentTurnHasImage:          len(currentTurnMedia) > 0,
+		CurrentTurnMediaCount:        len(currentTurnMedia),
 	}
+}
+
+func inferExpectedPassengerCountFromMemory(currentTurn string, recentMessages []map[string]interface{}) int {
+	if qty := inferPassengerQuantityFromFreeText(currentTurn); qty > 0 {
+		return qty
+	}
+	for i := len(recentMessages) - 1; i >= 0; i-- {
+		if !strings.EqualFold(strings.TrimSpace(asString(recentMessages[i]["direction"])), "INBOUND") {
+			continue
+		}
+		if qty := inferPassengerQuantityFromFreeText(strings.TrimSpace(asString(recentMessages[i]["body"]))); qty > 0 {
+			return qty
+		}
+	}
+	for i := len(recentMessages) - 1; i >= 0; i-- {
+		if qty := inferPassengerQuantityFromFreeText(strings.TrimSpace(asString(recentMessages[i]["body"]))); qty > 0 {
+			return qty
+		}
+	}
+	return 0
+}
+
+func inferKnownPassengerCountFromMemory(currentTurn string, recentMessages []map[string]interface{}) int {
+	if count := len(extractBookingCreatePassengers(currentTurn, Session{})); count > 0 {
+		return count
+	}
+	for i := len(recentMessages) - 1; i >= 0; i-- {
+		body := strings.TrimSpace(asString(recentMessages[i]["body"]))
+		if body == "" {
+			continue
+		}
+		if count := len(extractBookingCreatePassengers(body, Session{})); count > 0 {
+			return count
+		}
+	}
+	return 0
+}
+
+func isWaitingForPassengerDocuments(recentMessages []map[string]interface{}) bool {
+	for i := len(recentMessages) - 1; i >= 0; i-- {
+		if !strings.EqualFold(strings.TrimSpace(asString(recentMessages[i]["direction"])), "OUTBOUND") {
+			continue
+		}
+		body := foldChatText(asString(recentMessages[i]["body"]))
+		if body == "" {
+			continue
+		}
+		if strings.Contains(body, "foto legivel do documento") ||
+			(strings.Contains(body, "envie") && strings.Contains(body, "documento")) ||
+			(strings.Contains(body, "nomes completos") && strings.Contains(body, "documentos")) ||
+			(strings.Contains(body, "frente e verso") && strings.Contains(body, "documento")) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeRecentMemoryMessages(value interface{}) []map[string]interface{} {

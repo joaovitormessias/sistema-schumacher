@@ -216,3 +216,51 @@ func TestParseBookingCreateInputUsesAssistantExtractedPassengerConfirmationOnHis
 		t.Fatalf("unexpected passenger document: %+v", input.Passengers[0])
 	}
 }
+
+func TestParseBookingCreateInputRejectsConfirmationWhenPassengerCountStillIncomplete(t *testing.T) {
+	now := time.Now().UTC()
+	session := Session{
+		ContactKey:    "5549988709047",
+		CustomerPhone: "5549988709047",
+		CustomerName:  "Messias",
+	}
+	history := []Message{
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Achei estas opcoes para Fraiburgo/SC.",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-4 * time.Minute),
+			Payload: map[string]interface{}{
+				"tool_context": map[string]interface{}{
+					toolNameAvailabilitySearch: buildAvailabilityToolResponsePayload(AvailabilitySearchResult{
+						Filter: AvailabilitySearchInput{
+							Destination: "Fraiburgo/SC",
+							Qty:         1,
+							Limit:       5,
+						},
+						Results: []AvailabilitySearchItem{
+							{
+								TripID:                 "trip-1",
+								BoardStopID:            "board-1",
+								AlightStopID:           "alight-1",
+								OriginDisplayName:      "Moncao/MA",
+								DestinationDisplayName: "Fraiburgo/SC",
+								OriginDepartTime:       "09:00",
+								TripDate:               "2026-05-11",
+							},
+						},
+					}),
+				},
+			},
+		},
+		{Direction: "INBOUND", Body: "primeira opcao", ProcessingStatus: "PROCESSED", ReceivedAt: now.Add(-3 * time.Minute)},
+		{Direction: "OUTBOUND", Body: "A passagem e so para voce ou ha mais passageiros? Tem crianca de ate 5 anos viajando?", ProcessingStatus: messageStatusAutomationSent, ReceivedAt: now.Add(-2 * time.Minute)},
+		{Direction: "INBOUND", Body: "eu e minha filha", ProcessingStatus: "PROCESSED", ReceivedAt: now.Add(-90 * time.Second)},
+		{Direction: "OUTBOUND", Body: "Pode enviar os nomes completos e os documentos dos dois.", ProcessingStatus: messageStatusAutomationSent, ReceivedAt: now.Add(-60 * time.Second)},
+		{Direction: "OUTBOUND", Body: "Consegui identificar estes dados. Eles conferem?\n- Passageiro 1: Joao Vitor Messias | CPF | 06645648103", ProcessingStatus: messageStatusAutomationSent, ReceivedAt: now.Add(-30 * time.Second)},
+	}
+
+	if input, ok := parseBookingCreateInput(session, history, "isso", nil); ok {
+		t.Fatalf("expected incomplete passenger confirmation to block booking create, got %+v", input)
+	}
+}
