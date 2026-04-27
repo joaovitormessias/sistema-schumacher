@@ -3611,6 +3611,90 @@ func TestReprocessUsesPackageAvailabilityForBroadStateDateLookup(t *testing.T) {
 	}
 }
 
+func TestReprocessGeneratesSupportDraftForUnsupportedBroadState(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Qual cidade voce quer consultar?",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp-should-not-run",
+		},
+	}
+	searcher := &fakeAvailabilitySearcher{enabled: true}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-unsupported-ba-1",
+			IdempotencyKey:    "idem-unsupported-ba-1",
+			Body:              "tem passagem para Bahia?",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	out, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
+	if err != nil {
+		t.Fatalf("reprocess: %v", err)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("expected deterministic support draft without agent run, got %d calls", runner.calls)
+	}
+	if searcher.calls != 0 {
+		t.Fatalf("expected no availability search for unsupported package, got %d calls", searcher.calls)
+	}
+	if len(out.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls for unsupported package, got %d", len(out.ToolCalls))
+	}
+	if out.Draft == nil {
+		t.Fatalf("expected support draft")
+	}
+	if !strings.Contains(out.Draft.Body, "nao ha passagens disponiveis para Bahia") {
+		t.Fatalf("expected Bahia support message, got %q", out.Draft.Body)
+	}
+	if !strings.Contains(out.Draft.Body, unsupportedPackageSupportPhone) {
+		t.Fatalf("expected support phone in message, got %q", out.Draft.Body)
+	}
+}
+
+func TestReprocessGeneratesSupportDraftForUnsupportedRouteUF(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{enabled: true}
+	searcher := &fakeAvailabilitySearcher{enabled: true}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner, searcher)
+
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5511999999999",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			ProviderMessageID: "msg-unsupported-salvador-1",
+			IdempotencyKey:    "idem-unsupported-salvador-1",
+			Body:              "quero passagem de Videira/SC para Salvador/BA",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest message: %v", err)
+	}
+
+	out, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
+	if err != nil {
+		t.Fatalf("reprocess: %v", err)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("expected deterministic support draft without agent run, got %d calls", runner.calls)
+	}
+	if searcher.calls != 0 {
+		t.Fatalf("expected no availability search for unsupported UF route, got %d calls", searcher.calls)
+	}
+	if out.Draft == nil || !strings.Contains(out.Draft.Body, "Salvador/BA") {
+		t.Fatalf("expected support draft mentioning Salvador/BA, got %+v", out.Draft)
+	}
+}
+
 func TestReprocessUsesDestinationAvailabilityAfterBroadStateCitySelection(t *testing.T) {
 	store := newFakeStore()
 	runner := &fakeAgentRunner{

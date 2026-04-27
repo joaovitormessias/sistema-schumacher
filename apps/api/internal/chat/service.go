@@ -627,23 +627,35 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		return s.maybeAutoSendDraft(ctx, result)
 	}
 
-	toolContext, err := s.resolveAgentToolContext(ctx, persisted.Session, history, memory)
-	if err != nil {
-		return ReprocessResult{}, err
+	systemPrompt := buildAgentSystemPrompt()
+	unsupportedPackage, unsupportedPackageHandled := inferUnsupportedPackageQuery(strings.TrimSpace(asString(memory["current_turn_body"])))
+	toolContext := agentToolContext{}
+	if !unsupportedPackageHandled {
+		var err error
+		toolContext, err = s.resolveAgentToolContext(ctx, persisted.Session, history, memory)
+		if err != nil {
+			return ReprocessResult{}, err
+		}
 	}
 	result.ToolCalls = toolContext.Calls
 
-	systemPrompt := buildAgentSystemPrompt()
-	documentContext, documentHandled, err := s.resolveDocumentExtractContext(ctx, persisted.Session, candidates, memory, draftID)
-	if err != nil {
-		return ReprocessResult{}, err
+	documentHandled := false
+	if !unsupportedPackageHandled {
+		documentContext, handled, err := s.resolveDocumentExtractContext(ctx, persisted.Session, candidates, memory, draftID)
+		if err != nil {
+			return ReprocessResult{}, err
+		}
+		documentHandled = handled
+		toolContext = mergeAgentToolContexts(toolContext, documentContext)
+		result.ToolCalls = toolContext.Calls
 	}
-	toolContext = mergeAgentToolContexts(toolContext, documentContext)
-	result.ToolCalls = toolContext.Calls
 
 	var run RunAgentResult
 	var userPrompt string
-	if documentHandled && toolContext.DocumentExtract != nil {
+	if unsupportedPackageHandled {
+		userPrompt = buildAgentUserPrompt(persisted.Session, memory, toolContext)
+		run = buildUnsupportedPackageDraftRun(unsupportedPackage)
+	} else if documentHandled && toolContext.DocumentExtract != nil {
 		userPrompt = buildAgentUserPrompt(persisted.Session, memory, toolContext)
 		run = buildDocumentExtractDraftRun(*toolContext.DocumentExtract)
 	} else {
