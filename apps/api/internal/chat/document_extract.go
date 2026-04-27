@@ -124,6 +124,15 @@ func buildDocumentExtractSystemPrompt() string {
 	return strings.TrimSpace(`Voce extrai dados de documentos brasileiros enviados por foto para uma reserva de passagem.
 Responda exclusivamente em JSON valido, sem markdown.
 Priorize documentos nesta ordem quando houver mais de um numero: CPF, RG, CNH, CERTIDAO_NASCIMENTO.
+		Estrutura de cada documento:
+		- CPF: "xxx.xxx.xxx-xx" 
+		- RG: "x.xxx.xxx"
+		- Matricula certidao_nascimento: "xxxxxx xx xx xxxx x xxxxx xxx xxxxxxx-xx"
+		- CNH: "xxxxxxxxxxx"
+		Atualmente existem 2 versoes de Identidade que podem ser enviadas:
+		- A mais recente possui um campo do nome completo da pessoa e o CPF ja na parte da frente do documento. Alem disso esse novo formato nao contem mais o numero do RG
+		- A antiga as informacoes ficam atras: com o nome completo da pessoa + CPF + RG, nesse caso a prioridade de leitura para extracao continua sendo nome + CPF.
+		A intencao eh apenas extrair essas informacoes: Nome completo + numero do documento
 Formato:
 {
   "mode": "EXTRACTED" | "LOW_CONFIDENCE",
@@ -132,14 +141,14 @@ Formato:
   ],
   "failure_reason": ""
 }
-Use LOW_CONFIDENCE quando a imagem estiver ilegivel, distante, cortada ou sem nome/documento suficiente.`)
+Use LOW_CONFIDENCE apenas quando a imagem estiver ilegivel ou sem nome/documento suficiente.`)
 }
 
 func buildDocumentExtractUserPrompt(expected int) string {
 	if expected > 1 {
 		return fmt.Sprintf("Extraia nome completo e documento da foto recebida. A conversa espera %d passageiros; retorne somente os passageiros que conseguir ler com seguranca.", expected)
 	}
-	return "Extraia nome completo e documento da foto recebida. Retorne somente os dados que conseguir ler com seguranca."
+	return "Extraia nome completo e documento da foto recebida. Retorne somente os dados que conseguir ler."
 }
 
 func parseDocumentExtractResult(text string) DocumentExtractResult {
