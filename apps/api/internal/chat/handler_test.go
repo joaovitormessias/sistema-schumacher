@@ -514,6 +514,122 @@ func TestGetCurrentDraftAllowsAutoSendForImageTurn(t *testing.T) {
 	}
 }
 
+func TestReprocessExtractsDocumentImageBeforeGenericReply(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          `{"mode":"EXTRACTED","passengers":[{"name":"Joao Vitor Messias","document_type":"CPF","document":"066.456.481-03","confidence":0.91}]}`,
+			Model:              "gpt-vision-test",
+			ProviderResponseID: "resp-document-extract-1",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner)
+	if _, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5549988709047",
+		Message: IngestMessagePayload{
+			Direction:         "OUTBOUND",
+			ProviderMessageID: "msg-doc-out-1",
+			IdempotencyKey:    "idem-doc-out-1",
+			Body:              "Pode enviar seu nome completo e o documento. Se for foto, envie frente e verso.",
+		},
+	}); err != nil {
+		t.Fatalf("ingest outbound: %v", err)
+	}
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5549988709047",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			Kind:              "IMAGE",
+			ProviderMessageID: "msg-doc-img-1",
+			IdempotencyKey:    "idem-doc-img-1",
+			NormalizedPayload: map[string]interface{}{
+				"image_url":       "https://files.example.test/documento.jpg",
+				"image_mime_type": "image/jpeg",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest image: %v", err)
+	}
+
+	reprocessed, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
+	if err != nil {
+		t.Fatalf("reprocess message: %v", err)
+	}
+	if reprocessed.Draft == nil {
+		t.Fatalf("expected draft to be generated")
+	}
+	if runner.calls != 1 {
+		t.Fatalf("expected only document extraction run, got %d calls", runner.calls)
+	}
+	if !strings.Contains(reprocessed.Draft.Body, "Joao Vitor Messias | CPF | 06645648103") {
+		t.Fatalf("expected extracted CPF confirmation, got %q", reprocessed.Draft.Body)
+	}
+	if len(reprocessed.ToolCalls) != 1 || reprocessed.ToolCalls[0].ToolName != toolNameDocumentExtract {
+		t.Fatalf("expected document_extract tool call, got %+v", reprocessed.ToolCalls)
+	}
+	if readDraftAutoSendStatus(*reprocessed.Draft) != draftAutoSendStatusEligible {
+		t.Fatalf("expected image document confirmation to be auto-send eligible, got %s", readDraftAutoSendStatus(*reprocessed.Draft))
+	}
+}
+
+func TestReprocessAsksOnlyForMissingPassengerDocumentAfterImageExtract(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          `{"mode":"EXTRACTED","passengers":[{"name":"Joao Vitor Messias","cpf":"06645648103","confidence":0.92}]}`,
+			Model:              "gpt-vision-test",
+			ProviderResponseID: "resp-document-extract-2",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner)
+	messages := []IngestMessagePayload{
+		{Direction: "OUTBOUND", ProviderMessageID: "msg-missing-out-1", IdempotencyKey: "idem-missing-out-1", Body: "A passagem e so para voce ou tem mais alguem? Ha crianca de ate 5 anos viajando?"},
+		{Direction: "INBOUND", ProviderMessageID: "msg-missing-in-1", IdempotencyKey: "idem-missing-in-1", Body: "eu e minha filha"},
+		{Direction: "OUTBOUND", ProviderMessageID: "msg-missing-out-2", IdempotencyKey: "idem-missing-out-2", Body: "Pode enviar os nomes completos e os documentos dos dois. Se preferir, pode mandar foto legivel do documento."},
+	}
+	for _, message := range messages {
+		if _, err := svc.Ingest(context.Background(), IngestMessageInput{
+			ContactKey: "5549988709047",
+			Message:    message,
+		}); err != nil {
+			t.Fatalf("ingest history: %v", err)
+		}
+	}
+	ingested, err := svc.Ingest(context.Background(), IngestMessageInput{
+		ContactKey: "5549988709047",
+		Message: IngestMessagePayload{
+			Direction:         "INBOUND",
+			Kind:              "IMAGE",
+			ProviderMessageID: "msg-missing-img-1",
+			IdempotencyKey:    "idem-missing-img-1",
+			NormalizedPayload: map[string]interface{}{
+				"image_url":       "https://files.example.test/documento.jpg",
+				"image_mime_type": "image/jpeg",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest image: %v", err)
+	}
+
+	reprocessed, err := svc.Reprocess(context.Background(), ReprocessInput{SessionID: ingested.Session.ID})
+	if err != nil {
+		t.Fatalf("reprocess message: %v", err)
+	}
+	if reprocessed.Draft == nil {
+		t.Fatalf("expected draft to be generated")
+	}
+	if !strings.Contains(reprocessed.Draft.Body, "Joao Vitor Messias | CPF | 06645648103") {
+		t.Fatalf("expected extracted passenger confirmation, got %q", reprocessed.Draft.Body)
+	}
+	if !strings.Contains(reprocessed.Draft.Body, "Ainda falta o documento de 1 passageiro") {
+		t.Fatalf("expected only missing passenger document request, got %q", reprocessed.Draft.Body)
+	}
+}
+
 func TestGetCurrentDraftReturnsAutoSendRetryDetails(t *testing.T) {
 	store := newFakeStore()
 	now := time.Now().UTC()
@@ -5181,6 +5297,7 @@ type fakeAgentRunner struct {
 	err       error
 	errs      []error
 	lastInput RunAgentInput
+	inputs    []RunAgentInput
 }
 
 type fakeAvailabilitySearcher struct {
@@ -5313,6 +5430,7 @@ func (f *fakeAgentRunner) Enabled() bool {
 func (f *fakeAgentRunner) Run(_ context.Context, input RunAgentInput) (RunAgentResult, error) {
 	f.calls++
 	f.lastInput = input
+	f.inputs = append(f.inputs, input)
 	if len(f.errs) > 0 {
 		err := f.errs[0]
 		f.errs = f.errs[1:]

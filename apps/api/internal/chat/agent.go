@@ -282,7 +282,7 @@ func isAutoSendSafeToolCall(call ToolCall) bool {
 		return false
 	}
 	switch strings.TrimSpace(call.ToolName) {
-	case toolNameAvailabilitySearch:
+	case toolNameAvailabilitySearch, toolNameDocumentExtract:
 		return true
 	default:
 		return false
@@ -506,7 +506,7 @@ func buildAgentDraftPayload(session Session, candidates []Message, draftID strin
 	if len(autoSend.Reasons) > 0 {
 		payload["auto_send_reasons"] = autoSend.Reasons
 	}
-	if tools.Availability != nil || tools.Pricing != nil || tools.Booking != nil || tools.BookingCreate != nil || tools.Payments != nil || tools.PaymentCreate != nil || tools.BookingCancel != nil {
+	if tools.Availability != nil || tools.Pricing != nil || tools.Booking != nil || tools.BookingCreate != nil || tools.Payments != nil || tools.PaymentCreate != nil || tools.BookingCancel != nil || tools.DocumentExtract != nil {
 		toolContext := map[string]interface{}{}
 		if tools.Availability != nil {
 			toolContext[toolNameAvailabilitySearch] = buildAvailabilityToolResponsePayload(*tools.Availability)
@@ -528,6 +528,9 @@ func buildAgentDraftPayload(session Session, candidates []Message, draftID strin
 		}
 		if tools.BookingCancel != nil {
 			toolContext[toolNameBookingCancel] = buildBookingCancelResponsePayload(*tools.BookingCancel)
+		}
+		if tools.DocumentExtract != nil {
+			toolContext[toolNameDocumentExtract] = buildDocumentExtractResponsePayload(*tools.DocumentExtract)
 		}
 		payload["tool_context"] = toolContext
 	}

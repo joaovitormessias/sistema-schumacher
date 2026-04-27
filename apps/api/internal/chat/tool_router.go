@@ -31,6 +31,7 @@ const toolNameBookingCancel = "booking_cancel"
 const toolNameRescheduleLookup = "reschedule_lookup"
 const toolNamePaymentStatus = "payment_status"
 const toolNamePaymentCreate = "payment_create"
+const toolNameDocumentExtract = "document_extract"
 
 const packageToSantaCatarina = "Pacote p/ Santa Catarina"
 const packageToMaranhao = "Pacote p/ Maranhao"
@@ -55,15 +56,16 @@ var maPackageDestinations = map[string]string{
 }
 
 type agentToolContext struct {
-	Calls         []ToolCall
-	Availability  *AvailabilitySearchResult
-	Pricing       *PricingQuoteResult
-	Booking       *BookingLookupResult
-	BookingCreate *BookingCreateResult
-	BookingCancel *BookingCancelResult
-	Reschedule    *RescheduleAssistResult
-	Payments      *PaymentStatusResult
-	PaymentCreate *PaymentCreateResult
+	Calls           []ToolCall
+	Availability    *AvailabilitySearchResult
+	Pricing         *PricingQuoteResult
+	Booking         *BookingLookupResult
+	BookingCreate   *BookingCreateResult
+	BookingCancel   *BookingCancelResult
+	Reschedule      *RescheduleAssistResult
+	Payments        *PaymentStatusResult
+	PaymentCreate   *PaymentCreateResult
+	DocumentExtract *DocumentExtractResult
 }
 
 type inferredRouteContext struct {

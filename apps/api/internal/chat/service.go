@@ -634,17 +634,31 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	result.ToolCalls = toolContext.Calls
 
 	systemPrompt := buildAgentSystemPrompt()
-	userPrompt := buildAgentUserPrompt(persisted.Session, memory, toolContext)
-	run, err := s.runner.Run(ctx, RunAgentInput{
-		Session:          persisted.Session,
-		CurrentTurnIDs:   candidateMessageIDs(candidates),
-		CurrentTurnMedia: collectCandidateMedia(candidates),
-		SystemPrompt:     systemPrompt,
-		UserPrompt:       userPrompt,
-		IdempotencyKey:   draftID,
-	})
+	documentContext, documentHandled, err := s.resolveDocumentExtractContext(ctx, persisted.Session, candidates, memory, draftID)
 	if err != nil {
-		return ReprocessResult{}, fmt.Errorf("%w: %v", ErrAgentRunFailed, err)
+		return ReprocessResult{}, err
+	}
+	toolContext = mergeAgentToolContexts(toolContext, documentContext)
+	result.ToolCalls = toolContext.Calls
+
+	var run RunAgentResult
+	var userPrompt string
+	if documentHandled && toolContext.DocumentExtract != nil {
+		userPrompt = buildAgentUserPrompt(persisted.Session, memory, toolContext)
+		run = buildDocumentExtractDraftRun(*toolContext.DocumentExtract)
+	} else {
+		userPrompt = buildAgentUserPrompt(persisted.Session, memory, toolContext)
+		run, err = s.runner.Run(ctx, RunAgentInput{
+			Session:          persisted.Session,
+			CurrentTurnIDs:   candidateMessageIDs(candidates),
+			CurrentTurnMedia: collectCandidateMedia(candidates),
+			SystemPrompt:     systemPrompt,
+			UserPrompt:       userPrompt,
+			IdempotencyKey:   draftID,
+		})
+		if err != nil {
+			return ReprocessResult{}, fmt.Errorf("%w: %v", ErrAgentRunFailed, err)
+		}
 	}
 
 	runAt := time.Now().UTC()

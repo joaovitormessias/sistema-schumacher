@@ -151,7 +151,7 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 			builder.WriteString(fmt.Sprintf("- Quantidade esperada de passageiros neste fluxo: %d.\n", context.ExpectedPassengerCount))
 		}
 		if context.CurrentTurnHasImage {
-			builder.WriteString("- O cliente respondeu com foto/documento neste turno. Primeiro tente extrair nome completo + tipo + numero seguindo a ordem CPF > RG > CERTIDAO_NASCIMENTO > CNH.\n")
+			builder.WriteString("- O cliente respondeu com foto/documento neste turno. Primeiro tente extrair nome completo + tipo + numero seguindo a ordem CPF > RG > CNH > CERTIDAO_NASCIMENTO.\n")
 			builder.WriteString("- Se a leitura estiver boa, responda no formato 'Consegui identificar estes dados. Eles conferem?' e nao peca nome/tipo manualmente de novo.\n")
 			builder.WriteString("- So peca nova foto ou digitacao manual se a imagem estiver ilegivel, ambigua ou incompleta.\n")
 		}
@@ -160,6 +160,27 @@ func buildAgentUserPrompt(session Session, memory map[string]interface{}, tools 
 		} else if context.OutstandingPassengerCount > 0 {
 			builder.WriteString(fmt.Sprintf("- Ainda faltam documentos de %d passageiro(s). Depois de confirmar os dados ja extraidos, peca apenas os faltantes.\n", context.OutstandingPassengerCount))
 		}
+	}
+	if tools.DocumentExtract != nil {
+		builder.WriteString("\nRESULTADO DE FERRAMENTA\n")
+		builder.WriteString(fmt.Sprintf("- Tool: %s\n", toolNameDocumentExtract))
+		builder.WriteString(fmt.Sprintf("- Modo: %s\n", strings.TrimSpace(tools.DocumentExtract.Mode)))
+		builder.WriteString(fmt.Sprintf("- Passageiros esperados: %d\n", tools.DocumentExtract.ExpectedPassengerCount))
+		builder.WriteString(fmt.Sprintf("- Documentos extraidos: %d\n", len(tools.DocumentExtract.Passengers)))
+		for index, item := range tools.DocumentExtract.Passengers {
+			builder.WriteString(fmt.Sprintf(
+				"- Documento %d: %s | %s %s | confianca %.2f\n",
+				index+1,
+				strings.TrimSpace(item.Name),
+				strings.TrimSpace(item.DocumentType),
+				strings.TrimSpace(item.Document),
+				item.Confidence,
+			))
+		}
+		if reason := strings.TrimSpace(tools.DocumentExtract.FailureReason); reason != "" {
+			builder.WriteString(fmt.Sprintf("- Falha de leitura: %s\n", reason))
+		}
+		builder.WriteString("- Use este resultado como fonte de verdade para confirmar documentos. Se faltarem passageiros, peca apenas os documentos faltantes.\n")
 	}
 
 	if tools.Availability != nil {

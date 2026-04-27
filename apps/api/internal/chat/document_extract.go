@@ -1,0 +1,348 @@
+package chat
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+type DocumentExtractPassenger struct {
+	Name         string  `json:"name"`
+	Document     string  `json:"document"`
+	DocumentType string  `json:"document_type"`
+	Confidence   float64 `json:"confidence"`
+}
+
+type DocumentExtractResult struct {
+	Mode                   string                     `json:"mode"`
+	Passengers             []DocumentExtractPassenger `json:"passengers"`
+	ExpectedPassengerCount int                        `json:"expected_passenger_count"`
+	MediaCount             int                        `json:"media_count"`
+	FailureReason          string                     `json:"failure_reason,omitempty"`
+	RawText                string                     `json:"raw_text,omitempty"`
+	Model                  string                     `json:"model,omitempty"`
+	ProviderResponseID     string                     `json:"provider_response_id,omitempty"`
+	RequestPayload         map[string]interface{}     `json:"request_payload,omitempty"`
+	ResponsePayload        map[string]interface{}     `json:"response_payload,omitempty"`
+}
+
+func (s *Service) resolveDocumentExtractContext(ctx context.Context, session Session, candidates []Message, memory map[string]interface{}, draftID string) (agentToolContext, bool, error) {
+	media := collectCandidateMedia(candidates)
+	if len(media) == 0 || !shouldRunDocumentExtract(memory) {
+		return agentToolContext{}, false, nil
+	}
+
+	expected := inferExpectedPassengerCountFromMemory(
+		strings.TrimSpace(asString(memory["current_turn_body"])),
+		normalizeRecentMemoryMessages(memory["recent_messages"]),
+	)
+	startedAt := time.Now().UTC()
+	requestPayload := map[string]interface{}{
+		"mode":                     "DOCUMENT_EXTRACT",
+		"current_turn_message_ids": candidateMessageIDs(candidates),
+		"media_count":              len(media),
+		"expected_passenger_count": expected,
+	}
+
+	run, result, runErr := s.runDocumentExtract(ctx, session, candidates, media, expected, draftID)
+	finishedAt := time.Now().UTC()
+	finishedAtPtr := &finishedAt
+	if runErr != nil {
+		call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
+			SessionID:      session.ID,
+			MessageID:      latestCandidateMessageID(candidates),
+			ToolName:       toolNameDocumentExtract,
+			RequestPayload: requestPayload,
+			Status:         "FAILED",
+			ErrorCode:      "DOCUMENT_EXTRACT_ERROR",
+			ErrorMessage:   strings.TrimSpace(runErr.Error()),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAtPtr,
+		})
+		if err != nil {
+			return agentToolContext{}, false, err
+		}
+		return agentToolContext{Calls: []ToolCall{call}}, false, nil
+	}
+
+	responsePayload := buildDocumentExtractResponsePayload(result)
+	call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
+		SessionID:       session.ID,
+		MessageID:       latestCandidateMessageID(candidates),
+		ToolName:        toolNameDocumentExtract,
+		RequestPayload:  requestPayload,
+		ResponsePayload: responsePayload,
+		Status:          "COMPLETED",
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAtPtr,
+	})
+	if err != nil {
+		return agentToolContext{}, false, err
+	}
+
+	result.RequestPayload = run.RequestPayload
+	result.ResponsePayload = run.ResponsePayload
+	return agentToolContext{
+		Calls:           []ToolCall{call},
+		DocumentExtract: &result,
+	}, true, nil
+}
+
+func shouldRunDocumentExtract(memory map[string]interface{}) bool {
+	currentTurn := strings.TrimSpace(asString(memory["current_turn_body"]))
+	recent := normalizeRecentMemoryMessages(memory["recent_messages"])
+	media := normalizeMediaMemoryItems(memory["current_turn_media"])
+	context := derivePromptConversationContext(currentTurn, recent, media)
+	return context.WaitingForPassengerDocuments && context.CurrentTurnHasImage
+}
+
+func (s *Service) runDocumentExtract(ctx context.Context, session Session, candidates []Message, media []AgentMediaInput, expected int, draftID string) (RunAgentResult, DocumentExtractResult, error) {
+	run, err := s.runner.Run(ctx, RunAgentInput{
+		Session:          session,
+		CurrentTurnIDs:   candidateMessageIDs(candidates),
+		CurrentTurnMedia: media,
+		SystemPrompt:     buildDocumentExtractSystemPrompt(),
+		UserPrompt:       buildDocumentExtractUserPrompt(expected),
+		IdempotencyKey:   strings.TrimSpace(draftID) + "-document-extract",
+	})
+	if err != nil {
+		return RunAgentResult{}, DocumentExtractResult{}, err
+	}
+
+	result := parseDocumentExtractResult(run.ReplyText)
+	result.ExpectedPassengerCount = expected
+	result.MediaCount = len(media)
+	result.RawText = strings.TrimSpace(run.ReplyText)
+	result.Model = strings.TrimSpace(run.Model)
+	result.ProviderResponseID = strings.TrimSpace(run.ProviderResponseID)
+	return run, result, nil
+}
+
+func buildDocumentExtractSystemPrompt() string {
+	return strings.TrimSpace(`Voce extrai dados de documentos brasileiros enviados por foto para uma reserva de passagem.
+Responda exclusivamente em JSON valido, sem markdown.
+Priorize documentos nesta ordem quando houver mais de um numero: CPF, RG, CNH, CERTIDAO_NASCIMENTO.
+Formato:
+{
+  "mode": "EXTRACTED" | "LOW_CONFIDENCE",
+  "passengers": [
+    {"name": "Nome completo", "document_type": "CPF|RG|CNH|CERTIDAO_NASCIMENTO", "document": "numero sem pontuacao desnecessaria", "confidence": 0.0}
+  ],
+  "failure_reason": ""
+}
+Use LOW_CONFIDENCE quando a imagem estiver ilegivel, distante, cortada ou sem nome/documento suficiente.`)
+}
+
+func buildDocumentExtractUserPrompt(expected int) string {
+	if expected > 1 {
+		return fmt.Sprintf("Extraia nome completo e documento da foto recebida. A conversa espera %d passageiros; retorne somente os passageiros que conseguir ler com seguranca.", expected)
+	}
+	return "Extraia nome completo e documento da foto recebida. Retorne somente os dados que conseguir ler com seguranca."
+}
+
+func parseDocumentExtractResult(text string) DocumentExtractResult {
+	result := DocumentExtractResult{Mode: "LOW_CONFIDENCE"}
+	payload := extractJSONObject(text)
+	if len(payload) == 0 {
+		result.FailureReason = "json_parse_failed"
+		return result
+	}
+
+	mode := strings.ToUpper(strings.TrimSpace(asString(payload["mode"])))
+	if mode == "" {
+		mode = strings.ToUpper(strings.TrimSpace(asString(payload["status"])))
+	}
+	if mode == "" {
+		mode = "LOW_CONFIDENCE"
+	}
+	result.Mode = mode
+	result.FailureReason = strings.TrimSpace(firstNonEmpty(asString(payload["failure_reason"]), asString(payload["reason"])))
+
+	rawPassengers := asInterfaceSliceMaps(payload["passengers"])
+	if len(rawPassengers) == 0 {
+		if passenger := parseDocumentExtractPassenger(payload); passenger.Document != "" || passenger.Name != "" {
+			rawPassengers = []map[string]interface{}{payload}
+		}
+	}
+	for _, raw := range rawPassengers {
+		passenger := parseDocumentExtractPassenger(raw)
+		if passenger.Name == "" || passenger.Document == "" || passenger.DocumentType == "" {
+			continue
+		}
+		result.Passengers = append(result.Passengers, passenger)
+	}
+	if len(result.Passengers) > 0 {
+		result.Mode = "EXTRACTED"
+		result.FailureReason = ""
+	} else if result.FailureReason == "" {
+		result.FailureReason = "no_complete_document_found"
+	}
+	return result
+}
+
+func parseDocumentExtractPassenger(raw map[string]interface{}) DocumentExtractPassenger {
+	name := normalizePassengerName(firstNonEmpty(
+		asString(raw["name"]),
+		asString(raw["full_name"]),
+		asString(raw["nome"]),
+		asString(raw["nome_completo"]),
+	))
+
+	documentType, document := selectDocumentByPriority(raw)
+	return DocumentExtractPassenger{
+		Name:         name,
+		Document:     document,
+		DocumentType: documentType,
+		Confidence:   normalizeDocumentConfidence(asFloat64(raw["confidence"])),
+	}
+}
+
+func selectDocumentByPriority(raw map[string]interface{}) (string, string) {
+	candidates := []struct {
+		Type string
+		Keys []string
+	}{
+		{"CPF", []string{"cpf"}},
+		{"RG", []string{"rg"}},
+		{"CNH", []string{"cnh"}},
+		{"CERTIDAO_NASCIMENTO", []string{"certidao", "certidao_nascimento", "birth_certificate", "matricula"}},
+	}
+	explicitType := normalizePassengerDocumentType(firstNonEmpty(asString(raw["document_type"]), asString(raw["tipo_documento"]), asString(raw["type"])))
+	explicitDocument := firstNonEmpty(asString(raw["document"]), asString(raw["numero"]), asString(raw["number"]), asString(raw["document_number"]))
+	for _, candidate := range candidates {
+		for _, key := range candidate.Keys {
+			if document := normalizePassengerDocumentValue(asString(raw[key]), candidate.Type); document != "" {
+				return candidate.Type, document
+			}
+		}
+		if explicitType == "" {
+			if document := normalizePassengerDocumentValue(explicitDocument, candidate.Type); document != "" {
+				return candidate.Type, document
+			}
+		}
+	}
+	if explicitType != "" {
+		if document := normalizePassengerDocumentValue(explicitDocument, explicitType); document != "" {
+			return explicitType, document
+		}
+	}
+	if explicitDocument != "" {
+		for _, candidate := range candidates {
+			if document := normalizePassengerDocumentValue(explicitDocument, candidate.Type); document != "" {
+				return candidate.Type, document
+			}
+		}
+	}
+	return "", ""
+}
+
+func normalizeDocumentConfidence(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 1 {
+		if value <= 100 {
+			return value / 100
+		}
+		return 1
+	}
+	return value
+}
+
+func extractJSONObject(text string) map[string]interface{} {
+	trimmed := strings.TrimSpace(text)
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	trimmed = strings.TrimSpace(trimmed)
+	if start := strings.Index(trimmed, "{"); start >= 0 {
+		if end := strings.LastIndex(trimmed, "}"); end >= start {
+			trimmed = trimmed[start : end+1]
+		}
+	}
+	payload := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return nil
+	}
+	return payload
+}
+
+func buildDocumentExtractDraftRun(result DocumentExtractResult) RunAgentResult {
+	return RunAgentResult{
+		ReplyText:          buildDocumentExtractReply(result),
+		Model:              firstNonEmpty(strings.TrimSpace(result.Model), "document_extract"),
+		ProviderResponseID: strings.TrimSpace(result.ProviderResponseID),
+		RequestPayload: map[string]interface{}{
+			"mode":    "DOCUMENT_EXTRACT_DETERMINISTIC_REPLY",
+			"extract": buildDocumentExtractResponsePayload(result),
+		},
+		ResponsePayload: map[string]interface{}{
+			"reply_text": buildDocumentExtractReply(result),
+		},
+	}
+}
+
+func buildDocumentExtractReply(result DocumentExtractResult) string {
+	if len(result.Passengers) == 0 {
+		return "Messias, nao consegui ler o documento com seguranca. Pode reenviar uma foto mais perto, com boa luz e o documento ocupando a maior parte da imagem? Se preferir, pode digitar aqui o nome completo e o documento."
+	}
+
+	lines := []string{"Messias, consegui identificar estes dados. Eles conferem?"}
+	for index, passenger := range result.Passengers {
+		lines = append(lines, fmt.Sprintf("- Passageiro %d: %s | %s | %s", index+1, passenger.Name, passenger.DocumentType, passenger.Document))
+	}
+	if missing := result.ExpectedPassengerCount - len(result.Passengers); missing > 0 {
+		if missing == 1 {
+			lines = append(lines, "", "Ainda falta o documento de 1 passageiro. Pode enviar a foto ou digitar nome completo + documento do passageiro faltante.")
+		} else {
+			lines = append(lines, "", fmt.Sprintf("Ainda faltam os documentos de %d passageiros. Pode enviar as fotos ou digitar nome completo + documento dos passageiros faltantes.", missing))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func buildDocumentExtractResponsePayload(result DocumentExtractResult) map[string]interface{} {
+	passengers := make([]map[string]interface{}, 0, len(result.Passengers))
+	for _, passenger := range result.Passengers {
+		passengers = append(passengers, map[string]interface{}{
+			"name":          passenger.Name,
+			"document":      passenger.Document,
+			"document_type": passenger.DocumentType,
+			"confidence":    passenger.Confidence,
+		})
+	}
+	payload := map[string]interface{}{
+		"mode":                     result.Mode,
+		"passenger_count":          len(result.Passengers),
+		"expected_passenger_count": result.ExpectedPassengerCount,
+		"media_count":              result.MediaCount,
+		"passengers":               passengers,
+	}
+	if result.FailureReason != "" {
+		payload["failure_reason"] = result.FailureReason
+	}
+	if result.ProviderResponseID != "" {
+		payload["provider_response_id"] = result.ProviderResponseID
+	}
+	if result.Model != "" {
+		payload["model"] = result.Model
+	}
+	return payload
+}
+
+func mergeAgentToolContexts(base agentToolContext, extra agentToolContext) agentToolContext {
+	base.Calls = append(base.Calls, extra.Calls...)
+	if extra.DocumentExtract != nil {
+		base.DocumentExtract = extra.DocumentExtract
+	}
+	return base
+}
+
+func latestCandidateMessageID(candidates []Message) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(candidates[len(candidates)-1].ID)
+}
