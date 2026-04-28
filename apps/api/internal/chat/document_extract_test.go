@@ -56,6 +56,31 @@ func TestParseDocumentExtractResultUsesCPFWhenDocumentTypeIsImplicit(t *testing.
 	}
 }
 
+func TestParseDocumentExtractResultMarksPartialWhenPassengerIsIncomplete(t *testing.T) {
+	result := parseDocumentExtractResult(`{
+		"mode":"LOW_CONFIDENCE",
+		"passengers":[{
+			"name":"",
+			"document":"066.456.481-03",
+			"confidence":0.7
+		}]
+	}`)
+
+	if result.Mode != "PARTIAL" {
+		t.Fatalf("expected PARTIAL mode, got %s", result.Mode)
+	}
+	if len(result.Passengers) != 1 {
+		t.Fatalf("expected one passenger, got %+v", result.Passengers)
+	}
+	passenger := result.Passengers[0]
+	if passenger.Name != "" {
+		t.Fatalf("expected missing name for incomplete passenger, got %+v", passenger)
+	}
+	if passenger.DocumentType != "CPF" || passenger.Document != "06645648103" {
+		t.Fatalf("expected normalized document, got %+v", passenger)
+	}
+}
+
 func TestBuildDocumentExtractReplyAsksOnlyMissingPassengerDocuments(t *testing.T) {
 	reply := buildDocumentExtractReply(DocumentExtractResult{
 		ExpectedPassengerCount: 2,

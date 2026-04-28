@@ -38,6 +38,17 @@ func (s *Service) resolveDocumentExtractContext(ctx context.Context, session Ses
 		strings.TrimSpace(asString(memory["current_turn_body"])),
 		normalizeRecentMemoryMessages(memory["recent_messages"]),
 	)
+
+	/* Log for init of extraction */
+	s.logReprocess(
+		"document_extract event=start session_id=%s message_id=%s media_count=%d expected=%d should_run=%t",
+		session.ID,
+		latestCandidateMessageID(candidates),
+		len(media),
+		expected,
+		shouldRunDocumentExtract(memory),
+	)
+
 	startedAt := time.Now().UTC()
 	requestPayload := map[string]interface{}{
 		"mode":                     "DOCUMENT_EXTRACT",
@@ -46,10 +57,34 @@ func (s *Service) resolveDocumentExtractContext(ctx context.Context, session Ses
 		"expected_passenger_count": expected,
 	}
 
+	/* Log of medias receives */
+	for index, item := range media {
+		s.logReprocess(
+			"document_extract event=media session_id=%s index=%d kind=%s mime=%s url_present=%t",
+			session.ID,
+			index,
+			strings.TrimSpace(item.Kind),
+			strings.TrimSpace(item.MimeType),
+			strings.TrimSpace(item.URL) != "",
+		)
+	}
+
 	run, result, runErr := s.runDocumentExtract(ctx, session, candidates, media, expected, draftID)
 	finishedAt := time.Now().UTC()
 	finishedAtPtr := &finishedAt
+
 	if runErr != nil {
+
+		/* Log when runDocumentExtract fails */
+		s.logReprocess(
+			"document_extract event=run_failed session_id=%s message_id=%s media_count=%d expected=%d error=%v",
+			session.ID,
+			latestCandidateMessageID(candidates),
+			len(media),
+			expected,
+			runErr,
+		)
+
 		call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
 			SessionID:      session.ID,
 			MessageID:      latestCandidateMessageID(candidates),
@@ -68,6 +103,20 @@ func (s *Service) resolveDocumentExtractContext(ctx context.Context, session Ses
 	}
 
 	responsePayload := buildDocumentExtractResponsePayload(result)
+
+	/* Log when the extraction work */
+	s.logReprocess(
+		"document_extract event=run_done session_id=%s message_id=%s mode=%s passenger_count=%d expected=%d media_count=%d failure_reason=%s model=%s",
+		session.ID,
+		latestCandidateMessageID(candidates),
+		strings.TrimSpace(result.Mode),
+		len(result.Passengers),
+		result.ExpectedPassengerCount,
+		result.MediaCount,
+		strings.TrimSpace(result.FailureReason),
+		strings.TrimSpace(result.Model),
+	)
+
 	call, err := s.store.CreateToolCall(ctx, CreateToolCallInput{
 		SessionID:       session.ID,
 		MessageID:       latestCandidateMessageID(candidates),
@@ -99,6 +148,16 @@ func shouldRunDocumentExtract(memory map[string]interface{}) bool {
 }
 
 func (s *Service) runDocumentExtract(ctx context.Context, session Session, candidates []Message, media []AgentMediaInput, expected int, draftID string) (RunAgentResult, DocumentExtractResult, error) {
+	/* Log of extract document */
+	s.logReprocess(
+		"document_extract event=runner_start session_id=%s message_count=%d media_count=%d expected=%d draft_id=%s",
+		session.ID,
+		len(candidates),
+		len(media),
+		expected,
+		strings.TrimSpace(draftID),
+	)
+
 	run, err := s.runner.Run(ctx, RunAgentInput{
 		Session:          session,
 		CurrentTurnIDs:   candidateMessageIDs(candidates),
@@ -108,10 +167,31 @@ func (s *Service) runDocumentExtract(ctx context.Context, session Session, candi
 		IdempotencyKey:   strings.TrimSpace(draftID) + "-document-extract",
 	})
 	if err != nil {
+		/* Log fails */
+		s.logReprocess(
+			"document_extract event=runner_failed session_id=%s media_count=%d expected=%d error=%v",
+			session.ID,
+			len(media),
+			expected,
+			err,
+		)
 		return RunAgentResult{}, DocumentExtractResult{}, err
 	}
 
 	result := parseDocumentExtractResult(run.ReplyText)
+
+	/* Log parser */
+	s.logReprocess(
+		"document_extract event=parse_done session_id=%s mode=%s passenger_count=%d failure_reason=%s raw_len=%d model=%s provider_response_id=%s",
+		session.ID,
+		strings.TrimSpace(result.Mode),
+		len(result.Passengers),
+		strings.TrimSpace(result.FailureReason),
+		len(strings.TrimSpace(run.ReplyText)),
+		strings.TrimSpace(run.Model),
+		strings.TrimSpace(run.ProviderResponseID),
+	)
+
 	result.ExpectedPassengerCount = expected
 	result.MediaCount = len(media)
 	result.RawText = strings.TrimSpace(run.ReplyText)
@@ -135,7 +215,7 @@ Priorize documentos nesta ordem quando houver mais de um numero: CPF, RG, CNH, C
 		A intencao eh apenas extrair essas informacoes: Nome completo + numero do documento
 Formato:
 {
-  "mode": "EXTRACTED" | "LOW_CONFIDENCE",
+  "mode": "EXTRACTED" | "PARTIAL" | "LOW_CONFIDENCE",
   "passengers": [
     {"name": "Nome completo", "document_type": "CPF|RG|CNH|CERTIDAO_NASCIMENTO", "document": "numero sem pontuacao desnecessaria", "confidence": 0.0}
   ],
@@ -148,7 +228,18 @@ func buildDocumentExtractUserPrompt(expected int) string {
 	if expected > 1 {
 		return fmt.Sprintf("Extraia nome completo e documento da foto recebida. A conversa espera %d passageiros; retorne somente os passageiros que conseguir ler com seguranca.", expected)
 	}
-	return "Extraia nome completo e documento da foto recebida. Retorne somente os dados que conseguir ler."
+	return "Extraia o maximo de informacao legivel. Nao classifique como LOW_CONFIDENCE se pelo menos nome ou algum documento puder ser lido parcialmente. Use PARTIAL quando algum campo faltar ou estiver incerto. Retorne LOW_CONFIDENCE somente se nenhum dado util puder ser lido. Se houver CPF visivel, sempre priorize CPF mesmo que tambem exista RG/CNH. Se o nome estiver parcialmente visivel, retorne o trecho lido e marque confidence menor. Nunca invente numeros ausentes."
+}
+
+func hasIncompletePassenger(passengers []DocumentExtractPassenger) bool {
+	/* Validate the labels of extract data that comes from image */
+
+	for _, passenger := range passengers {
+		if strings.TrimSpace(passenger.Name) == "" || strings.TrimSpace(passenger.Document) == "" || strings.TrimSpace(passenger.DocumentType) == "" || strings.EqualFold(strings.TrimSpace(passenger.DocumentType), "UNKNOWN") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseDocumentExtractResult(text string) DocumentExtractResult {
@@ -177,13 +268,20 @@ func parseDocumentExtractResult(text string) DocumentExtractResult {
 	}
 	for _, raw := range rawPassengers {
 		passenger := parseDocumentExtractPassenger(raw)
-		if passenger.Name == "" || passenger.Document == "" || passenger.DocumentType == "" {
+		if passenger.Name == "" && passenger.Document == "" {
 			continue
+		}
+		if passenger.Document != "" && passenger.DocumentType == "" {
+			passenger.DocumentType = "UNKNOWN"
 		}
 		result.Passengers = append(result.Passengers, passenger)
 	}
 	if len(result.Passengers) > 0 {
-		result.Mode = "EXTRACTED"
+		if hasIncompletePassenger(result.Passengers) {
+			result.Mode = "PARTIAL"
+		} else {
+			result.Mode = "EXTRACTED"
+		}
 		result.FailureReason = ""
 	} else if result.FailureReason == "" {
 		result.FailureReason = "no_complete_document_found"

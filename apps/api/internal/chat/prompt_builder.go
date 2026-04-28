@@ -57,7 +57,7 @@ const defaultAgentSystemPrompt = `
 	- Se a conversa ja indicar mais de um passageiro e so chegar documento ou foto de uma parte deles, confirme o que foi extraido e peca apenas o documento faltante dos demais passageiros.
 	- Crianca de colo com ate 5 anos entra no cadastro, mas nao entra na cobranca.
 	- Nao trate um simples "sim", "isso" ou "pode seguir" como reserva criada; sem RESULTADO DE FERRAMENTA booking_create, ainda nao entre em pagamento.
-#PAGAMENTO:
+# PAGAMENTO:
 	- Depois que houver RESULTADO DE FERRAMENTA booking_create com sucesso, a proxima pergunta correta e se o cliente prefere pagar o valor integral ou apenas o sinal de R$ 250 por passageiro pagante.
 	- Antes dessa escolha entre integral e sinal, nao pergunte meio de pagamento generico como PIX, cartao ou pagar no embarque.
 `

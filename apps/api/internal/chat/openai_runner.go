@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"schumacher-tur/api/internal/shared/config"
 	"strings"
@@ -212,16 +213,22 @@ func buildOpenAIInputContent(ctx context.Context, client *http.Client, input Run
 func resolveOpenAIImageURL(ctx context.Context, client *http.Client, item AgentMediaInput) string {
 	url := strings.TrimSpace(item.URL)
 	if url == "" {
+		log.Printf("openai image resolve skipped reason=empty_url kind=%s mime=%s", item.Kind, item.MimeType)
 		return ""
 	}
 	if strings.HasPrefix(strings.ToLower(url), "data:") {
+		log.Printf("openai image resolve ok source=data_url kind=%s mime=%s", item.Kind, item.MimeType)
 		return url
 	}
 	if client == nil || !isHTTPURL(url) {
+		log.Printf("openai image resolve passthrough reason=no_http_client_or_non_http kind=%s mime=%s url_present=%t", item.Kind, item.MimeType, url != "")
 		return url
 	}
 	if dataURL, err := fetchImageAsDataURL(ctx, client, url, item.MimeType); err == nil {
+		log.Printf("openai image resolve ok source=fetched_data_url kind=%s mime=%s", item.Kind, item.MimeType)
 		return dataURL
+	} else {
+		log.Printf("openai image resolve fetch_failed kind=%s mime=%s error=%v", item.Kind, item.MimeType, err)
 	}
 	return url
 }
@@ -259,7 +266,11 @@ func fetchImageAsDataURL(ctx context.Context, client *http.Client, url string, m
 	if resolvedMime == "" {
 		resolvedMime = http.DetectContentType(body)
 	}
-
+	log.Printf(
+		"openai image fetch ok mime=%s bytes=%d",
+		resolvedMime,
+		len(body),
+	)
 	return "data:" + resolvedMime + ";base64," + base64.StdEncoding.EncodeToString(body), nil
 }
 
