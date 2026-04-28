@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -626,6 +627,50 @@ func TestStartChatBufferFlushLoopDoesNothingWhenDisabled(t *testing.T) {
 	}
 	if chatSvc.reprocessCalls != 0 {
 		t.Fatalf("expected no reprocess calls, got %d", chatSvc.reprocessCalls)
+	}
+}
+
+func TestLogChatBufferFlushSessionResultsIncludesFailureAndSuccessDiagnostics(t *testing.T) {
+	logger := &fakeChatBufferFlushLogger{}
+
+	logChatBufferFlushSessionResults(logger, RunChatBufferFlushResult{
+		JobRunID: "job-123",
+		FlushedSessions: []ChatBufferFlushSessionResult{
+			{
+				SessionID:  "session-failed",
+				ContactKey: "554998887766@s.whatsapp.net",
+				Status:     "failed",
+				Reason:     "reprocess_failed",
+				ErrorText:  "chat agent run failed: upstream error",
+			},
+			{
+				SessionID:      "session-ok",
+				ContactKey:     "554991112222@s.whatsapp.net",
+				Status:         "accepted",
+				Reason:         "draft_generated",
+				DraftMessageID: "draft-123",
+				ToolCallCount:  2,
+			},
+		},
+	})
+
+	if len(logger.logs) != 2 {
+		t.Fatalf("expected two session logs, got %d", len(logger.logs))
+	}
+	if !strings.Contains(logger.logs[0], "status=failed") ||
+		!strings.Contains(logger.logs[0], "session_id=session-failed") ||
+		!strings.Contains(logger.logs[0], "contact_key=554998887766@s.whatsapp.net") ||
+		!strings.Contains(logger.logs[0], "trigger=SYSTEM_BUFFER_FLUSH") ||
+		!strings.Contains(logger.logs[0], "job_run_id=job-123") ||
+		!strings.Contains(logger.logs[0], "error=chat agent run failed: upstream error") {
+		t.Fatalf("failure log missing diagnostics: %s", logger.logs[0])
+	}
+	if !strings.Contains(logger.logs[1], "status=accepted") ||
+		!strings.Contains(logger.logs[1], "session_id=session-ok") ||
+		!strings.Contains(logger.logs[1], "reason=draft_generated") ||
+		!strings.Contains(logger.logs[1], "has_draft=true") ||
+		!strings.Contains(logger.logs[1], "tool_call_count=2") {
+		t.Fatalf("success log missing diagnostics: %s", logger.logs[1])
 	}
 }
 
@@ -2401,6 +2446,7 @@ type fakeChatReviewAlertNotifier struct {
 type fakeChatBufferFlushLogger struct {
 	calls int
 	ch    chan struct{}
+	logs  []string
 }
 
 func findCutoverCheck(items []CutoverReadinessCheck, key string) *CutoverReadinessCheck {
@@ -2431,8 +2477,9 @@ func (f *fakeChatReviewAlertNotifier) NotifyReviewAlert(_ context.Context, paylo
 	return nil
 }
 
-func (f *fakeChatBufferFlushLogger) Printf(string, ...interface{}) {
+func (f *fakeChatBufferFlushLogger) Printf(format string, v ...interface{}) {
 	f.calls++
+	f.logs = append(f.logs, fmt.Sprintf(format, v...))
 	if f.ch == nil {
 		return
 	}

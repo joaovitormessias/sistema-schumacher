@@ -497,6 +497,7 @@ func (s *Service) runChatBufferFlush(ctx context.Context, input RunChatBufferFlu
 		}
 		item.Reason = strings.TrimSpace(reprocessed.Reason)
 		item.Idempotent = reprocessed.Idempotent
+		item.ToolCallCount = len(reprocessed.ToolCalls)
 		if reprocessed.Draft != nil {
 			item.DraftMessageID = strings.TrimSpace(reprocessed.Draft.ID)
 		}
@@ -1612,11 +1613,12 @@ func serializeChatBufferFlushSessions(items []ChatBufferFlushSessionResult) []ma
 	result := make([]map[string]interface{}, 0, len(items))
 	for _, item := range items {
 		payload := map[string]interface{}{
-			"session_id":  item.SessionID,
-			"contact_key": item.ContactKey,
-			"status":      item.Status,
-			"reason":      item.Reason,
-			"idempotent":  item.Idempotent,
+			"session_id":      item.SessionID,
+			"contact_key":     item.ContactKey,
+			"status":          item.Status,
+			"reason":          item.Reason,
+			"idempotent":      item.Idempotent,
+			"tool_call_count": item.ToolCallCount,
 		}
 		if item.PendingUntil != nil {
 			payload["pending_until"] = item.PendingUntil.UTC().Format(time.RFC3339Nano)

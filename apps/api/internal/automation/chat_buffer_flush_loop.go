@@ -35,6 +35,7 @@ func StartChatBufferFlushLoop(ctx context.Context, svc *Service, cfg config.Conf
 			logger.Printf("automation chat-buffer-flush failed: %v", err)
 			return
 		}
+		logChatBufferFlushSessionResults(logger, result)
 		logger.Printf(
 			"automation chat-buffer-flush status=%s reason=%s checked=%d due=%d flushed=%d failed=%d",
 			result.Status,
@@ -61,4 +62,35 @@ func StartChatBufferFlushLoop(ctx context.Context, svc *Service, cfg config.Conf
 			}
 		}
 	}()
+}
+
+func logChatBufferFlushSessionResults(logger chatBufferFlushLogger, result RunChatBufferFlushResult) {
+	if logger == nil {
+		return
+	}
+	for _, item := range result.FlushedSessions {
+		if item.Status == "failed" {
+			logger.Printf(
+				"automation chat-buffer-flush session status=failed session_id=%s contact_key=%s trigger=%s job_run_id=%s reason=%s error=%s",
+				item.SessionID,
+				item.ContactKey,
+				"SYSTEM_BUFFER_FLUSH",
+				result.JobRunID,
+				item.Reason,
+				item.ErrorText,
+			)
+			continue
+		}
+		logger.Printf(
+			"automation chat-buffer-flush session status=%s session_id=%s contact_key=%s trigger=%s job_run_id=%s reason=%s has_draft=%t tool_call_count=%d",
+			item.Status,
+			item.SessionID,
+			item.ContactKey,
+			"SYSTEM_BUFFER_FLUSH",
+			result.JobRunID,
+			item.Reason,
+			item.DraftMessageID != "",
+			item.ToolCallCount,
+		)
+	}
 }

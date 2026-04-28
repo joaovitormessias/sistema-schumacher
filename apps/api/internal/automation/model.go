@@ -128,6 +128,7 @@ type ChatBufferFlushSessionResult struct {
 	Reason         string     `json:"reason,omitempty"`
 	Idempotent     bool       `json:"idempotent"`
 	DraftMessageID string     `json:"draft_message_id,omitempty"`
+	ToolCallCount  int        `json:"tool_call_count"`
 	ErrorText      string     `json:"error_text,omitempty"`
 }
 

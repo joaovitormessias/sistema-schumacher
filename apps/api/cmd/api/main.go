@@ -109,7 +109,7 @@ func main() {
 	rescheduleAssistTool := chat.NewRescheduleAssistTool(bookingLookupTool, reportsSvc, availabilityTool)
 	paymentStatusTool := chat.NewPaymentStatusTool(paymentsSvc)
 	paymentCreateTool := chat.NewPaymentCreateTool(bookingsSvc, paymentsSvc)
-	chatSvc := chat.NewService(chat.NewRepository(pool), cfg, evolutionSender, openAIRunner, availabilityTool, pricingQuoteTool, bookingLookupTool, bookingCreateTool, bookingCancelTool, rescheduleAssistTool, paymentStatusTool, paymentCreateTool)
+	chatSvc := chat.NewService(chat.NewRepository(pool), cfg, log.Default(), evolutionSender, openAIRunner, availabilityTool, pricingQuoteTool, bookingLookupTool, bookingCreateTool, bookingCancelTool, rescheduleAssistTool, paymentStatusTool, paymentCreateTool)
 	chatHandler := chat.NewHandler(chatSvc)
 	automationSvc := automation.NewService(automation.NewRepository(pool), chatSvc, cfg, paymentsRepo, bookingsSvc)
 	automation.StartChatBufferFlushLoop(ctx, automationSvc, cfg, log.Default())

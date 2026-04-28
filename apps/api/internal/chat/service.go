@@ -40,6 +40,7 @@ var (
 type Service struct {
 	store         Store
 	cfg           config.Config
+	logger        chatLogger
 	sender        ReplySender
 	runner        AgentRunner
 	availability  AvailabilitySearcher
@@ -52,7 +53,12 @@ type Service struct {
 	bookingCancel BookingCanceler
 }
 
+type chatLogger interface {
+	Printf(format string, v ...interface{})
+}
+
 func NewService(store Store, cfg config.Config, deps ...interface{}) *Service {
+	var logger chatLogger
 	var sender ReplySender
 	var runner AgentRunner
 	var availability AvailabilitySearcher
@@ -65,6 +71,10 @@ func NewService(store Store, cfg config.Config, deps ...interface{}) *Service {
 	var bookingCancel BookingCanceler
 	for _, dep := range deps {
 		switch typed := dep.(type) {
+		case chatLogger:
+			if logger == nil {
+				logger = typed
+			}
 		case ReplySender:
 			if sender == nil {
 				sender = typed
@@ -110,6 +120,7 @@ func NewService(store Store, cfg config.Config, deps ...interface{}) *Service {
 	return &Service{
 		store:         store,
 		cfg:           cfg,
+		logger:        logger,
 		sender:        sender,
 		runner:        runner,
 		availability:  availability,
@@ -121,6 +132,13 @@ func NewService(store Store, cfg config.Config, deps ...interface{}) *Service {
 		paymentCreate: paymentCreate,
 		bookingCancel: bookingCancel,
 	}
+}
+
+func (s *Service) logReprocess(format string, v ...interface{}) {
+	if s == nil || s.logger == nil {
+		return
+	}
+	s.logger.Printf(format, v...)
 }
 
 func (s *Service) Ingest(ctx context.Context, input IngestMessageInput) (IngestMessageResult, error) {
@@ -545,6 +563,20 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	if err != nil {
 		return ReprocessResult{}, err
 	}
+	trigger := strings.ToUpper(strings.TrimSpace(input.Trigger))
+	if trigger == "" {
+		trigger = "MANUAL"
+	}
+	jobRunID := strings.TrimSpace(asString(input.Metadata["job_run_id"]))
+	s.logReprocess(
+		"chat reprocess event=start session_id=%s contact_key=%s trigger=%s job_run_id=%s handoff_status=%s current_owner_user_id=%s",
+		session.ID,
+		strings.TrimSpace(session.ContactKey),
+		trigger,
+		jobRunID,
+		strings.TrimSpace(session.HandoffStatus),
+		strings.TrimSpace(session.CurrentOwnerUserID),
+	)
 	if session.HandoffStatus != "BOT" || strings.TrimSpace(session.CurrentOwnerUserID) != "" {
 		return ReprocessResult{}, ErrReprocessRequiresBot
 	}
@@ -555,6 +587,14 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	}
 
 	candidates := selectReprocessCandidateMessages(history)
+	s.logReprocess(
+		"chat reprocess event=candidates_selected session_id=%s trigger=%s job_run_id=%s candidate_count=%d history_count=%d",
+		session.ID,
+		trigger,
+		jobRunID,
+		len(candidates),
+		len(history),
+	)
 	if len(candidates) == 0 {
 		if existingDraft := findLatestDraftMessage(history); existingDraft != nil {
 			result := ReprocessResult{
@@ -564,14 +604,9 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 				Draft:      existingDraft,
 				Idempotent: true,
 			}
-			return s.maybeAutoSendDraft(ctx, result)
+			return s.finishReprocessWithAutoSend(ctx, result, trigger, jobRunID)
 		}
 		return ReprocessResult{}, ErrReprocessNoMessages
-	}
-
-	trigger := strings.ToUpper(strings.TrimSpace(input.Trigger))
-	if trigger == "" {
-		trigger = "MANUAL"
 	}
 
 	observedAt := time.Now().UTC()
@@ -588,6 +623,13 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		"current_turn_body":          joinCandidateBodies(candidates),
 	}
 
+	s.logReprocess(
+		"chat reprocess event=save_reprocess_snapshot_start session_id=%s trigger=%s job_run_id=%s message_count=%d",
+		session.ID,
+		trigger,
+		jobRunID,
+		len(candidates),
+	)
 	persisted, err := s.store.SaveReprocessSnapshot(ctx, SaveReprocessSnapshotInput{
 		SessionID:       sessionID,
 		MessageIDs:      candidateMessageIDs(candidates),
@@ -598,8 +640,22 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		Buffer:          buffer,
 	})
 	if err != nil {
+		s.logReprocess(
+			"chat reprocess event=save_reprocess_snapshot_failed session_id=%s trigger=%s job_run_id=%s error=%v",
+			session.ID,
+			trigger,
+			jobRunID,
+			err,
+		)
 		return ReprocessResult{}, err
 	}
+	s.logReprocess(
+		"chat reprocess event=save_reprocess_snapshot_done session_id=%s trigger=%s job_run_id=%s message_count=%d",
+		persisted.Session.ID,
+		trigger,
+		jobRunID,
+		len(persisted.Messages),
+	)
 
 	result := ReprocessResult{
 		Session:  persisted.Session,
@@ -609,6 +665,12 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		Messages: persisted.Messages,
 	}
 	if !s.canRunAgent() {
+		s.logReprocess(
+			"chat reprocess event=runner_disabled session_id=%s trigger=%s job_run_id=%s reason=agent_runner_unavailable",
+			persisted.Session.ID,
+			trigger,
+			jobRunID,
+		)
 		return result, nil
 	}
 
@@ -624,7 +686,7 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		result.Draft = existing
 		result.Idempotent = true
 		result.Reason = "draft_already_generated"
-		return s.maybeAutoSendDraft(ctx, result)
+		return s.finishReprocessWithAutoSend(ctx, result, trigger, jobRunID)
 	}
 
 	systemPrompt := buildAgentSystemPrompt()
@@ -632,10 +694,23 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	toolContext := agentToolContext{}
 	if !unsupportedPackageHandled {
 		var err error
+		s.logReprocess(
+			"chat reprocess event=resolve_agent_tool_context_start session_id=%s trigger=%s job_run_id=%s",
+			persisted.Session.ID,
+			trigger,
+			jobRunID,
+		)
 		toolContext, err = s.resolveAgentToolContext(ctx, persisted.Session, history, memory)
 		if err != nil {
 			return ReprocessResult{}, err
 		}
+		s.logReprocess(
+			"chat reprocess event=resolve_agent_tool_context_done session_id=%s trigger=%s job_run_id=%s tool_call_count=%d",
+			persisted.Session.ID,
+			trigger,
+			jobRunID,
+			len(toolContext.Calls),
+		)
 	}
 	result.ToolCalls = toolContext.Calls
 
@@ -660,6 +735,14 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		run = buildDocumentExtractDraftRun(*toolContext.DocumentExtract)
 	} else {
 		userPrompt = buildAgentUserPrompt(persisted.Session, memory, toolContext)
+		s.logReprocess(
+			"chat reprocess event=runner_run_start session_id=%s trigger=%s job_run_id=%s current_turn_count=%d tool_call_count=%d",
+			persisted.Session.ID,
+			trigger,
+			jobRunID,
+			len(candidates),
+			len(toolContext.Calls),
+		)
 		run, err = s.runner.Run(ctx, RunAgentInput{
 			Session:          persisted.Session,
 			CurrentTurnIDs:   candidateMessageIDs(candidates),
@@ -669,8 +752,22 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 			IdempotencyKey:   draftID,
 		})
 		if err != nil {
+			s.logReprocess(
+				"chat reprocess event=runner_run_failed session_id=%s trigger=%s job_run_id=%s error=%v",
+				persisted.Session.ID,
+				trigger,
+				jobRunID,
+				err,
+			)
 			return ReprocessResult{}, fmt.Errorf("%w: %v", ErrAgentRunFailed, err)
 		}
+		s.logReprocess(
+			"chat reprocess event=runner_run_done session_id=%s trigger=%s job_run_id=%s has_reply=%t",
+			persisted.Session.ID,
+			trigger,
+			jobRunID,
+			strings.TrimSpace(run.ReplyText) != "",
+		)
 	}
 
 	runAt := time.Now().UTC()
@@ -678,6 +775,14 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	draftAgentState := buildDraftGeneratedAgentState(persisted.Session.Metadata, candidates, draftID, run, toolContext.Calls, autoSendPolicy, runAt)
 	draftBuffer := buildDraftGeneratedBufferState(persisted.Session.Metadata, candidates, draftID, runAt)
 	draftPayload, draftNormalizedPayload := buildAgentDraftPayload(persisted.Session, candidates, draftID, systemPrompt, userPrompt, run, toolContext, autoSendPolicy, runAt)
+	s.logReprocess(
+		"chat reprocess event=save_agent_draft_start session_id=%s trigger=%s job_run_id=%s idempotency_key=%s tool_call_count=%d",
+		sessionID,
+		trigger,
+		jobRunID,
+		draftID,
+		len(toolContext.Calls),
+	)
 	draft, err := s.store.SaveAgentDraft(ctx, SaveAgentDraftInput{
 		SessionID:         sessionID,
 		IdempotencyKey:    draftID,
@@ -692,6 +797,13 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	})
 	if err != nil {
 		if IsUniqueViolation(err) {
+			s.logReprocess(
+				"chat reprocess event=save_agent_draft_conflict session_id=%s trigger=%s job_run_id=%s idempotency_key=%s",
+				sessionID,
+				trigger,
+				jobRunID,
+				draftID,
+			)
 			existing, findErr := s.store.FindMessageByKeys(ctx, "", draftID)
 			if findErr != nil {
 				return ReprocessResult{}, findErr
@@ -708,14 +820,29 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 				return result, nil
 			}
 		}
+		s.logReprocess(
+			"chat reprocess event=save_agent_draft_failed session_id=%s trigger=%s job_run_id=%s idempotency_key=%s error=%v",
+			sessionID,
+			trigger,
+			jobRunID,
+			draftID,
+			err,
+		)
 		return ReprocessResult{}, err
 	}
+	s.logReprocess(
+		"chat reprocess event=save_agent_draft_done session_id=%s trigger=%s job_run_id=%s draft_message_id=%s",
+		draft.Session.ID,
+		trigger,
+		jobRunID,
+		draft.Message.ID,
+	)
 
 	result.Session = draft.Session
 	result.ToolCalls = toolContext.Calls
 	result.Draft = &draft.Message
 	result.Reason = "draft_generated"
-	return s.maybeAutoSendDraft(ctx, result)
+	return s.finishReprocessWithAutoSend(ctx, result, trigger, jobRunID)
 }
 
 func (s *Service) RetryDraftAutoSend(ctx context.Context, input RetryDraftAutoSendInput) (RetryDraftAutoSendResult, error) {
@@ -1526,6 +1653,47 @@ func (s *Service) maybeAutoSendDraft(ctx context.Context, result ReprocessResult
 	result.Session = reply.Session
 	result.Reason = "draft_auto_send_pending"
 	return result, nil
+}
+
+func (s *Service) finishReprocessWithAutoSend(ctx context.Context, result ReprocessResult, trigger string, jobRunID string) (ReprocessResult, error) {
+	draftID := ""
+	if result.Draft != nil {
+		draftID = strings.TrimSpace(result.Draft.ID)
+	}
+	s.logReprocess(
+		"chat reprocess event=maybe_auto_send_draft_start session_id=%s trigger=%s job_run_id=%s reason=%s has_draft=%t draft_message_id=%s",
+		result.Session.ID,
+		trigger,
+		jobRunID,
+		strings.TrimSpace(result.Reason),
+		result.Draft != nil,
+		draftID,
+	)
+	updated, err := s.maybeAutoSendDraft(ctx, result)
+	if err != nil {
+		s.logReprocess(
+			"chat reprocess event=maybe_auto_send_draft_failed session_id=%s trigger=%s job_run_id=%s error=%v",
+			result.Session.ID,
+			trigger,
+			jobRunID,
+			err,
+		)
+		return ReprocessResult{}, err
+	}
+	updatedDraftID := ""
+	if updated.Draft != nil {
+		updatedDraftID = strings.TrimSpace(updated.Draft.ID)
+	}
+	s.logReprocess(
+		"chat reprocess event=maybe_auto_send_draft_done session_id=%s trigger=%s job_run_id=%s reason=%s has_draft=%t draft_message_id=%s",
+		updated.Session.ID,
+		trigger,
+		jobRunID,
+		strings.TrimSpace(updated.Reason),
+		updated.Draft != nil,
+		updatedDraftID,
+	)
+	return updated, nil
 }
 
 func (s *Service) canAutoSendDraft(session Session, draft Message) bool {
