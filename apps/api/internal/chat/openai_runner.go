@@ -9,10 +9,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"schumacher-tur/api/internal/shared/config"
 	"strings"
 	"time"
-
-	"schumacher-tur/api/internal/shared/config"
 )
 
 var (
@@ -29,6 +28,44 @@ type OpenAIRunner struct {
 	model       string
 	visionModel string
 	client      *http.Client
+}
+
+func compactOpenAIErrorBody(body []byte) string {
+	/* Sanitize the message error that comes from OpenAI */
+
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return ""
+	}
+
+	parsed := map[string]interface{}{}
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		if errMap, ok := parsed["error"].(map[string]interface{}); ok {
+			message := strings.TrimSpace(asString(errMap["message"]))
+			errType := strings.TrimSpace(asString(errMap["type"]))
+			code := strings.TrimSpace(asString(errMap["code"]))
+
+			parts := []string{}
+			if errType != "" {
+				parts = append(parts, "type="+errType)
+			}
+			if code != "" {
+				parts = append(parts, "code="+code)
+			}
+			if message != "" {
+				parts = append(parts, "message="+message)
+			}
+			if len(parts) > 0 {
+				return strings.Join(parts, " ")
+			}
+
+		}
+	}
+
+	if len(text) > 1500 {
+		return text[:1500]
+	}
+	return text
 }
 
 func NewOpenAIRunner(cfg config.Config) *OpenAIRunner {
@@ -114,6 +151,15 @@ func (r *OpenAIRunner) runRequest(ctx context.Context, requestPayload map[string
 		_ = json.Unmarshal(responseBody, &responsePayload)
 	}
 	if resp.StatusCode >= 300 {
+		errorBody := compactOpenAIErrorBody(responseBody)
+		if errorBody != "" {
+			return RunAgentResult{}, fmt.Errorf(
+				"%w: status %d %s",
+				ErrOpenAIRunFailed,
+				resp.StatusCode,
+				errorBody,
+			)
+		}
 		return RunAgentResult{}, fmt.Errorf("%w: status %d", ErrOpenAIRunFailed, resp.StatusCode)
 	}
 

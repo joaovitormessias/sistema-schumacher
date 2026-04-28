@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -176,5 +178,56 @@ func TestOpenAIRunnerRunFallsBackToTextWhenImageRequestFails(t *testing.T) {
 	}
 	if result.ReplyText != "Recebi a foto do documento." {
 		t.Fatalf("unexpected fallback reply text: %s", result.ReplyText)
+	}
+}
+
+func TestCompactOpenAIErrorBodyExtractsStructuredErrorFields(t *testing.T) {
+	body := []byte(`{"error":{"message":"Rate limit reached","type":"rate_limit_error","code":"rate_limit_exceeded"}}`)
+
+	got := compactOpenAIErrorBody(body)
+
+	want := "type=rate_limit_error code=rate_limit_exceeded message=Rate limit reached"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestOpenAIRunnerRunIncludesCompactedErrorBodyOnFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "Rate limit reached",
+				"type":    "rate_limit_error",
+				"code":    "rate_limit_exceeded",
+			},
+		})
+	}))
+	defer server.Close()
+
+	runner := NewOpenAIRunner(config.Config{
+		OpenAIAPIKey: "sk-test",
+		OpenAIModel:  "gpt-test",
+	})
+	runner.baseURL = server.URL
+
+	_, err := runner.Run(context.Background(), RunAgentInput{
+		SystemPrompt: "system",
+		UserPrompt:   "user",
+	})
+	if err == nil {
+		t.Fatal("expected run agent error")
+	}
+	if !errors.Is(err, ErrOpenAIRunFailed) {
+		t.Fatalf("expected ErrOpenAIRunFailed, got %v", err)
+	}
+	text := err.Error()
+	if !strings.Contains(text, "status 429") {
+		t.Fatalf("expected status code in error, got %q", text)
+	}
+	if !strings.Contains(text, "type=rate_limit_error") ||
+		!strings.Contains(text, "code=rate_limit_exceeded") ||
+		!strings.Contains(text, "message=Rate limit reached") {
+		t.Fatalf("expected compacted error body in error, got %q", text)
 	}
 }
