@@ -2066,6 +2066,83 @@ func TestHandleEvolutionMessagesResponseBody(t *testing.T) {
 	}
 }
 
+func TestHandleEvolutionMessagesEnrichesImageWithEvolutionBase64(t *testing.T) {
+	type capturedMediaRequest struct {
+		path   string
+		apiKey string
+		body   map[string]interface{}
+	}
+
+	requests := make(chan capturedMediaRequest, 1)
+	mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		requests <- capturedMediaRequest{
+			path:   r.URL.Path,
+			apiKey: r.Header.Get("apikey"),
+			body:   body,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"base64":"/9j/2Q=="}`))
+	}))
+	defer mediaServer.Close()
+
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{
+		EvolutionBaseURL:  mediaServer.URL,
+		EvolutionAPIKey:   "secret",
+		EvolutionInstance: "belle",
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-5"},
+			"message":{"imageMessage":{"caption":"foto do documento","mimetype":"image/jpeg","url":"https://files.example.test/doc.jpg"}},
+			"messageType":"imageMessage"
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	var captured capturedMediaRequest
+	select {
+	case captured = <-requests:
+	case <-time.After(time.Second):
+		t.Fatal("expected evolution media request")
+	}
+	if captured.path != "/chat/getBase64FromMediaMessage/belle" {
+		t.Fatalf("unexpected media path: %s", captured.path)
+	}
+	if captured.apiKey != "secret" {
+		t.Fatalf("unexpected api key header: %s", captured.apiKey)
+	}
+	message, _ := captured.body["message"].(map[string]interface{})
+	key, _ := message["key"].(map[string]interface{})
+	if key["id"] != "MSG-5" {
+		t.Fatalf("unexpected media message id: %#v", key["id"])
+	}
+	if key["remoteJid"] != "554998208115@s.whatsapp.net" {
+		t.Fatalf("unexpected media remote jid: %#v", key["remoteJid"])
+	}
+	if key["fromMe"] != false {
+		t.Fatalf("unexpected fromMe: %#v", key["fromMe"])
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["image_data_url"]; got != "data:image/jpeg;base64,/9j/2Q==" {
+		t.Fatalf("unexpected image data url: %#v", got)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["image_source"]; got != "evolution_get_base64" {
+		t.Fatalf("unexpected image source: %#v", got)
+	}
+}
+
 func TestHandleEvolutionMessagesAcceptsImageWithStructuredFileLength(t *testing.T) {
 	chatSvc := &fakeChatIngestor{}
 	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{}))

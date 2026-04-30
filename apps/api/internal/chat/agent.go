@@ -210,14 +210,29 @@ func collectCandidateMedia(messages []Message) []AgentMediaInput {
 		normalized := message.NormalizedPayload
 		switch kind {
 		case "IMAGE":
-			if url := strings.TrimSpace(asString(normalized["image_url"])); isHTTPURL(url) {
+			mimeType := strings.TrimSpace(asString(normalized["image_mime_type"]))
+			dataURL := strings.TrimSpace(asString(normalized["image_data_url"]))
+			imageURL := strings.TrimSpace(asString(normalized["image_url"]))
+
+			if strings.HasPrefix(strings.ToLower(dataURL), "data:image/") {
 				items = append(items, AgentMediaInput{
 					Kind:      "IMAGE",
-					URL:       url,
-					MimeType:  strings.TrimSpace(asString(normalized["image_mime_type"])),
+					URL:       dataURL,
+					MimeType:  mimeType,
+					MessageID: message.ID,
+				})
+				continue
+			}
+
+			if isHTTPURL(imageURL) {
+				items = append(items, AgentMediaInput{
+					Kind:      "IMAGE",
+					URL:       imageURL,
+					MimeType:  mimeType,
 					MessageID: message.ID,
 				})
 			}
+
 		case "DOCUMENT":
 			mimeType := strings.TrimSpace(asString(normalized["document_mime_type"]))
 			if strings.HasPrefix(strings.ToLower(mimeType), "image/") {

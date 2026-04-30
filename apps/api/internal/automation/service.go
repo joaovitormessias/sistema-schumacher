@@ -1,10 +1,14 @@
 package automation
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 
@@ -96,6 +100,107 @@ func NewService(store Store, chatSvc ChatIngestor, cfg config.Config, deps ...in
 	}
 }
 
+const maxEvolutionInlineImageBytes = 8 * 1024 * 1024
+
+func (s *Service) fetchEvolutionMediaDataURL(
+	ctx context.Context,
+	messageID string,
+	remoteJID string,
+	fromMe bool,
+	mimeType string,
+) (string, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(s.cfg.EvolutionBaseURL), "/")
+	instance := strings.TrimSpace(s.cfg.EvolutionInstance)
+	apiKey := strings.TrimSpace(s.cfg.EvolutionAPIKey)
+	messageID = strings.TrimSpace(messageID)
+	remoteJID = strings.TrimSpace(remoteJID)
+
+	if baseURL == "" || instance == "" || apiKey == "" || messageID == "" || remoteJID == "" {
+		return "", errors.New("missing evolution media config")
+	}
+
+	endpoint := baseURL + "/chat/getBase64FromMediaMessage/" + instance
+
+	requestPayload := map[string]interface{}{
+		"message": map[string]interface{}{
+			"key": map[string]interface{}{
+				"id":        messageID,
+				"remoteJid": remoteJID,
+				"fromMe":    fromMe,
+			},
+		},
+		"convertToMp4": false,
+	}
+
+	requestBody, err := json.Marshal(requestPayload)
+	if err != nil {
+		return "", err
+	}
+
+	client := &http.Client{Timeout: 45 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("apikey", apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEvolutionInlineImageBytes*2))
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf(
+			"evolution get base64 failed status=%d body=%s",
+			resp.StatusCode,
+			truncateForLog(string(rawBody), 500),
+		)
+	}
+
+	parsed := map[string]interface{}{}
+	if err := json.Unmarshal(rawBody, &parsed); err != nil {
+		return "", err
+	}
+
+	base64Text := firstNonEmptyString(
+		asStringPath(parsed, "base64"),
+		asStringPath(parsed, "data", "base64"),
+		asStringPath(parsed, "message", "base64"),
+		asStringPath(parsed, "data", "message", "base64"),
+		asStringPath(parsed, "data", "message", "base64Message"),
+	)
+
+	base64Text = stripDataURLPrefix(base64Text)
+	if strings.TrimSpace(base64Text) == "" {
+		return "", errors.New("evolution response missing base64")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(base64Text)
+	if err != nil {
+		return "", fmt.Errorf("invalid evolution base64: %w", err)
+	}
+	if len(decoded) == 0 {
+		return "", errors.New("empty evolution media")
+	}
+	if len(decoded) > maxEvolutionInlineImageBytes {
+		return "", errors.New("evolution media too large")
+	}
+
+	resolvedMime := strings.TrimSpace(mimeType)
+	if resolvedMime == "" {
+		resolvedMime = http.DetectContentType(decoded)
+	}
+
+	return "data:" + resolvedMime + ";base64," + base64.StdEncoding.EncodeToString(decoded), nil
+}
+
 func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (EvolutionWebhookResult, error) {
 	payload, payloadMap, err := decodeEvolutionPayload(body)
 	if err != nil {
@@ -149,6 +254,34 @@ func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (Evo
 	}
 	for key, value := range extractEvolutionMessageMetadata(payload.Data) {
 		normalized[key] = value
+	}
+
+	if strings.EqualFold(strings.TrimSpace(payload.Data.MessageType), "imageMessage") {
+		keyID := strings.TrimSpace(payload.Data.Key.ID)
+		remoteJID := strings.TrimSpace(payload.Data.Key.RemoteJID)
+		if remoteJID == "" {
+			remoteJID = strings.TrimSpace(payload.Data.Key.RemoteJIDAlt)
+		}
+
+		imageMime := strings.TrimSpace(stringValue(normalized["image_mime_type"]))
+		if imageMime == "" {
+			imageMime = "image/jpeg"
+		}
+
+		normalized["evolution_message_id"] = keyID
+		normalized["evolution_remote_jid"] = remoteJID
+		normalized["evolution_from_me"] = payload.Data.Key.FromMe
+
+		dataURL, mediaErr := s.fetchEvolutionMediaDataURL(ctx, keyID, remoteJID, payload.Data.Key.FromMe, imageMime)
+		if mediaErr == nil && strings.TrimSpace(dataURL) != "" {
+			normalized["image_data_url"] = dataURL
+			normalized["image_source"] = "evolution_get_base64"
+		} else {
+			normalized["image_source"] = "evolution_url_fallback"
+			if mediaErr != nil {
+				normalized["image_base64_error"] = mediaErr.Error()
+			}
+		}
 	}
 
 	result, err := s.chat.Ingest(ctx, chat.IngestMessageInput{
@@ -1734,6 +1867,36 @@ func firstNonEmptyString(values ...interface{}) string {
 		}
 	}
 	return ""
+}
+
+func asStringPath(root map[string]interface{}, path ...string) string {
+	var current interface{} = root
+	for _, key := range path {
+		item, ok := current.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		current = item[key]
+	}
+	return strings.TrimSpace(stringValue(current))
+}
+
+func stripDataURLPrefix(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(strings.ToLower(value), "data:") {
+		if index := strings.Index(value, ","); index >= 0 {
+			return strings.TrimSpace(value[index+1:])
+		}
+	}
+	return value
+}
+
+func truncateForLog(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	return value[:limit]
 }
 
 func intValue(value interface{}) int {
