@@ -25,6 +25,9 @@ func parseBookingCreateInput(session Session, history []Message, text string, cu
 	if body == "" {
 		return BookingCreateInput{}, false
 	}
+	if shouldBlockBookingCreateBecausePaymentFlow(history, body) {
+		return BookingCreateInput{}, false
+	}
 	confirmationOnly := looksLikeBookingCreateConfirmation(body)
 	if !looksLikeCreateBookingIntent(body) && !confirmationOnly {
 		return BookingCreateInput{}, false
@@ -70,6 +73,143 @@ func parseBookingCreateInput(session Session, history []Message, text string, cu
 	}
 	input.IdempotencyKey = buildBookingCreateIdempotencyKey(session, input)
 	return input, true
+}
+
+func shouldBlockBookingCreateBecausePaymentFlow(history []Message, currentTurn string) bool {
+	folded := strings.Join(strings.Fields(foldChatText(currentTurn)), " ")
+	if folded == "" || !looksLikePaymentFlowShortReply(folded) {
+		return false
+	}
+	if !historyMentionsCreatedBooking(history) {
+		return false
+	}
+	if historyMentionsPaymentChoice(history) || historyMentionsPixConfirmation(history) {
+		return true
+	}
+
+	switch folded {
+	case "pix", "integral", "sinal", "entrada", "deposito":
+		return true
+	default:
+		return false
+	}
+}
+
+func historyMentionsCreatedBooking(history []Message) bool {
+	previous := findLatestBookingCreateContext(history)
+	return previous != nil && strings.TrimSpace(previous.BookingID) != ""
+}
+
+func historyMentionsPaymentChoice(history []Message) bool {
+	start := len(history) - 20
+	if start < 0 {
+		start = 0
+	}
+
+	for i := len(history) - 1; i >= start; i-- {
+		message := history[i]
+		body := strings.Join(strings.Fields(foldChatText(message.Body)), " ")
+		if body == "" {
+			continue
+		}
+
+		if strings.EqualFold(strings.TrimSpace(message.Direction), "INBOUND") {
+			if detectRequestedPaymentType(body) != "" {
+				return true
+			}
+			if body == "pix" || body == "via pix" || body == "pelo pix" {
+				return true
+			}
+		}
+
+		if strings.Contains(body, "valor integral") ||
+			strings.Contains(body, "pagar o valor integral") ||
+			strings.Contains(body, "apenas o sinal") ||
+			strings.Contains(body, "sinal de r") ||
+			strings.Contains(body, "integral ou sinal") ||
+			strings.Contains(body, "prefere pagar") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func historyMentionsPixConfirmation(history []Message) bool {
+	start := len(history) - 20
+	if start < 0 {
+		start = 0
+	}
+
+	for i := len(history) - 1; i >= start; i-- {
+		body := strings.Join(strings.Fields(foldChatText(history[i].Body)), " ")
+		if body == "" {
+			continue
+		}
+
+		if strings.Contains(body, "chave pix") ||
+			strings.Contains(body, "codigo pix") ||
+			strings.Contains(body, "codigo do pix") ||
+			strings.Contains(body, "copia e cola") ||
+			strings.Contains(body, "pix copia") {
+			return true
+		}
+
+		if strings.Contains(body, "pix") && (strings.Contains(body, "quer que eu envie") ||
+			strings.Contains(body, "posso enviar") ||
+			strings.Contains(body, "vou gerar") ||
+			strings.Contains(body, "gerar") ||
+			strings.Contains(body, "enviar") ||
+			strings.Contains(body, "manda")) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func looksLikePaymentFlowShortReply(folded string) bool {
+	folded = strings.Join(strings.Fields(folded), " ")
+	switch folded {
+	case "sim",
+		"ok",
+		"okay",
+		"certo",
+		"isso",
+		"isso mesmo",
+		"pode",
+		"pode sim",
+		"pode mandar",
+		"pode enviar",
+		"manda",
+		"mande",
+		"envia",
+		"envie",
+		"pix",
+		"via pix",
+		"pelo pix",
+		"integral",
+		"sinal",
+		"entrada",
+		"deposito":
+		return true
+	}
+
+	words := strings.Fields(folded)
+	if len(words) <= 4 {
+		if strings.Contains(folded, "pix") {
+			return true
+		}
+		if detectRequestedPaymentType(folded) != "" {
+			return true
+		}
+		if strings.Contains(folded, "pode") &&
+			(strings.Contains(folded, "mandar") || strings.Contains(folded, "enviar") || len(words) <= 2) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func looksLikeBookingCreateConfirmation(text string) bool {

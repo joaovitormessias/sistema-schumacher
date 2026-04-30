@@ -6,7 +6,10 @@ import (
 
 func parsePaymentCreateInput(session Session, history []Message, text string, currentBooking *BookingLookupResult, currentBookingCreate *BookingCreateResult) (PaymentCreateInput, bool) {
 	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
-	if body == "" || !looksLikePaymentCreateIntent(body) {
+	if body == "" {
+		return PaymentCreateInput{}, false
+	}
+	if !looksLikePaymentCreateIntent(body) && !looksLikeContextualPaymentCreateIntent(history, body) {
 		return PaymentCreateInput{}, false
 	}
 
@@ -15,15 +18,17 @@ func parsePaymentCreateInput(session Session, history []Message, text string, cu
 		return PaymentCreateInput{}, false
 	}
 
+	paymentType := resolveRequestedPaymentType(history, body)
+
 	input := PaymentCreateInput{
 		BookingID:        bookingID,
 		ReservationCode:  reservationCode,
-		PaymentType:      extractRequestedPaymentType(body),
+		PaymentType:      paymentType,
 		DepositPerPerson: 250,
 		CustomerName:     strings.TrimSpace(session.CustomerName),
 		CustomerPhone:    strings.TrimSpace(session.CustomerPhone),
 		CustomerDocument: extractExplicitPaymentDocument(body),
-		Note:             buildPaymentCreateNote(bookingID, reservationCode, body),
+		Note:             buildPaymentCreateNoteForType(bookingID, reservationCode, paymentType),
 	}
 	return input, true
 }
@@ -62,20 +67,130 @@ func looksLikePaymentCreateIntent(text string) bool {
 	return false
 }
 
-func extractRequestedPaymentType(text string) string {
-	lower := strings.ToLower(strings.TrimSpace(text))
+func looksLikeContextualPaymentCreateIntent(history []Message, text string) bool {
+	if !historyMentionsCreatedBooking(history) {
+		return false
+	}
+
+	folded := strings.Join(strings.Fields(foldChatText(text)), " ")
+	if folded == "" {
+		return false
+	}
+
+	if looksLikePaymentCreateConfirmationReply(folded) && historyMentionsPixConfirmation(history) {
+		return true
+	}
+
+	if looksLikePixOnlyPaymentReply(folded) && historyMentionsPaymentChoice(history) {
+		return true
+	}
+
+	if detectRequestedPaymentType(folded) != "" && (historyMentionsPaymentChoice(history) || historyMentionsPixConfirmation(history)) {
+		return true
+	}
+
+	return false
+}
+
+func looksLikePaymentCreateConfirmationReply(folded string) bool {
+	folded = strings.Join(strings.Fields(folded), " ")
+	switch folded {
+	case "sim",
+		"ok",
+		"okay",
+		"certo",
+		"isso",
+		"isso mesmo",
+		"pode",
+		"pode sim",
+		"pode mandar",
+		"pode enviar",
+		"manda",
+		"mande",
+		"envia",
+		"envie",
+		"confirmo",
+		"confirmado":
+		return true
+	}
+
+	words := strings.Fields(folded)
+	if len(words) <= 4 &&
+		strings.Contains(folded, "pode") &&
+		(strings.Contains(folded, "mandar") || strings.Contains(folded, "enviar")) {
+		return true
+	}
+
+	return false
+}
+
+func looksLikePixOnlyPaymentReply(folded string) bool {
+	folded = strings.Join(strings.Fields(folded), " ")
+	switch folded {
+	case "pix",
+		"no pix",
+		"por pix",
+		"via pix",
+		"pelo pix",
+		"pagar no pix",
+		"pagar via pix",
+		"manda pix",
+		"mande pix",
+		"envia pix",
+		"envie pix":
+		return true
+	}
+
+	return len(strings.Fields(folded)) <= 4 && strings.Contains(folded, "pix")
+}
+
+func resolveRequestedPaymentType(history []Message, text string) string {
+	if explicit := detectRequestedPaymentType(text); explicit != "" {
+		return explicit
+	}
+	if previous := findLatestRequestedPaymentType(history); previous != "" {
+		return previous
+	}
+	return extractRequestedPaymentType(text)
+}
+
+func findLatestRequestedPaymentType(history []Message) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		message := history[i]
+		if !strings.EqualFold(strings.TrimSpace(message.Direction), "INBOUND") {
+			continue
+		}
+
+		body := strings.TrimSpace(message.Body)
+		if body == "" {
+			continue
+		}
+
+		if detected := detectRequestedPaymentType(body); detected != "" {
+			return detected
+		}
+	}
+
+	return ""
+}
+
+func detectRequestedPaymentType(text string) string {
+	folded := strings.Join(strings.Fields(foldChatText(text)), " ")
+	if folded == "" {
+		return ""
+	}
+
 	integralKeywords := []string{
 		"integral",
 		"valor total",
 		"pagar tudo",
 		"quitar",
 		"quitacao",
-		"quitação",
 		"restante",
 		"saldo",
 	}
 	for _, keyword := range integralKeywords {
-		if strings.Contains(lower, keyword) {
+		if strings.Contains(folded, keyword) {
 			return "integral"
 		}
 	}
@@ -84,12 +199,19 @@ func extractRequestedPaymentType(text string) string {
 		"sinal",
 		"entrada",
 		"deposito",
-		"depósito",
 	}
 	for _, keyword := range signalKeywords {
-		if strings.Contains(lower, keyword) {
+		if strings.Contains(folded, keyword) {
 			return "sinal"
 		}
+	}
+
+	return ""
+}
+
+func extractRequestedPaymentType(text string) string {
+	if detected := detectRequestedPaymentType(text); detected != "" {
+		return detected
 	}
 	return "sinal"
 }
@@ -125,8 +247,12 @@ func resolvePaymentCreateTarget(text string, history []Message, currentBooking *
 }
 
 func buildPaymentCreateNote(bookingID string, reservationCode string, text string) string {
+	return buildPaymentCreateNoteForType(bookingID, reservationCode, extractRequestedPaymentType(text))
+}
+
+func buildPaymentCreateNoteForType(bookingID string, reservationCode string, paymentType string) string {
 	target := firstNonEmpty(strings.TrimSpace(reservationCode), strings.TrimSpace(bookingID))
-	return "Pagamento " + extractRequestedPaymentType(text) + " reserva " + target
+	return "Pagamento " + normalizePaymentType(paymentType) + " reserva " + target
 }
 
 func findLatestBookingCreateContext(history []Message) *BookingCreateResult {

@@ -23,18 +23,22 @@ var (
 	reservationCodePattern = regexp.MustCompile(`\b[A-Z0-9]{8}\b`)
 )
 
-const toolNameAvailabilitySearch = "availability_search"
-const toolNamePricingQuote = "pricing_quote"
-const toolNameBookingLookup = "booking_lookup"
-const toolNameBookingCreate = "booking_create"
-const toolNameBookingCancel = "booking_cancel"
-const toolNameRescheduleLookup = "reschedule_lookup"
-const toolNamePaymentStatus = "payment_status"
-const toolNamePaymentCreate = "payment_create"
-const toolNameDocumentExtract = "document_extract"
+const (
+	toolNameAvailabilitySearch = "availability_search"
+	toolNamePricingQuote       = "pricing_quote"
+	toolNameBookingLookup      = "booking_lookup"
+	toolNameBookingCreate      = "booking_create"
+	toolNameBookingCancel      = "booking_cancel"
+	toolNameRescheduleLookup   = "reschedule_lookup"
+	toolNamePaymentStatus      = "payment_status"
+	toolNamePaymentCreate      = "payment_create"
+	toolNameDocumentExtract    = "document_extract"
+)
 
-const packageToSantaCatarina = "Pacote p/ Santa Catarina"
-const packageToMaranhao = "Pacote p/ Maranhao"
+const (
+	packageToSantaCatarina = "Pacote p/ Santa Catarina"
+	packageToMaranhao      = "Pacote p/ Maranhao"
+)
 
 var scPackageDestinations = map[string]string{
 	"fraiburgo":    "Fraiburgo/SC",
@@ -396,13 +400,6 @@ func (s *Service) resolveAgentToolContext(ctx context.Context, session Session, 
 }
 
 func (s *Service) resolveContextualActionTools(ctx context.Context, session Session, history []Message, currentTurn string, context agentToolContext) (agentToolContext, bool, error) {
-	if s.canCreateBookings() {
-		createInput, ok := parseBookingCreateInput(session, history, currentTurn, nil)
-		if ok {
-			updated, err := s.executeBookingCreateTool(ctx, session, context, createInput)
-			return updated, true, err
-		}
-	}
 	if s.canCreatePayments() {
 		createInput, ok := parsePaymentCreateInput(session, history, currentTurn, nil, nil)
 		if ok {
@@ -414,6 +411,13 @@ func (s *Service) resolveContextualActionTools(ctx context.Context, session Sess
 		cancelInput, ok := parseBookingCancelInput(history, currentTurn, nil, nil)
 		if ok {
 			updated, err := s.executeBookingCancelTool(ctx, session, context, cancelInput)
+			return updated, true, err
+		}
+	}
+	if s.canCreateBookings() {
+		createInput, ok := parseBookingCreateInput(session, history, currentTurn, nil)
+		if ok {
+			updated, err := s.executeBookingCreateTool(ctx, session, context, createInput)
 			return updated, true, err
 		}
 	}
@@ -1302,7 +1306,7 @@ func extractBookingIdentifiers(text string) (string, string) {
 	bookingID := strings.ToUpper(strings.TrimSpace(bookingIDPattern.FindString(text)))
 	reservationCode := ""
 	for _, token := range reservationCodePattern.FindAllString(strings.ToUpper(text), -1) {
-		if token == "" || token == bookingID || !containsLetter(token) {
+		if token == "" || token == bookingID || !containsLetter(token) || !containsDigit(token) {
 			continue
 		}
 		reservationCode = token
@@ -1331,6 +1335,15 @@ func extractRequestedRoute(text string) (string, string) {
 func containsLetter(value string) bool {
 	for _, char := range value {
 		if (char >= 'A' && char <= 'Z') || (char >= 'a' && char <= 'z') {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDigit(value string) bool {
+	for _, char := range value {
+		if char >= '0' && char <= '9' {
 			return true
 		}
 	}

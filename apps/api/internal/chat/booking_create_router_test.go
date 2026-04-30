@@ -264,3 +264,42 @@ func TestParseBookingCreateInputRejectsConfirmationWhenPassengerCountStillIncomp
 		t.Fatalf("expected incomplete passenger confirmation to block booking create, got %+v", input)
 	}
 }
+
+func TestParseBookingCreateInputBlocksShortPaymentReplyAfterBookingCreated(t *testing.T) {
+	now := time.Now().UTC()
+	session := Session{
+		ContactKey:    "5549988709047",
+		CustomerPhone: "5549988709047",
+		CustomerName:  "Messias",
+	}
+	history := []Message{
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Reserva criada com sucesso. Codigo ABC12345.",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-2 * time.Minute),
+			Payload: map[string]interface{}{
+				"tool_context": map[string]interface{}{
+					toolNameBookingCreate: buildBookingCreateResponsePayload(BookingCreateResult{
+						Mode:            "created",
+						BookingID:       "BK-ABC123456",
+						ReservationCode: "ABC12345",
+						Status:          "PENDING",
+						TotalAmount:     950,
+						RemainderAmount: 950,
+					}),
+				},
+			},
+		},
+		{
+			Direction:        "OUTBOUND",
+			Body:             "Voce prefere pagar o valor integral ou apenas o sinal de R$ 250 por passageiro pagante?",
+			ProcessingStatus: messageStatusAutomationSent,
+			ReceivedAt:       now.Add(-1 * time.Minute),
+		},
+	}
+
+	if input, ok := parseBookingCreateInput(session, history, "pix", nil); ok {
+		t.Fatalf("expected payment reply to block booking create, got %+v", input)
+	}
+}
