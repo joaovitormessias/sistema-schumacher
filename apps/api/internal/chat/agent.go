@@ -292,12 +292,19 @@ func hasOnlyAutoSendSafeToolCalls(toolCalls []ToolCall) bool {
 	return true
 }
 
+// Until there is an operator UI for approving payment/reservation drafts, these
+// completed tool calls are allowed to proceed through auto-send.
 func isAutoSendSafeToolCall(call ToolCall) bool {
 	if !strings.EqualFold(strings.TrimSpace(call.Status), "COMPLETED") {
 		return false
 	}
 	switch strings.TrimSpace(call.ToolName) {
-	case toolNameAvailabilitySearch, toolNameDocumentExtract:
+	case toolNameAvailabilitySearch,
+		toolNameDocumentExtract,
+		toolNamePricingQuote,
+		toolNameBookingLookup,
+		toolNameBookingCreate,
+		toolNamePaymentCreate:
 		return true
 	default:
 		return false

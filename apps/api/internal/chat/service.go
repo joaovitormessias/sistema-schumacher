@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
 	"schumacher-tur/api/internal/shared/config"
 )
 
@@ -1585,7 +1586,21 @@ func (s *Service) maybeAutoSendDraft(ctx context.Context, result ReprocessResult
 	if s.shouldBlockDraftAutoSend(currentSession, *result.Draft) {
 		return s.markDraftAutoSendBlocked(ctx, result, currentSession)
 	}
+
 	if !s.canAutoSendDraft(result.Session, *result.Draft) {
+		s.logReprocess(
+			"chat reprocess event=maybe_auto_send_skipped session_id=%s draft_message_id=%s reason=can_auto_send_false auto_send_status=%s auto_send_reasons=%v sender_enabled=%t handoff_status=%s current_owner_user_id=%s draft_direction=%s draft_processing_status=%s draft_body_present=%t",
+			result.Session.ID,
+			result.Draft.ID,
+			readDraftAutoSendStatus(*result.Draft),
+			readDraftAutoSendReasons(*result.Draft),
+			s.sender != nil && s.sender.Enabled(),
+			result.Session.HandoffStatus,
+			strings.TrimSpace(result.Session.CurrentOwnerUserID),
+			result.Draft.Direction,
+			result.Draft.ProcessingStatus,
+			strings.TrimSpace(result.Draft.Body) != "",
+		)
 		return result, nil
 	}
 

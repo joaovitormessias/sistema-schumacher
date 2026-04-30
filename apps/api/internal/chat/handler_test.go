@@ -2759,7 +2759,7 @@ func TestReprocessAutoSendsEligibleDraftWhenSenderIsEnabled(t *testing.T) {
 	}
 }
 
-func TestReprocessDoesNotAutoSendReviewRequiredDraft(t *testing.T) {
+func TestReprocessAutoSendsPricingQuoteDraftWhenSenderIsEnabled(t *testing.T) {
 	store := newFakeStore()
 	sender := &fakeReplySender{
 		enabled: true,
@@ -2854,20 +2854,23 @@ func TestReprocessDoesNotAutoSendReviewRequiredDraft(t *testing.T) {
 	if out.Draft == nil {
 		t.Fatalf("expected draft to be present")
 	}
-	if out.Draft.ProcessingStatus != messageStatusAutomationDraft {
-		t.Fatalf("expected draft status %s, got %s", messageStatusAutomationDraft, out.Draft.ProcessingStatus)
+	if out.Reason != "draft_auto_sent" {
+		t.Fatalf("expected reason draft_auto_sent, got %s", out.Reason)
 	}
-	if got := readDraftAutoSendStatus(*out.Draft); got != draftAutoSendStatusReviewNeeded {
-		t.Fatalf("expected draft auto_send_status %s, got %s", draftAutoSendStatusReviewNeeded, got)
+	if out.Draft.ProcessingStatus != messageStatusAutomationSent {
+		t.Fatalf("expected draft status %s, got %s", messageStatusAutomationSent, out.Draft.ProcessingStatus)
 	}
-	if reasons := readDraftAutoSendReasons(*out.Draft); len(reasons) != 1 || reasons[0] != draftAutoSendReasonToolCall {
-		t.Fatalf("expected draft auto_send_reasons [%s], got %+v", draftAutoSendReasonToolCall, reasons)
+	if got := readDraftAutoSendStatus(*out.Draft); got != draftAutoSendStatusEligible {
+		t.Fatalf("expected draft auto_send_status %s, got %s", draftAutoSendStatusEligible, got)
 	}
-	if sender.calls != 0 {
-		t.Fatalf("expected zero sender calls, got %d", sender.calls)
+	if reasons := readDraftAutoSendReasons(*out.Draft); len(reasons) != 0 {
+		t.Fatalf("expected no draft auto_send_reasons, got %+v", reasons)
 	}
-	if len(store.outbounds) != 0 {
-		t.Fatalf("expected no outbound records, got %d", len(store.outbounds))
+	if sender.calls != 1 {
+		t.Fatalf("expected one sender call, got %d", sender.calls)
+	}
+	if len(store.outbounds) != 1 {
+		t.Fatalf("expected one outbound record, got %d", len(store.outbounds))
 	}
 }
 
