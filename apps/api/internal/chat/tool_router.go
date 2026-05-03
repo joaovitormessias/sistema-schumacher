@@ -21,6 +21,13 @@ var (
 	qtyPattern             = regexp.MustCompile(`\b(\d{1,2})\s*(?:pessoas?|passagens?|assentos?|lugares?)\b`)
 	bookingIDPattern       = regexp.MustCompile(`(?i)\bBK-[A-Z0-9]+\b`)
 	reservationCodePattern = regexp.MustCompile(`\b[A-Z0-9]{8}\b`)
+
+	confirmedRouteParenthesesPattern = regexp.MustCompile(`(?i)\b(?:sa[ií]da|saindo|origem)\s+de\s+([\p{L}' -]{2,60})\s*\(([A-Z]{2})\)\s+(?:para|->|→)\s+([\p{L}' -]{2,60})\s*\(([A-Z]{2})\)`)
+	confirmedRouteSlashPattern       = regexp.MustCompile(`(?i)\b([\p{L}' -]{2,60})\s*/\s*([A-Z]{2})\s*(?:->|→|para)\s*([\p{L}' -]{2,60})\s*/\s*([A-Z]{2})\b`)
+	confirmedRouteSaindoPattern      = regexp.MustCompile(`(?i)(?:^|[[:punct:]])\s*(?:sa[ií]da|saindo|origem)\s+de\s+([\p{L}' -]{2,60})\s+(?:para|->|→)\s+([\p{L}' -]{2,60})(?:\b|$)`)
+	confirmedRouteBarePattern        = regexp.MustCompile(`(?i)(?:^|[[:punct:]])\s*de\s+([\p{L}' -]{2,60})\s+(?:para|->|→)\s+([\p{L}' -]{2,60})(?:\b|$)`)
+	originDestinationPattern         = regexp.MustCompile(`(?i)\borigem\s+([\p{L}' -]{2,60})\s+destino\s+([\p{L}' -]{2,60})(?:\b|$)`)
+	routeOriginSelectionPattern      = regexp.MustCompile(`(?i)(?:^|[[:space:][:punct:]])\s*(?:sa[ií]da|saindo|origem)\s+de\s+([\p{L}' -]{2,60})(?:\s*\(([A-Z]{2})\)|\s*/\s*([A-Z]{2}))?(?:\b|$)`)
 )
 
 const (
@@ -39,6 +46,13 @@ const (
 	packageToSantaCatarina = "Pacote p/ Santa Catarina"
 	packageToMaranhao      = "Pacote p/ Maranhao"
 )
+
+var brazilianStateCodes = map[string]struct{}{
+	"AC": {}, "AL": {}, "AP": {}, "AM": {}, "BA": {}, "CE": {}, "DF": {},
+	"ES": {}, "GO": {}, "MA": {}, "MT": {}, "MS": {}, "MG": {}, "PA": {},
+	"PB": {}, "PR": {}, "PE": {}, "PI": {}, "RJ": {}, "RN": {}, "RS": {},
+	"RO": {}, "RR": {}, "SC": {}, "SP": {}, "SE": {}, "TO": {},
+}
 
 var scPackageDestinations = map[string]string{
 	"fraiburgo":    "Fraiburgo/SC",
@@ -558,6 +572,32 @@ func parseAvailabilitySearchInput(history []Message, text string, observedAt tim
 		return input, true
 	}
 
+	currentContext := inferRouteContextFromText(body)
+	if looksLikeGenericAvailabilityQuestion(body) &&
+		strings.TrimSpace(currentContext.Origin) == "" &&
+		strings.TrimSpace(currentContext.Destination) == "" &&
+		strings.TrimSpace(currentContext.PackageName) == "" &&
+		strings.TrimSpace(currentContext.BroadState) == "" {
+		if origin, destination, found := lastConfirmedRouteFromHistory(history); found {
+			input := AvailabilitySearchInput{
+				Origin:      origin,
+				Destination: destination,
+				PackageName: historyContext.PackageName,
+				TripDate:    extractTripDate(body, observedAt),
+				Qty:         extractPassengerQuantity(body),
+				Limit:       8,
+			}
+			if strings.TrimSpace(input.PackageName) == "" {
+				input.PackageName = packageNameForRouteDirection(inferRouteDirectionFromDestination(destination))
+			}
+			if input.Qty <= 0 {
+				input.Qty = 1
+			}
+			return input, true
+		}
+		return AvailabilitySearchInput{}, false
+	}
+
 	if input, ok := parseContextualAvailabilitySearchInput(historyContext, body, observedAt); ok {
 		return input, true
 	}
@@ -625,22 +665,13 @@ func parseDirectAvailabilitySearchInput(text string, observedAt time.Time) (Avai
 	if body == "" {
 		return AvailabilitySearchInput{}, false
 	}
-	locations := extractCanonicalLocations(body)
-	if !looksLikeAvailabilityIntent(body, len(locations)) {
+	if !looksLikeExplicitRouteQuery(body) {
 		return AvailabilitySearchInput{}, false
 	}
 
-	origin, destination := "", ""
-	if match := routeFromToPattern.FindStringSubmatch(body); len(match) == 3 {
-		origin = normalizeLocationDisplayName(match[1])
-		destination = normalizeLocationDisplayName(match[2])
-	}
-	if origin == "" || destination == "" {
-		if len(locations) < 2 {
-			return AvailabilitySearchInput{}, false
-		}
-		origin = locations[0]
-		destination = locations[1]
+	origin, destination, ok := extractExplicitRouteFromText(body)
+	if !ok {
+		return AvailabilitySearchInput{}, false
 	}
 	if origin == "" || destination == "" || strings.EqualFold(origin, destination) {
 		return AvailabilitySearchInput{}, false
@@ -665,6 +696,81 @@ func looksLikePackageLevelAvailabilityIntent(text string) bool {
 		return false
 	}
 	return looksLikeShortDateFollowUp(text) || looksLikeBroadStateScheduleLookup(text)
+}
+
+func looksLikeGenericAvailabilityQuestion(text string) bool {
+	folded := foldChatText(text)
+	if folded == "" {
+		return false
+	}
+
+	patterns := []string{
+		"quais datas disponiveis",
+		"quais datas",
+		"tem data",
+		"tem datas",
+		"quais horarios",
+		"quando sai",
+		"quando tem",
+		"tem vaga",
+		"tem vagas",
+		"tem disponibilidade",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(folded, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeExplicitRouteQuery(text string) bool {
+	_, _, ok := extractExplicitRouteFromText(text)
+	return ok
+}
+
+func extractExplicitRouteFromText(text string) (string, string, bool) {
+	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if body == "" {
+		return "", "", false
+	}
+
+	if match := confirmedRouteParenthesesPattern.FindStringSubmatch(body); len(match) == 5 {
+		origin := normalizeRouteEndpoint(match[1], match[2])
+		destination := normalizeRouteEndpoint(match[3], match[4])
+		if origin != "" && destination != "" {
+			return origin, destination, true
+		}
+	}
+	if match := confirmedRouteSlashPattern.FindStringSubmatch(body); len(match) == 5 {
+		origin := normalizeRouteEndpoint(match[1], match[2])
+		destination := normalizeRouteEndpoint(match[3], match[4])
+		if origin != "" && destination != "" {
+			return origin, destination, true
+		}
+	}
+	if match := originDestinationPattern.FindStringSubmatch(body); len(match) == 3 {
+		origin := normalizeRouteEndpoint(match[1], "")
+		destination := normalizeRouteEndpoint(match[2], "")
+		if origin != "" && destination != "" {
+			return origin, destination, true
+		}
+	}
+	if match := confirmedRouteSaindoPattern.FindStringSubmatch(body); len(match) == 3 {
+		origin := normalizeRouteEndpoint(match[1], "")
+		destination := normalizeRouteEndpoint(match[2], "")
+		if origin != "" && destination != "" {
+			return origin, destination, true
+		}
+	}
+	if match := confirmedRouteBarePattern.FindStringSubmatch(body); len(match) == 3 {
+		origin := normalizeRouteEndpoint(match[1], "")
+		destination := normalizeRouteEndpoint(match[2], "")
+		if origin != "" && destination != "" {
+			return origin, destination, true
+		}
+	}
+	return "", "", false
 }
 
 func looksLikeAvailabilityIntent(text string, locationCount int) bool {
@@ -754,6 +860,70 @@ func inferLatestRouteContextFromHistory(history []Message) inferredRouteContext 
 	return context
 }
 
+func lastConfirmedRouteFromHistory(history []Message) (string, string, bool) {
+	for i := len(history) - 1; i >= 0; i-- {
+		message := history[i]
+		if !strings.EqualFold(strings.TrimSpace(message.Direction), "OUTBOUND") &&
+			!strings.EqualFold(strings.TrimSpace(message.Direction), "BOT") {
+			continue
+		}
+		if origin, destination, ok := parseConfirmedRouteMessage(message.Body); ok {
+			return origin, destination, true
+		}
+		if match := routeFromToPattern.FindStringSubmatch(message.Body); len(match) == 3 {
+			origin := normalizeLocationDisplayName(match[1])
+			destination := normalizeLocationDisplayName(match[2])
+			if origin != "" && destination != "" {
+				return origin, destination, true
+			}
+		}
+		context := inferRouteContextFromText(message.Body)
+		if context.Origin != "" && context.Destination != "" {
+			return context.Origin, context.Destination, true
+		}
+		origin, destination, ok := extractExplicitRouteFromText(message.Body)
+		if ok {
+			return origin, destination, true
+		}
+	}
+	return "", "", false
+}
+
+func parseConfirmedRouteMessage(text string) (string, string, bool) {
+	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if body == "" {
+		return "", "", false
+	}
+
+	folded := foldChatText(body)
+	if !strings.Contains(folded, " saida de ") && !strings.Contains(folded, " saindo de ") && !strings.Contains(folded, " origem de ") {
+		return "", "", false
+	}
+	lower := strings.ToLower(body)
+	paraIndex := strings.Index(lower, " para ")
+	if paraIndex < 0 {
+		return "", "", false
+	}
+	before := lower[:paraIndex]
+	deIndex := strings.LastIndex(before, " de ")
+	if deIndex < 0 {
+		return "", "", false
+	}
+
+	originPart := strings.TrimSpace(body[deIndex+4 : paraIndex])
+	destinationPart := strings.TrimSpace(body[paraIndex+6:])
+	if cut := strings.IndexAny(destinationPart, ".!?"); cut >= 0 {
+		destinationPart = strings.TrimSpace(destinationPart[:cut])
+	}
+
+	origin := normalizeLocationDisplayName(originPart)
+	destination := normalizeLocationDisplayName(destinationPart)
+	if origin == "" || destination == "" {
+		return "", "", false
+	}
+	return origin, destination, true
+}
+
 func inferRouteContextFromText(text string) inferredRouteContext {
 	body := strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
 	if body == "" {
@@ -761,15 +931,22 @@ func inferRouteContextFromText(text string) inferredRouteContext {
 	}
 
 	context := inferredRouteContext{}
-	if match := routeFromToPattern.FindStringSubmatch(body); len(match) == 3 {
-		context.Origin = normalizeLocationDisplayName(match[1])
-		context.Destination = normalizeLocationDisplayName(match[2])
+	if origin, destination, ok := extractExplicitRouteFromText(body); ok {
+		context.Origin = origin
+		context.Destination = destination
 	}
-	if context.Origin == "" || context.Destination == "" {
-		locations := extractCanonicalLocations(body)
-		if len(locations) >= 2 {
-			context.Origin = locations[0]
-			context.Destination = locations[1]
+	if context.Origin == "" {
+		if match := routeOriginSelectionPattern.FindStringSubmatch(body); len(match) >= 2 {
+			uf := ""
+			if len(match) >= 3 && strings.TrimSpace(match[2]) != "" {
+				uf = match[2]
+			}
+			if len(match) >= 4 && strings.TrimSpace(match[3]) != "" {
+				uf = match[3]
+			}
+			if origin := normalizeRouteEndpoint(match[1], uf); origin != "" {
+				context.Origin = origin
+			}
 		}
 	}
 	if context.Destination != "" {
@@ -785,24 +962,49 @@ func inferRouteContextFromText(text string) inferredRouteContext {
 
 func inferConversationTurnRouteContext(text string, base inferredRouteContext) inferredRouteContext {
 	context := inferRouteContextFromText(text)
-	selection := inferDestinationSelectionContext(text, mergeInferredRouteContext(context, base))
+	mergedBase := mergeInferredRouteContext(context, base)
+	selection := mergeInferredRouteContext(
+		inferOriginSelectionContext(text, mergedBase),
+		inferDestinationSelectionContext(text, mergedBase),
+	)
 	return mergeInferredRouteContext(context, selection)
+}
+
+func inferOriginSelectionContext(text string, base inferredRouteContext) inferredRouteContext {
+	if strings.TrimSpace(base.RouteDirection) == "" && strings.TrimSpace(base.PackageName) == "" {
+		return inferredRouteContext{}
+	}
+	if _, _, ok := extractExplicitRouteFromText(text); ok {
+		return inferredRouteContext{}
+	}
+
+	direction := strings.TrimSpace(base.RouteDirection)
+	if direction == "" {
+		return inferredRouteContext{}
+	}
+	origin := inferKnownPackageOrigin(text, direction)
+	if origin == "" {
+		return inferredRouteContext{}
+	}
+	return inferredRouteContext{
+		Origin:         origin,
+		PackageName:    packageNameForRouteDirection(direction),
+		RouteDirection: direction,
+		BroadState:     base.BroadState,
+	}
 }
 
 func inferDestinationSelectionContext(text string, base inferredRouteContext) inferredRouteContext {
 	if strings.TrimSpace(base.RouteDirection) == "" && strings.TrimSpace(base.PackageName) == "" {
 		return inferredRouteContext{}
 	}
-	if match := routeFromToPattern.FindStringSubmatch(text); len(match) == 3 {
-		return inferredRouteContext{}
-	}
-	if len(extractCanonicalLocations(text)) >= 2 {
+	if _, _, ok := extractExplicitRouteFromText(text); ok {
 		return inferredRouteContext{}
 	}
 
 	direction := strings.TrimSpace(base.RouteDirection)
 	if direction == "" {
-		direction = strings.TrimSpace(base.RouteDirection)
+		return inferredRouteContext{}
 	}
 	destination := inferKnownPackageDestination(text, direction)
 	if destination == "" {
@@ -828,6 +1030,36 @@ func inferKnownPackageDestination(text string, direction string) string {
 		candidates = scPackageDestinations
 	case "TO_MA":
 		candidates = maPackageDestinations
+	default:
+		return ""
+	}
+
+	matchCount := 0
+	selected := ""
+	for key, canonical := range candidates {
+		if strings.Contains(folded, " "+key+" ") {
+			matchCount++
+			selected = canonical
+		}
+	}
+	if matchCount != 1 {
+		return ""
+	}
+	return selected
+}
+
+func inferKnownPackageOrigin(text string, direction string) string {
+	folded := foldChatText(text)
+	if folded == "" {
+		return ""
+	}
+
+	var candidates map[string]string
+	switch strings.ToUpper(strings.TrimSpace(direction)) {
+	case "TO_SC":
+		candidates = maPackageDestinations
+	case "TO_MA":
+		candidates = scPackageDestinations
 	default:
 		return ""
 	}
@@ -981,13 +1213,29 @@ func normalizeLocationDisplayName(value string) string {
 		return ""
 	}
 
+	if open := strings.LastIndex(raw, "("); open >= 0 && strings.HasSuffix(raw, ")") {
+		city := strings.TrimSpace(strings.TrimRight(raw[:open], "-, "))
+		uf := strings.ToUpper(strings.TrimSpace(strings.TrimSuffix(raw[open+1:], ")")))
+		if city != "" && isBrazilianStateCode(uf) {
+			parts := strings.Fields(strings.ToLower(city))
+			for i, part := range parts {
+				runes := []rune(part)
+				if len(runes) == 0 {
+					continue
+				}
+				parts[i] = strings.ToUpper(string(runes[0])) + string(runes[1:])
+			}
+			return strings.Join(parts, " ") + "/" + uf
+		}
+	}
+
 	match := locationMentionPattern.FindStringSubmatch(raw)
 	if len(match) != 3 {
 		return ""
 	}
 	city := strings.TrimSpace(strings.TrimRight(match[1], "-, "))
 	uf := strings.ToUpper(strings.TrimSpace(match[2]))
-	if city == "" || uf == "" {
+	if city == "" || uf == "" || !isBrazilianStateCode(uf) {
 		return ""
 	}
 
@@ -1000,6 +1248,49 @@ func normalizeLocationDisplayName(value string) string {
 		parts[i] = strings.ToUpper(string(runes[0])) + string(runes[1:])
 	}
 	return strings.Join(parts, " ") + "/" + uf
+}
+
+func normalizeRouteEndpoint(city string, uf string) string {
+	city = strings.Join(strings.Fields(strings.TrimSpace(city)), " ")
+	uf = strings.ToUpper(strings.TrimSpace(uf))
+	if city == "" {
+		return ""
+	}
+	if uf != "" {
+		if !isBrazilianStateCode(uf) {
+			return ""
+		}
+		return normalizeLocationDisplayName(city + "/" + uf)
+	}
+
+	if state := lookupKnownLocationState(city); state != "" {
+		return normalizeLocationDisplayName(city + "/" + state)
+	}
+	return ""
+}
+
+func lookupKnownLocationState(city string) string {
+	folded := foldChatText(city)
+	if folded == "" {
+		return ""
+	}
+
+	for key := range scPackageDestinations {
+		if strings.Contains(folded, " "+foldChatDestinationKey(key)+" ") {
+			return "SC"
+		}
+	}
+	for key := range maPackageDestinations {
+		if strings.Contains(folded, " "+foldChatDestinationKey(key)+" ") {
+			return "MA"
+		}
+	}
+	return ""
+}
+
+func isBrazilianStateCode(uf string) bool {
+	_, ok := brazilianStateCodes[strings.ToUpper(strings.TrimSpace(uf))]
+	return ok
 }
 
 func extractTripDate(text string, observedAt time.Time) *time.Time {
@@ -1316,20 +1607,11 @@ func extractBookingIdentifiers(text string) (string, string) {
 }
 
 func extractRequestedRoute(text string) (string, string) {
-	origin, destination := "", ""
-	if match := routeFromToPattern.FindStringSubmatch(text); len(match) == 3 {
-		origin = normalizeLocationDisplayName(match[1])
-		destination = normalizeLocationDisplayName(match[2])
+	origin, destination, ok := extractExplicitRouteFromText(text)
+	if !ok {
+		return "", ""
 	}
-	if origin != "" && destination != "" {
-		return origin, destination
-	}
-
-	locations := extractCanonicalLocations(text)
-	if len(locations) >= 2 {
-		return locations[0], locations[1]
-	}
-	return "", ""
+	return origin, destination
 }
 
 func containsLetter(value string) bool {
