@@ -169,13 +169,37 @@ func candidateMessageIDs(messages []Message) []string {
 func candidateKinds(messages []Message) []string {
 	kinds := make([]string, 0, len(messages))
 	for _, message := range messages {
-		kind := strings.ToUpper(strings.TrimSpace(message.Kind))
-		if kind == "" {
-			kind = "TEXT"
-		}
-		kinds = append(kinds, kind)
+		kinds = append(kinds, normalizedCandidateKind(message))
 	}
 	return kinds
+}
+
+func normalizedCandidateKind(message Message) string {
+	kind := strings.ToUpper(strings.TrimSpace(message.Kind))
+	if kind == "" {
+		kind = "TEXT"
+	}
+	if isAudioMessageKind(kind) && hasCompletedAudioTranscription(message) {
+		return "TEXT"
+	}
+	return kind
+}
+
+func isAudioMessageKind(kind string) bool {
+	switch strings.ToUpper(strings.TrimSpace(kind)) {
+	case "AUDIO", "VOICE", "PTT":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasCompletedAudioTranscription(message Message) bool {
+	status := strings.ToUpper(strings.TrimSpace(asString(message.NormalizedPayload["transcription_status"])))
+	if status == "FAILED" {
+		return false
+	}
+	return strings.TrimSpace(asString(message.NormalizedPayload["transcription_text"])) != ""
 }
 
 func candidateMediaMemory(messages []Message) []map[string]interface{} {
@@ -313,7 +337,7 @@ func isAutoSendSafeToolCall(call ToolCall) bool {
 
 func hasBlockingNonTextCandidate(candidates []Message) bool {
 	for _, message := range candidates {
-		kind := strings.ToUpper(strings.TrimSpace(message.Kind))
+		kind := normalizedCandidateKind(message)
 		normalized := message.NormalizedPayload
 		switch kind {
 		case "", "TEXT":
@@ -327,6 +351,19 @@ func hasBlockingNonTextCandidate(candidates []Message) bool {
 		default:
 			return true
 		}
+	}
+	return false
+}
+
+func hasBlockingUntranscribedAudioCandidate(candidates []Message) bool {
+	for _, message := range candidates {
+		if !isAudioMessageKind(message.Kind) {
+			continue
+		}
+		if hasCompletedAudioTranscription(message) {
+			continue
+		}
+		return true
 	}
 	return false
 }

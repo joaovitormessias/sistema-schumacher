@@ -8,7 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -100,7 +104,10 @@ func NewService(store Store, chatSvc ChatIngestor, cfg config.Config, deps ...in
 	}
 }
 
-const maxEvolutionInlineImageBytes = 8 * 1024 * 1024
+const (
+	maxEvolutionInlineImageBytes = 8 * 1024 * 1024
+	maxEvolutionInlineAudioBytes = 25 * 1024 * 1024
+)
 
 func (s *Service) fetchEvolutionMediaDataURL(
 	ctx context.Context,
@@ -108,6 +115,7 @@ func (s *Service) fetchEvolutionMediaDataURL(
 	remoteJID string,
 	fromMe bool,
 	mimeType string,
+	maxBytes int,
 ) (string, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(s.cfg.EvolutionBaseURL), "/")
 	instance := strings.TrimSpace(s.cfg.EvolutionInstance)
@@ -151,7 +159,11 @@ func (s *Service) fetchEvolutionMediaDataURL(
 	}
 	defer resp.Body.Close()
 
-	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, maxEvolutionInlineImageBytes*2))
+	limit := maxEvolutionInlineImageBytes * 2
+	if maxBytes > 0 {
+		limit = maxBytes * 2
+	}
+	rawBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)))
 	if err != nil {
 		return "", err
 	}
@@ -189,7 +201,10 @@ func (s *Service) fetchEvolutionMediaDataURL(
 	if len(decoded) == 0 {
 		return "", errors.New("empty evolution media")
 	}
-	if len(decoded) > maxEvolutionInlineImageBytes {
+	if maxBytes <= 0 {
+		maxBytes = maxEvolutionInlineImageBytes
+	}
+	if len(decoded) > maxBytes {
 		return "", errors.New("evolution media too large")
 	}
 
@@ -199,6 +214,155 @@ func (s *Service) fetchEvolutionMediaDataURL(
 	}
 
 	return "data:" + resolvedMime + ";base64," + base64.StdEncoding.EncodeToString(decoded), nil
+}
+
+func (s *Service) transcribeOpenAIAudioFromDataURL(ctx context.Context, dataURL string, mimeType string, model string) (string, error) {
+	dataURL = strings.TrimSpace(dataURL)
+	if dataURL == "" {
+		return "", errors.New("missing audio data url")
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "gpt-4o-mini-transcribe"
+	}
+	apiKey := strings.TrimSpace(s.cfg.OpenAIAPIKey)
+	if apiKey == "" {
+		return "", errors.New("missing openai api key")
+	}
+
+	base64Text := stripDataURLPrefix(dataURL)
+	if strings.TrimSpace(base64Text) == "" {
+		return "", errors.New("missing audio base64")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(base64Text)
+	if err != nil {
+		return "", fmt.Errorf("invalid audio base64: %w", err)
+	}
+	if len(decoded) == 0 {
+		return "", errors.New("empty audio media")
+	}
+
+	tmpFile, err := os.CreateTemp("", "schumacher-audio-*"+audioFileExtensionForMimeType(mimeType))
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		_ = os.Remove(tmpFile.Name())
+	}()
+
+	if _, err := tmpFile.Write(decoded); err != nil {
+		_ = tmpFile.Close()
+		return "", err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return "", err
+	}
+
+	log.Printf("audio_transcription_openai_file_ready path=%s mime=%s bytes=%d", tmpFile.Name(), strings.TrimSpace(mimeType), len(decoded))
+	return s.transcribeOpenAIAudioFile(ctx, tmpFile.Name(), mimeType, model)
+}
+
+func (s *Service) transcribeOpenAIAudioFile(ctx context.Context, filePath string, mimeType string, model string) (string, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(s.cfg.OpenAIBaseURL), "/")
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+	apiKey := strings.TrimSpace(s.cfg.OpenAIAPIKey)
+	if apiKey == "" {
+		return "", errors.New("missing openai api key")
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "gpt-4o-mini-transcribe"
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		_ = writer.Close()
+		return "", err
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		_ = writer.Close()
+		return "", err
+	}
+	if err := writer.WriteField("model", model); err != nil {
+		_ = writer.Close()
+		return "", err
+	}
+	if err := writer.WriteField("language", "pt"); err != nil {
+		_ = writer.Close()
+		return "", err
+	}
+	if err := writer.WriteField("response_format", "json"); err != nil {
+		_ = writer.Close()
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/audio/transcriptions", &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if strings.TrimSpace(mimeType) != "" {
+		req.Header.Set("X-Audio-Mime-Type", strings.TrimSpace(mimeType))
+	}
+
+	client := &http.Client{Timeout: 45 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("openai audio transcription failed status=%d body=%s", resp.StatusCode, truncateForLog(string(responseBody), 500))
+	}
+
+	payload := map[string]interface{}{}
+	if len(responseBody) > 0 {
+		_ = json.Unmarshal(responseBody, &payload)
+	}
+	text := strings.TrimSpace(firstNonEmptyString(
+		asStringPath(payload, "text"),
+		asStringPath(payload, "data", "text"),
+		asStringPath(payload, "output_text"),
+	))
+	if text == "" {
+		return "", errors.New("openai transcription missing text")
+	}
+	return text, nil
+}
+
+func audioFileExtensionForMimeType(mimeType string) string {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "audio/ogg", "audio/oga", "audio/opus":
+		return ".ogg"
+	case "audio/mpeg":
+		return ".mp3"
+	case "audio/mp4", "audio/m4a", "audio/x-m4a":
+		return ".m4a"
+	case "audio/webm":
+		return ".webm"
+	default:
+		return ".audio"
+	}
 }
 
 func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (EvolutionWebhookResult, error) {
@@ -237,12 +401,15 @@ func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (Evo
 	}
 
 	receivedAt := resolveEvolutionTimestamp(payload)
+	messageType := strings.TrimSpace(payload.Data.MessageType)
+	kind := mapEvolutionKind(messageType)
 	textBody := extractEvolutionText(payload.Data)
 	normalized := map[string]interface{}{
 		"provider":                 "EVOLUTION",
 		"event":                    event,
 		"instance":                 strings.TrimSpace(payload.Instance),
-		"message_type":             strings.TrimSpace(payload.Data.MessageType),
+		"message_type":             messageType,
+		"original_message_kind":    kind,
 		"message_text":             textBody,
 		"from_me":                  payload.Data.Key.FromMe,
 		"remote_jid":               contactKey,
@@ -256,7 +423,7 @@ func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (Evo
 		normalized[key] = value
 	}
 
-	if strings.EqualFold(strings.TrimSpace(payload.Data.MessageType), "imageMessage") {
+	if strings.EqualFold(messageType, "imageMessage") {
 		keyID := strings.TrimSpace(payload.Data.Key.ID)
 		remoteJID := strings.TrimSpace(payload.Data.Key.RemoteJID)
 		if remoteJID == "" {
@@ -272,7 +439,7 @@ func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (Evo
 		normalized["evolution_remote_jid"] = remoteJID
 		normalized["evolution_from_me"] = payload.Data.Key.FromMe
 
-		dataURL, mediaErr := s.fetchEvolutionMediaDataURL(ctx, keyID, remoteJID, payload.Data.Key.FromMe, imageMime)
+		dataURL, mediaErr := s.fetchEvolutionMediaDataURL(ctx, keyID, remoteJID, payload.Data.Key.FromMe, imageMime, maxEvolutionInlineImageBytes)
 		if mediaErr == nil && strings.TrimSpace(dataURL) != "" {
 			normalized["image_data_url"] = dataURL
 			normalized["image_source"] = "evolution_get_base64"
@@ -280,6 +447,78 @@ func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (Evo
 			normalized["image_source"] = "evolution_url_fallback"
 			if mediaErr != nil {
 				normalized["image_base64_error"] = mediaErr.Error()
+			}
+		}
+	}
+
+	if isEvolutionAudioMessage(messageType, kind, payload.Data.Message.AudioMessage) {
+		keyID := strings.TrimSpace(payload.Data.Key.ID)
+		remoteJID := strings.TrimSpace(payload.Data.Key.RemoteJID)
+		if remoteJID == "" {
+			remoteJID = strings.TrimSpace(payload.Data.Key.RemoteJIDAlt)
+		}
+
+		audioMetadata := extractEvolutionAudioMetadata(payload.Data.Message.AudioMessage)
+		for key, value := range audioMetadata {
+			normalized[key] = value
+		}
+
+		audioMime := strings.TrimSpace(stringValue(normalized["audio_mimetype"]))
+		if audioMime == "" {
+			audioMime = "audio/ogg"
+		}
+		if audioSeconds := intValue(normalized["audio_seconds"]); audioSeconds > 0 {
+			normalized["audio_seconds"] = audioSeconds
+		}
+
+		normalized["media_message_id"] = keyID
+		normalized["evolution_message_id"] = keyID
+		normalized["evolution_remote_jid"] = remoteJID
+		normalized["evolution_from_me"] = payload.Data.Key.FromMe
+		normalized["audio_mimetype"] = audioMime
+
+		log.Printf("audio_transcription_start contact_key=%s instance=%s message_id=%s message_type=%s", contactKey, strings.TrimSpace(payload.Instance), keyID, messageType)
+		log.Printf("audio_transcription_media_fetch_start contact_key=%s instance=%s message_id=%s", contactKey, strings.TrimSpace(payload.Instance), keyID)
+		dataURL, mediaErr := s.fetchEvolutionMediaDataURL(ctx, keyID, remoteJID, payload.Data.Key.FromMe, audioMime, maxEvolutionInlineAudioBytes)
+		log.Printf("audio_transcription_media_fetch_done contact_key=%s instance=%s message_id=%s success=%t", contactKey, strings.TrimSpace(payload.Instance), keyID, mediaErr == nil)
+		if mediaErr != nil {
+			normalized["audio_source"] = "evolution_url_fallback"
+			normalized["audio_base64_error"] = mediaErr.Error()
+			normalized["transcription_status"] = "FAILED"
+			normalized["transcription_error"] = mediaErr.Error()
+			log.Printf("audio_transcription_failed stage=media_fetch contact_key=%s instance=%s message_id=%s error=%v", contactKey, strings.TrimSpace(payload.Instance), keyID, mediaErr)
+		} else {
+			normalized["audio_source"] = "evolution_get_base64"
+			normalized["audio_data_url"] = dataURL
+			normalized["audio_base64"] = stripDataURLPrefix(dataURL)
+
+			model := strings.TrimSpace(s.cfg.OpenAITranscriptionModel)
+			if model == "" {
+				model = "gpt-4o-mini-transcribe"
+			}
+
+			log.Printf("audio_transcription_openai_start contact_key=%s instance=%s message_id=%s model=%s mime=%s", contactKey, strings.TrimSpace(payload.Instance), keyID, model, audioMime)
+			transcriptionText, transcribeErr := s.transcribeOpenAIAudioFromDataURL(ctx, dataURL, audioMime, model)
+			if transcribeErr != nil {
+				normalized["transcription_status"] = "FAILED"
+				normalized["transcription_error"] = transcribeErr.Error()
+				log.Printf("audio_transcription_failed stage=openai contact_key=%s instance=%s message_id=%s model=%s error=%v", contactKey, strings.TrimSpace(payload.Instance), keyID, model, transcribeErr)
+			} else {
+				transcriptionText = strings.TrimSpace(transcriptionText)
+				if transcriptionText == "" {
+					emptyErr := errors.New("empty transcription text")
+					normalized["transcription_status"] = "FAILED"
+					normalized["transcription_error"] = emptyErr.Error()
+					log.Printf("audio_transcription_failed stage=openai contact_key=%s instance=%s message_id=%s model=%s error=%v", contactKey, strings.TrimSpace(payload.Instance), keyID, model, emptyErr)
+				} else {
+					textBody = transcriptionText
+					kind = "TEXT"
+					normalized["message_text"] = transcriptionText
+					normalized["transcription_status"] = "COMPLETED"
+					normalized["transcription_text"] = transcriptionText
+					normalized["transcription_model"] = model
+					log.Printf("audio_transcription_openai_done contact_key=%s instance=%s message_id=%s model=%s text_len=%d", contactKey, strings.TrimSpace(payload.Instance), keyID, model, len(transcriptionText))
+				}
 			}
 		}
 	}
@@ -297,7 +536,7 @@ func (s *Service) HandleEvolutionMessages(ctx context.Context, body []byte) (Evo
 		},
 		Message: chat.IngestMessagePayload{
 			Direction:         "INBOUND",
-			Kind:              mapEvolutionKind(payload.Data.MessageType),
+			Kind:              kind,
 			ProviderMessageID: strings.TrimSpace(payload.Data.Key.ID),
 			IdempotencyKey:    buildEvolutionIdempotencyKey(contactKey, payload.Data.Key.ID),
 			SenderName:        strings.TrimSpace(payload.Data.PushName),
@@ -1456,6 +1695,8 @@ func extractEvolutionMessageMetadata(data EvolutionMessageData) map[string]inter
 	switch strings.TrimSpace(data.MessageType) {
 	case "imageMessage":
 		return extractEvolutionImageMetadata(data.Message.ImageMessage)
+	case "audioMessage", "audio", "ptt", "voice":
+		return extractEvolutionAudioMetadata(data.Message.AudioMessage)
 	case "documentMessage":
 		return extractEvolutionDocumentMetadata(data.Message.DocumentMessage)
 	default:
@@ -1542,6 +1783,84 @@ func extractEvolutionDocumentFileName(payload map[string]interface{}) string {
 		payload["file_name"],
 		payload["title"],
 	)
+}
+
+func extractEvolutionAudioMetadata(payload map[string]interface{}) map[string]interface{} {
+	if len(payload) == 0 {
+		return nil
+	}
+
+	metadata := map[string]interface{}{}
+	if mimeType := firstNonEmptyString(
+		payload["mimetype"],
+		payload["mimeType"],
+		payload["mime_type"],
+	); mimeType != "" {
+		metadata["audio_mimetype"] = mimeType
+	}
+	seconds := intValue(payload["seconds"])
+	if seconds <= 0 {
+		seconds = intValue(payload["duration"])
+	}
+	if seconds <= 0 {
+		seconds = intValue(payload["durationSeconds"])
+	}
+	if seconds <= 0 {
+		seconds = intValue(payload["duration_seconds"])
+	}
+	if seconds > 0 {
+		metadata["audio_seconds"] = seconds
+	}
+	if url := firstNonEmptyString(
+		payload["url"],
+		payload["directPath"],
+		payload["direct_path"],
+	); url != "" {
+		metadata["audio_url"] = url
+	}
+	if isPTT(payload["ptt"]) {
+		metadata["audio_is_ptt"] = true
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func isEvolutionAudioMessage(messageType string, kind string, payload map[string]interface{}) bool {
+	folded := strings.ToLower(strings.TrimSpace(messageType))
+	switch folded {
+	case "audiomessage", "audio", "voice", "ptt":
+		return true
+	}
+	switch strings.ToUpper(strings.TrimSpace(kind)) {
+	case "AUDIO", "VOICE", "PTT":
+		return true
+	}
+	return len(payload) > 0
+}
+
+func isPTT(value interface{}) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		}
+	case int:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case int32:
+		return typed != 0
+	case float64:
+		return typed != 0
+	case float32:
+		return typed != 0
+	}
+	return false
 }
 
 func normalizePhone(contactKey string) string {

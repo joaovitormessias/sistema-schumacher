@@ -3,8 +3,10 @@ package automation
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,6 +60,202 @@ func TestHandleEvolutionMessagesAcceptsDirectPayload(t *testing.T) {
 	}
 	if chatSvc.lastInput.Message.ProviderMessageID != "MSG-1" {
 		t.Fatalf("unexpected provider message id: %s", chatSvc.lastInput.Message.ProviderMessageID)
+	}
+}
+
+func TestHandleEvolutionMessagesTranscribesAudioAndMarksText(t *testing.T) {
+	audioBytes := []byte("fake-audio-bytes")
+	audioBase64 := base64.StdEncoding.EncodeToString(audioBytes)
+
+	mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/getBase64FromMediaMessage/belle" {
+			t.Fatalf("unexpected media path: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"base64":"` + audioBase64 + `"}`))
+	}))
+	defer mediaServer.Close()
+
+	openAIServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/audio/transcriptions" {
+			t.Fatalf("unexpected openai path: %s", r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			t.Fatalf("parse multipart form: %v", err)
+		}
+		if got := r.FormValue("model"); got != "gpt-4o-mini-transcribe" {
+			t.Fatalf("unexpected model: %s", got)
+		}
+		if got := r.FormValue("language"); got != "pt" {
+			t.Fatalf("unexpected language: %s", got)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("form file: %v", err)
+		}
+		defer file.Close()
+		if !strings.HasSuffix(header.Filename, ".ogg") {
+			t.Fatalf("unexpected file extension: %s", header.Filename)
+		}
+		if body, err := io.ReadAll(file); err != nil {
+			t.Fatalf("read audio file: %v", err)
+		} else if len(body) == 0 {
+			t.Fatal("expected audio file contents")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"text":"quais datas disponiveis"}`))
+	}))
+	defer openAIServer.Close()
+
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{
+		EvolutionBaseURL:         mediaServer.URL,
+		EvolutionAPIKey:          "secret",
+		EvolutionInstance:        "belle",
+		OpenAIAPIKey:             "sk-test",
+		OpenAIBaseURL:            openAIServer.URL,
+		OpenAITranscriptionModel: "gpt-4o-mini-transcribe",
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-AUDIO-1"},
+			"pushName":"cliente",
+			"message":{"audioMessage":{"mimetype":"audio/ogg","seconds":12,"ptt":true,"url":"https://files.example.test/audio.ogg"}},
+			"messageType":"audioMessage"
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	if chatSvc.lastInput.Message.Kind != "TEXT" {
+		t.Fatalf("expected transcribed audio to be stored as TEXT, got %s", chatSvc.lastInput.Message.Kind)
+	}
+	if chatSvc.lastInput.Message.Body != "quais datas disponiveis" {
+		t.Fatalf("unexpected transcribed body: %s", chatSvc.lastInput.Message.Body)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["transcription_status"])); got != "COMPLETED" {
+		t.Fatalf("unexpected transcription status: %s", got)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["transcription_text"])); got != "quais datas disponiveis" {
+		t.Fatalf("unexpected transcription text: %s", got)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["transcription_model"])); got != "gpt-4o-mini-transcribe" {
+		t.Fatalf("unexpected transcription model: %s", got)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["audio_mimetype"])); got != "audio/ogg" {
+		t.Fatalf("unexpected audio mimetype: %s", got)
+	}
+	if got := chatSvc.lastInput.Message.NormalizedPayload["audio_data_url"]; got == nil {
+		t.Fatal("expected audio_data_url to be present")
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["media_message_id"])); got != "MSG-AUDIO-1" {
+		t.Fatalf("unexpected media message id: %s", got)
+	}
+}
+
+func TestHandleEvolutionMessagesMarksAudioFetchFailureAsFailed(t *testing.T) {
+	mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "media unavailable", http.StatusBadGateway)
+	}))
+	defer mediaServer.Close()
+
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{
+		EvolutionBaseURL:  mediaServer.URL,
+		EvolutionAPIKey:   "secret",
+		EvolutionInstance: "belle",
+		OpenAIAPIKey:      "sk-test",
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-AUDIO-2"},
+			"message":{"audioMessage":{"mimetype":"audio/ogg","seconds":8,"ptt":true}},
+			"messageType":"audioMessage"
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	if chatSvc.lastInput.Message.Kind != "AUDIO" {
+		t.Fatalf("expected failed audio to remain AUDIO, got %s", chatSvc.lastInput.Message.Kind)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["transcription_status"])); got != "FAILED" {
+		t.Fatalf("unexpected transcription status: %s", got)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["transcription_error"])); got == "" {
+		t.Fatal("expected transcription_error to be set")
+	}
+}
+
+func TestHandleEvolutionMessagesMarksOpenAITranscriptionFailureAsFailed(t *testing.T) {
+	mediaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"base64":"` + base64.StdEncoding.EncodeToString([]byte("fake-audio-bytes")) + `"}`))
+	}))
+	defer mediaServer.Close()
+
+	openAIServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"quota exceeded"}}`, http.StatusBadGateway)
+	}))
+	defer openAIServer.Close()
+
+	chatSvc := &fakeChatIngestor{}
+	handler := NewHandler(NewService(&fakeAutomationStore{}, chatSvc, config.Config{
+		EvolutionBaseURL:         mediaServer.URL,
+		EvolutionAPIKey:          "secret",
+		EvolutionInstance:        "belle",
+		OpenAIAPIKey:             "sk-test",
+		OpenAIBaseURL:            openAIServer.URL,
+		OpenAITranscriptionModel: "gpt-4o-mini-transcribe",
+	}))
+
+	r := chi.NewRouter()
+	handler.RegisterWebhooks(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/evolution/messages", bytes.NewBufferString(`{
+		"event":"messages.upsert",
+		"data":{
+			"key":{"remoteJid":"554998208115@s.whatsapp.net","fromMe":false,"id":"MSG-AUDIO-3"},
+			"message":{"audioMessage":{"mimetype":"audio/ogg","seconds":11,"ptt":true}},
+			"messageType":"audioMessage"
+		}
+	}`))
+	rec := httptest.NewRecorder()
+
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	if chatSvc.lastInput.Message.Kind != "AUDIO" {
+		t.Fatalf("expected failed audio to remain AUDIO, got %s", chatSvc.lastInput.Message.Kind)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["audio_data_url"])); got == "" {
+		t.Fatal("expected audio_data_url to be stored when fetch succeeds")
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["transcription_status"])); got != "FAILED" {
+		t.Fatalf("unexpected transcription status: %s", got)
+	}
+	if got := strings.TrimSpace(asString(chatSvc.lastInput.Message.NormalizedPayload["transcription_error"])); got == "" {
+		t.Fatal("expected transcription_error to be set")
 	}
 }
 

@@ -28,6 +28,7 @@ var (
 	confirmedRouteBarePattern        = regexp.MustCompile(`(?i)(?:^|[[:punct:]])\s*de\s+([\p{L}' -]{2,60})\s+(?:para|->|→)\s+([\p{L}' -]{2,60})(?:\b|$)`)
 	originDestinationPattern         = regexp.MustCompile(`(?i)\borigem\s+([\p{L}' -]{2,60})\s+destino\s+([\p{L}' -]{2,60})(?:\b|$)`)
 	routeOriginSelectionPattern      = regexp.MustCompile(`(?i)(?:^|[[:space:][:punct:]])\s*(?:sa[ií]da|saindo|origem)\s+de\s+([\p{L}' -]{2,60})(?:\s*\(([A-Z]{2})\)|\s*/\s*([A-Z]{2}))?(?:\b|$)`)
+	routeQualifierPrefixPattern      = regexp.MustCompile(`(?i)^(?:para|de|origem|saindo de|sa[ií]da de)\s+`)
 )
 
 const (
@@ -666,7 +667,32 @@ func parseDirectAvailabilitySearchInput(text string, observedAt time.Time) (Avai
 		return AvailabilitySearchInput{}, false
 	}
 	if !looksLikeExplicitRouteQuery(body) {
-		return AvailabilitySearchInput{}, false
+		locations := extractCanonicalLocations(body)
+		if len(locations) < 2 {
+			return AvailabilitySearchInput{}, false
+		}
+		folded := foldChatText(body)
+		if !strings.Contains(folded, " para ") && !strings.Contains(body, "->") && !strings.Contains(body, "→") {
+			return AvailabilitySearchInput{}, false
+		}
+
+		origin := locations[0]
+		destination := locations[1]
+		if origin == "" || destination == "" || strings.EqualFold(origin, destination) {
+			return AvailabilitySearchInput{}, false
+		}
+
+		input := AvailabilitySearchInput{
+			Origin:      origin,
+			Destination: destination,
+			TripDate:    extractTripDate(body, observedAt),
+			Qty:         extractPassengerQuantity(body),
+			Limit:       5,
+		}
+		if input.Qty <= 0 {
+			input.Qty = 1
+		}
+		return input, true
 	}
 
 	origin, destination, ok := extractExplicitRouteFromText(body)
@@ -1209,6 +1235,11 @@ func foldChatText(text string) string {
 
 func normalizeLocationDisplayName(value string) string {
 	raw := strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if raw == "" {
+		return ""
+	}
+	raw = routeQualifierPrefixPattern.ReplaceAllString(raw, "")
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}

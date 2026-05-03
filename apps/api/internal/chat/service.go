@@ -614,6 +614,7 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 	memory := buildReprocessMemory(session, history, candidates, observedAt)
 	agentState := buildReprocessAgentState(session, candidates, trigger, observedAt, input.Metadata)
 	buffer := buildReprocessBufferState(session.Metadata, candidates, trigger, observedAt)
+	untranscribedAudio := hasBlockingUntranscribedAudioCandidate(candidates)
 
 	messageMetadata := map[string]interface{}{
 		"agent_ready_for_automation": true,
@@ -622,6 +623,10 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		"automation_requested_at":    observedAt.Format(time.RFC3339Nano),
 		"current_turn_message_ids":   candidateMessageIDs(candidates),
 		"current_turn_body":          joinCandidateBodies(candidates),
+	}
+	if untranscribedAudio {
+		messageMetadata["auto_send_status"] = draftAutoSendStatusReviewNeeded
+		messageMetadata["auto_send_reasons"] = []string{draftAutoSendReasonNonTextTurn}
 	}
 
 	s.logReprocess(
@@ -664,6 +669,17 @@ func (s *Service) Reprocess(ctx context.Context, input ReprocessInput) (Reproces
 		Reason:   "automation_pending",
 		Memory:   memory,
 		Messages: persisted.Messages,
+	}
+	if untranscribedAudio {
+		s.logReprocess(
+			"chat reprocess event=runner_skipped session_id=%s trigger=%s job_run_id=%s reason=untranscribed_audio current_turn_count=%d",
+			persisted.Session.ID,
+			trigger,
+			jobRunID,
+			len(candidates),
+		)
+		result.Reason = "review_required"
+		return result, nil
 	}
 	if !s.canRunAgent() {
 		s.logReprocess(

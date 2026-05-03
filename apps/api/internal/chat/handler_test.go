@@ -3944,6 +3944,134 @@ func TestReprocessUsesDateSelectionToListOriginsAfterDestinationChoice(t *testin
 	}
 }
 
+func TestReprocessUsesTranscribedAudioAsText(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "Tenho datas disponiveis.",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_audio_text_1",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner)
+
+	session, err := store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+	})
+	if err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := store.CreateMessage(context.Background(), CreateMessageInput{
+		SessionID:         session.ID,
+		Direction:         "INBOUND",
+		Kind:              "AUDIO",
+		ProviderMessageID: "msg-audio-text-1",
+		IdempotencyKey:    "idem-audio-text-1",
+		Body:              "quais datas disponiveis",
+		NormalizedPayload: map[string]interface{}{
+			"transcription_status": "COMPLETED",
+			"transcription_text":   "quais datas disponiveis",
+		},
+		ProcessingStatus: "RECEIVED",
+		ReceivedAt:       now,
+	}); err != nil {
+		t.Fatalf("create audio message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("expected runner to be called once, got %d", runner.calls)
+	}
+	if !strings.Contains(runner.lastInput.UserPrompt, "quais datas disponiveis") {
+		t.Fatalf("expected runner prompt to include transcribed text, got %q", runner.lastInput.UserPrompt)
+	}
+	if got := len(runner.lastInput.CurrentTurnMedia); got != 0 {
+		t.Fatalf("expected no media inputs for transcribed audio, got %d", got)
+	}
+}
+
+func TestReprocessSkipsRunnerForUntranscribedAudio(t *testing.T) {
+	store := newFakeStore()
+	runner := &fakeAgentRunner{
+		enabled: true,
+		result: RunAgentResult{
+			ReplyText:          "draft",
+			Model:              "gpt-test",
+			ProviderResponseID: "resp_audio_skip_1",
+		},
+	}
+	svc := NewService(store, config.Config{ChatDebounceWindowMS: 1500}, runner)
+
+	session, err := store.UpsertSession(context.Background(), UpsertSessionInput{
+		Channel:       "WHATSAPP",
+		ContactKey:    "5511999999999",
+		CustomerPhone: "5511999999999",
+	})
+	if err != nil {
+		t.Fatalf("upsert session: %v", err)
+	}
+	now := time.Now().UTC()
+	message, err := store.CreateMessage(context.Background(), CreateMessageInput{
+		SessionID:         session.ID,
+		Direction:         "INBOUND",
+		Kind:              "AUDIO",
+		ProviderMessageID: "msg-audio-skip-1",
+		IdempotencyKey:    "idem-audio-skip-1",
+		ProcessingStatus:  "RECEIVED",
+		ReceivedAt:        now,
+	})
+	if err != nil {
+		t.Fatalf("create audio message: %v", err)
+	}
+
+	handler := NewHandler(svc)
+	r := chi.NewRouter()
+	handler.RegisterRoutes(r)
+
+	req := httptest.NewRequest(http.MethodPost, "/chat/sessions/"+session.ID+"/reprocess", bytes.NewBufferString(`{}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("expected runner to be skipped, got %d calls", runner.calls)
+	}
+	var out ReprocessResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Draft != nil {
+		t.Fatalf("expected no draft when audio is untranscribed, got %+v", out.Draft)
+	}
+	if out.Reason != "review_required" {
+		t.Fatalf("expected review_required reason, got %s", out.Reason)
+	}
+	updated := store.messages[message.ID]
+	if got := strings.TrimSpace(asString(updated.NormalizedPayload["auto_send_status"])); got != draftAutoSendStatusReviewNeeded {
+		t.Fatalf("expected auto_send_status %s, got %s", draftAutoSendStatusReviewNeeded, got)
+	}
+	reasons := asStringSlice(updated.NormalizedPayload["auto_send_reasons"])
+	if len(reasons) != 1 || reasons[0] != draftAutoSendReasonNonTextTurn {
+		t.Fatalf("expected non_text_turn review reason, got %+v", reasons)
+	}
+}
+
 func TestReprocessReturnsBadGatewayWhenAvailabilityToolFails(t *testing.T) {
 	store := newFakeStore()
 	runner := &fakeAgentRunner{
